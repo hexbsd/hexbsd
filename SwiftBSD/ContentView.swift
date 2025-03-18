@@ -323,6 +323,23 @@ let mockSystemUpdates: [SystemUpdate] = [
     SystemUpdate(type: "Base System", description: "Userland utilities update", status: "Pending")
 ]
 
+struct VirtualMachine: Identifiable {
+    let id = UUID()
+    let name: String
+    let status: String
+    let cpuCores: Int
+    let memory: String
+    let diskSize: String
+}
+
+let mockVirtualMachines: [VirtualMachine] = [
+    VirtualMachine(name: "FreeBSD-13.2", status: "Running", cpuCores: 4, memory: "8 GB", diskSize: "50 GB"),
+    VirtualMachine(name: "Ubuntu-22.04", status: "Stopped", cpuCores: 2, memory: "4 GB", diskSize: "30 GB"),
+    VirtualMachine(name: "Windows-10", status: "Running", cpuCores: 8, memory: "16 GB", diskSize: "100 GB"),
+    VirtualMachine(name: "Alpine-Linux", status: "Running", cpuCores: 1, memory: "512 MB", diskSize: "10 GB"),
+    VirtualMachine(name: "OpenBSD-7.4", status: "Stopped", cpuCores: 2, memory: "2 GB", diskSize: "20 GB")
+]
+
 struct DetailView: View {
     let section: SidebarSection
     let serverAddress: String
@@ -552,6 +569,40 @@ struct DetailView: View {
                         // UI-only mockup, does nothing
                     }
                     Button("Apply Updates") {
+                        // UI-only mockup, does nothing
+                    }
+                    .disabled(true) // Always disabled in mockup
+                }
+                .padding(.top, 10)
+            } else if section == .virtualMachines {
+                Text("Virtual Machines (bhyve)")
+                    .font(.largeTitle)
+                    .bold()
+                    .padding(.bottom, 10)
+
+                Table(mockVirtualMachines) {
+                    TableColumn("Name", value: \.name)
+                    TableColumn("Status", value: \.status)
+                    TableColumn("CPU Cores") { Text("\($0.cpuCores)") }
+                    TableColumn("Memory", value: \.memory)
+                    TableColumn("Disk Size", value: \.diskSize)
+                }
+
+                HStack {
+                    Button("Create") {
+                        // UI-only mockup, does nothing
+                    }
+                    Button("Start") {
+                        // UI-only mockup, does nothing
+                    }
+                    .disabled(true) // Always disabled in mockup
+
+                    Button("Stop") {
+                        // UI-only mockup, does nothing
+                    }
+                    .disabled(true) // Always disabled in mockup
+
+                    Button("Delete") {
                         // UI-only mockup, does nothing
                     }
                     .disabled(true) // Always disabled in mockup
