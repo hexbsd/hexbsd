@@ -75,7 +75,7 @@ struct ContentView: View {
                     }
                     .buttonStyle(.borderedProminent)
 
-                    Button("Help") {
+                    Button("Documentation") {
                         if let url = URL(string: "https://swiftbsd.example.com/help") {
                             #if os(macOS)
                             NSWorkspace.shared.open(url)
