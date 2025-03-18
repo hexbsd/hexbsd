@@ -286,6 +286,28 @@ let mockZFSDatasets: [ZFSDataset] = [
     ZFSDataset(name: "tank/backups", pool: "tank", used: "500 GB", mountpoint: "/mnt/backups")
 ]
 
+struct SystemSettings {
+    let hostname: String
+    let timezone: String
+    let defaultShell: String
+    let availableTimezones: [String]
+    let availableShells: [String]
+}
+
+let mockSystemSettings = SystemSettings(
+    hostname: "freebsd-server",
+    timezone: "US/Eastern",
+    defaultShell: "/bin/sh",
+    availableTimezones: [
+        "US/Pacific", "US/Mountain", "US/Central", "US/Eastern",
+        "UTC", "Europe/London", "Europe/Paris", "Asia/Tokyo"
+    ],
+    availableShells: [
+        "/bin/sh", "/bin/csh", "/usr/local/bin/zsh",
+        "/usr/local/bin/fish", "/bin/bash"
+    ]
+)
+
 struct DetailView: View {
     let section: SidebarSection
     let serverAddress: String
@@ -440,6 +462,45 @@ struct DetailView: View {
                     TableColumn("Used", value: \.used)
                     TableColumn("Mountpoint", value: \.mountpoint)
                 }
+            } else if section == .system {
+                Text("System Settings")
+                    .font(.largeTitle)
+                    .bold()
+                    .padding(.bottom, 10)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Hostname: \(mockSystemSettings.hostname)")
+                        .font(.title2)
+                        .bold()
+
+                    Text("Current Timezone: \(mockSystemSettings.timezone)")
+                        .font(.title2)
+                        .bold()
+
+                    Picker("Select Timezone", selection: .constant(mockSystemSettings.timezone)) {
+                        ForEach(mockSystemSettings.availableTimezones, id: \.self) { timezone in
+                            Text(timezone)
+                        }
+                    }
+                    .pickerStyle(MenuPickerStyle())
+                    .padding(.top, 10)
+
+                    Text("Default Shell: \(mockSystemSettings.defaultShell)")
+                        .font(.title2)
+                        .bold()
+
+                    Picker("Select Shell", selection: .constant(mockSystemSettings.defaultShell)) {
+                        ForEach(mockSystemSettings.availableShells, id: \.self) { shell in
+                            Text(shell)
+                        }
+                    }
+                    .pickerStyle(MenuPickerStyle())
+                    .padding(.top, 10)
+                }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.gray.opacity(0.2)))
+                .padding()
             } else if section == .status {
                 Text("System Status Dashboard")
                     .font(.largeTitle)
