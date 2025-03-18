@@ -103,6 +103,27 @@ let mockNetworkInterfaces: [NetworkInterface] = [
     NetworkInterface(name: "lo0", type: "Loopback", ipAddress: "127.0.0.1", status: "Active")
 ]
 
+struct Package: Identifiable {
+    let id = UUID()
+    let name: String
+    let version: String
+    let description: String
+}
+
+let mockPackages: [Package] = [
+    Package(name: "pkg", version: "1.18.4", description: "Package management tool for FreeBSD"),
+    Package(name: "poudriere", version: "3.3.7", description: "Port building and testing system"),
+    Package(name: "nginx", version: "1.24.0", description: "High-performance HTTP server and reverse proxy"),
+    Package(name: "openssl", version: "3.0.8", description: "Cryptography and SSL/TLS toolkit"),
+    Package(name: "python", version: "3.9.16", description: "Interpreted, interactive, object-oriented programming language"),
+    Package(name: "git", version: "2.41.0", description: "Distributed version control system"),
+    Package(name: "zfs", version: "2.1.9", description: "OpenZFS filesystem and volume manager"),
+    Package(name: "vim", version: "9.0.1500", description: "Improved version of the vi editor"),
+    Package(name: "bash", version: "5.2.15", description: "GNU Bourne Again Shell"),
+    Package(name: "tmux", version: "3.3a", description: "Terminal multiplexer"),
+    Package(name: "sudo", version: "1.9.14p3", description: "Allow users to run commands as root")
+]
+
 struct ContentView: View {
     @State private var selectedSection: SidebarSection?
     @State private var showConnectSheet = false
@@ -169,7 +190,18 @@ struct DetailView: View {
 
     var body: some View {
         VStack {
-            if section == .network {
+            if section == .packages {
+                Text("Installed Packages")
+                    .font(.largeTitle)
+                    .bold()
+                    .padding(.bottom, 10)
+
+                Table(mockPackages) {
+                    TableColumn("Name", value: \.name)
+                    TableColumn("Version", value: \.version)
+                    TableColumn("Description", value: \.description)
+                }
+            } else if section == .network {
                 Text("Network Interfaces")
                     .font(.largeTitle)
                     .bold()
