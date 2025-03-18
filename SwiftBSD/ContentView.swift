@@ -255,6 +255,37 @@ struct ContentView: View {
     }
 }
 
+// MARK: - ZFS Storage Models
+struct ZFSPool: Identifiable {
+    let id = UUID()
+    let name: String
+    let size: String
+    let used: String
+    let available: String
+    let status: String
+}
+
+struct ZFSDataset: Identifiable {
+    let id = UUID()
+    let name: String
+    let pool: String
+    let used: String
+    let mountpoint: String
+}
+
+let mockZFSPools: [ZFSPool] = [
+    ZFSPool(name: "zroot", size: "500 GB", used: "120 GB", available: "380 GB", status: "ONLINE"),
+    ZFSPool(name: "tank", size: "2 TB", used: "1.5 TB", available: "500 GB", status: "DEGRADED")
+]
+
+let mockZFSDatasets: [ZFSDataset] = [
+    ZFSDataset(name: "zroot/ROOT", pool: "zroot", used: "5 GB", mountpoint: "/"),
+    ZFSDataset(name: "zroot/usr", pool: "zroot", used: "50 GB", mountpoint: "/usr"),
+    ZFSDataset(name: "zroot/var", pool: "zroot", used: "20 GB", mountpoint: "/var"),
+    ZFSDataset(name: "tank/media", pool: "tank", used: "1 TB", mountpoint: "/mnt/media"),
+    ZFSDataset(name: "tank/backups", pool: "tank", used: "500 GB", mountpoint: "/mnt/backups")
+]
+
 struct DetailView: View {
     let section: SidebarSection
     let serverAddress: String
@@ -367,7 +398,7 @@ struct DetailView: View {
                     .disabled(true) // Always disabled in mockup
                 }
                 .padding(.top, 10)
-    } else if section == .sharing {
+            } else if section == .sharing {
                 Text("NFS Exports")
                     .font(.largeTitle)
                     .bold()
@@ -377,6 +408,37 @@ struct DetailView: View {
                     TableColumn("Path", value: \.path)
                     TableColumn("Clients", value: \.clients)
                     TableColumn("Options", value: \.options)
+                }
+            } else if section == .storage {
+                Text("ZFS Storage")
+                    .font(.largeTitle)
+                    .bold()
+                    .padding(.bottom, 10)
+
+                Text("ZFS Pools")
+                    .font(.title2)
+                    .bold()
+                    .padding(.top, 10)
+
+                Table(mockZFSPools) {
+                    TableColumn("Pool Name", value: \.name)
+                    TableColumn("Size", value: \.size)
+                    TableColumn("Used", value: \.used)
+                    TableColumn("Available", value: \.available)
+                    TableColumn("Status", value: \.status)
+                }
+                .padding(.bottom, 20)
+
+                Text("ZFS Datasets")
+                    .font(.title2)
+                    .bold()
+                    .padding(.top, 10)
+
+                Table(mockZFSDatasets) {
+                    TableColumn("Dataset Name", value: \.name)
+                    TableColumn("Pool", value: \.pool)
+                    TableColumn("Used", value: \.used)
+                    TableColumn("Mountpoint", value: \.mountpoint)
                 }
             } else if section == .status {
                 Text("System Status Dashboard")
