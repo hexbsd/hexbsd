@@ -7,6 +7,24 @@
 
 import SwiftUI
 
+struct SystemStatus {
+    let cpuUsage: String
+    let memoryUsage: String
+    let zfsArcUsage: String
+    let storageUsage: String
+    let uptime: String
+    let loadAverage: String
+}
+
+let mockSystemStatus = SystemStatus(
+    cpuUsage: "15%",
+    memoryUsage: "8 GB / 16 GB",
+    zfsArcUsage: "4 GB / 8 GB",
+    storageUsage: "120 GB / 500 GB",
+    uptime: "5 days, 12 hours",
+    loadAverage: "0.85, 0.76, 0.72"
+)
+
 enum SidebarSection: String, CaseIterable, Identifiable {
     case accounts = "Accounts"
     case jails = "Jails"
@@ -349,7 +367,7 @@ struct DetailView: View {
                     .disabled(true) // Always disabled in mockup
                 }
                 .padding(.top, 10)
-            } else if section == .sharing {
+    } else if section == .sharing {
                 Text("NFS Exports")
                     .font(.largeTitle)
                     .bold()
@@ -360,6 +378,25 @@ struct DetailView: View {
                     TableColumn("Clients", value: \.clients)
                     TableColumn("Options", value: \.options)
                 }
+            } else if section == .status {
+                Text("System Status Dashboard")
+                    .font(.largeTitle)
+                    .bold()
+                    .padding(.bottom, 10)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("CPU Usage: \(mockSystemStatus.cpuUsage)")
+                    Text("Memory Usage: \(mockSystemStatus.memoryUsage)")
+                    Text("ZFS ARC Usage: \(mockSystemStatus.zfsArcUsage)")
+                    Text("Storage Usage: \(mockSystemStatus.storageUsage)")
+                    Text("Uptime: \(mockSystemStatus.uptime)")
+                    Text("Load Average: \(mockSystemStatus.loadAverage)")
+                }
+                .font(.title2)
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.gray.opacity(0.2)))
+                .padding()
             } else {
                 Text(section.rawValue)
                     .font(.largeTitle)
