@@ -65,6 +65,21 @@ let mockAccounts: [UserAccount] = [
     UserAccount(username: "brad", uid: 1011, primaryGroup: "engineers", additionalGroups: ["finance"], shell: "/bin/bash", homeDirectory: "/home/brad")
 ]
 
+struct NFSExport: Identifiable {
+    let id = UUID()
+    let path: String
+    let clients: String
+    let options: String
+}
+
+let mockNFSExports: [NFSExport] = [
+    NFSExport(path: "/mnt/storage", clients: "192.168.1.0/24", options: "rw,sync,no_root_squash"),
+    NFSExport(path: "/home", clients: "10.0.0.0/16", options: "ro,sync,all_squash"),
+    NFSExport(path: "/usr/ports", clients: "192.168.2.0/24", options: "rw,no_subtree_check"),
+    NFSExport(path: "/var/backups", clients: "backup.local", options: "rw,sync,no_root_squash"),
+    NFSExport(path: "/exports/media", clients: "192.168.3.100", options: "ro,async")
+]
+
 struct Jail: Identifiable {
     let id = UUID()
     let name: String
@@ -334,6 +349,17 @@ struct DetailView: View {
                     .disabled(true) // Always disabled in mockup
                 }
                 .padding(.top, 10)
+            } else if section == .sharing {
+                Text("NFS Exports")
+                    .font(.largeTitle)
+                    .bold()
+                    .padding(.bottom, 10)
+
+                Table(mockNFSExports) {
+                    TableColumn("Path", value: \.path)
+                    TableColumn("Clients", value: \.clients)
+                    TableColumn("Options", value: \.options)
+                }
             } else {
                 Text(section.rawValue)
                     .font(.largeTitle)
