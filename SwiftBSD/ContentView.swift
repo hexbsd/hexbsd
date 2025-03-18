@@ -65,6 +65,27 @@ let mockAccounts: [UserAccount] = [
     UserAccount(username: "brad", uid: 1011, primaryGroup: "engineers", additionalGroups: ["finance"], shell: "/bin/bash", homeDirectory: "/home/brad")
 ]
 
+struct Jail: Identifiable {
+    let id = UUID()
+    let name: String
+    let ipAddress: String
+    let status: String
+    let services: [String]
+}
+
+let mockJails: [Jail] = [
+    Jail(name: "nginx", ipAddress: "192.168.1.10", status: "Running", services: ["Web Server"]),
+    Jail(name: "squid", ipAddress: "192.168.1.11", status: "Running", services: ["Proxy Server"]),
+    Jail(name: "postgresql", ipAddress: "192.168.1.12", status: "Stopped", services: ["Database Server"]),
+    Jail(name: "redis", ipAddress: "192.168.1.13", status: "Running", services: ["Caching Server"]),
+    Jail(name: "unbound", ipAddress: "192.168.1.14", status: "Running", services: ["DNS Resolver"]),
+    Jail(name: "openvpn", ipAddress: "192.168.1.15", status: "Stopped", services: ["VPN Server"]),
+    Jail(name: "mailserver", ipAddress: "192.168.1.16", status: "Running", services: ["Email Server"]),
+    Jail(name: "gitlab", ipAddress: "192.168.1.17", status: "Running", services: ["Git Hosting"]),
+    Jail(name: "nextcloud", ipAddress: "192.168.1.18", status: "Stopped", services: ["Cloud Storage"]),
+    Jail(name: "plex", ipAddress: "192.168.1.19", status: "Running", services: ["Media Server"])
+]
+
 struct ContentView: View {
     @State private var selectedSection: SidebarSection?
     @State private var showConnectSheet = false
@@ -144,6 +165,34 @@ struct DetailView: View {
                     TableColumn("Additional Groups") { Text($0.additionalGroups.joined(separator: ", ")) }
                     TableColumn("Shell", value: \.shell)
                     TableColumn("Home Directory", value: \.homeDirectory)
+                }
+
+                HStack {
+                    Button("Add") {
+                        // UI-only mockup, does nothing
+                    }
+                    Button("Edit") {
+                        // UI-only mockup, does nothing
+                    }
+                    .disabled(true) // Always disabled in mockup
+
+                    Button("Remove") {
+                        // UI-only mockup, does nothing
+                    }
+                    .disabled(true) // Always disabled in mockup
+                }
+                .padding(.top, 10)
+            } else if section == .jails {
+                Text("Jails")
+                    .font(.largeTitle)
+                    .bold()
+                    .padding(.bottom, 10)
+
+                Table(mockJails) {
+                    TableColumn("Name", value: \.name)
+                    TableColumn("IP Address", value: \.ipAddress)
+                    TableColumn("Status") { Text($0.status) }
+                    TableColumn("Services") { Text($0.services.joined(separator: ", ")) }
                 }
 
                 HStack {
