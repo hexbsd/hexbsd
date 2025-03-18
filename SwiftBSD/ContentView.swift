@@ -41,6 +41,23 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     }
 }
 
+struct UserAccount: Identifiable {
+    let id = UUID()
+    let username: String
+    let uid: Int
+    let primaryGroup: String
+    let additionalGroups: [String]
+    let shell: String
+    let homeDirectory: String
+}
+
+let mockAccounts: [UserAccount] = [
+    UserAccount(username: "root", uid: 0, primaryGroup: "wheel", additionalGroups: ["operator"], shell: "/bin/csh", homeDirectory: "/root"),
+    UserAccount(username: "jdoe", uid: 1001, primaryGroup: "users", additionalGroups: ["wheel", "ssh", "staff"], shell: "/bin/sh", homeDirectory: "/home/jdoe"),
+    UserAccount(username: "asmith", uid: 1002, primaryGroup: "users", additionalGroups: ["ssh"], shell: "/usr/local/bin/zsh", homeDirectory: "/home/asmith"),
+    UserAccount(username: "guest", uid: 1003, primaryGroup: "guest", additionalGroups: [], shell: "/bin/false", homeDirectory: "/nonexistent")
+]
+
 struct ContentView: View {
     @State private var selectedSection: SidebarSection?
     @State private var showConnectSheet = false
@@ -107,9 +124,25 @@ struct DetailView: View {
 
     var body: some View {
         VStack {
-            Text(section.rawValue)
-                .font(.largeTitle)
-                .bold()
+            if section == .accounts {
+                Text("User Accounts")
+                    .font(.largeTitle)
+                    .bold()
+                    .padding(.bottom, 10)
+
+                Table(mockAccounts.filter { $0.username != "root" }) {
+                    TableColumn("Username", value: \.username)
+                    TableColumn("UID") { Text("\($0.uid)") }
+                    TableColumn("Primary Group", value: \.primaryGroup)
+                    TableColumn("Additional Groups") { Text($0.additionalGroups.joined(separator: ", ")) }
+                    TableColumn("Shell", value: \.shell)
+                    TableColumn("Home Directory", value: \.homeDirectory)
+                }
+            } else {
+                Text(section.rawValue)
+                    .font(.largeTitle)
+                    .bold()
+            }
             Spacer()
         }
         .padding()
