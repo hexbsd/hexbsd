@@ -308,6 +308,21 @@ let mockSystemSettings = SystemSettings(
     ]
 )
 
+struct SystemUpdate: Identifiable {
+    let id = UUID()
+    let type: String
+    let description: String
+    let status: String
+}
+
+let mockSystemUpdates: [SystemUpdate] = [
+    SystemUpdate(type: "Security", description: "OpenSSL vulnerability fix", status: "Pending"),
+    SystemUpdate(type: "Kernel", description: "Kernel update to 13.2-RELEASE-p5", status: "Pending"),
+    SystemUpdate(type: "Packages", description: "pkg updated to 1.18.5", status: "Installed"),
+    SystemUpdate(type: "Packages", description: "vim updated to 9.0.1600", status: "Pending"),
+    SystemUpdate(type: "Base System", description: "Userland utilities update", status: "Pending")
+]
+
 struct DetailView: View {
     let section: SidebarSection
     let serverAddress: String
@@ -506,7 +521,7 @@ struct DetailView: View {
                     .font(.largeTitle)
                     .bold()
                     .padding(.bottom, 10)
-
+ 
                 VStack(alignment: .leading, spacing: 10) {
                     Text("CPU Usage: \(mockSystemStatus.cpuUsage)")
                     Text("Memory Usage: \(mockSystemStatus.memoryUsage)")
@@ -520,6 +535,28 @@ struct DetailView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color.gray.opacity(0.2)))
                 .padding()
+            } else if section == .updates {
+                Text("System Updates")
+                    .font(.largeTitle)
+                    .bold()
+                    .padding(.bottom, 10)
+
+                Table(mockSystemUpdates) {
+                    TableColumn("Type", value: \.type)
+                    TableColumn("Description", value: \.description)
+                    TableColumn("Status", value: \.status)
+                }
+
+                HStack {
+                    Button("Check for Updates") {
+                        // UI-only mockup, does nothing
+                    }
+                    Button("Apply Updates") {
+                        // UI-only mockup, does nothing
+                    }
+                    .disabled(true) // Always disabled in mockup
+                }
+                .padding(.top, 10)
             } else {
                 Text(section.rawValue)
                     .font(.largeTitle)
