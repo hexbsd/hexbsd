@@ -86,6 +86,23 @@ let mockJails: [Jail] = [
     Jail(name: "plex", ipAddress: "192.168.1.19", status: "Running", services: ["Media Server"])
 ]
 
+struct NetworkInterface: Identifiable {
+    let id = UUID()
+    let name: String
+    let type: String
+    let ipAddress: String
+    let status: String
+}
+
+let mockNetworkInterfaces: [NetworkInterface] = [
+    NetworkInterface(name: "em0", type: "Intel 10G", ipAddress: "192.168.1.100", status: "Active"),
+    NetworkInterface(name: "em1", type: "Intel 10G", ipAddress: "192.168.1.101", status: "Active"),
+    NetworkInterface(name: "re0", type: "Realtek 1G", ipAddress: "192.168.1.102", status: "Inactive"),
+    NetworkInterface(name: "bridge0", type: "Bridge", ipAddress: "192.168.1.1", status: "Active"),
+    NetworkInterface(name: "vlan10", type: "VLAN", ipAddress: "192.168.10.1", status: "Active"),
+    NetworkInterface(name: "lo0", type: "Loopback", ipAddress: "127.0.0.1", status: "Active")
+]
+
 struct ContentView: View {
     @State private var selectedSection: SidebarSection?
     @State private var showConnectSheet = false
@@ -152,7 +169,19 @@ struct DetailView: View {
 
     var body: some View {
         VStack {
-            if section == .accounts {
+            if section == .network {
+                Text("Network Interfaces")
+                    .font(.largeTitle)
+                    .bold()
+                    .padding(.bottom, 10)
+
+                Table(mockNetworkInterfaces) {
+                    TableColumn("Name", value: \.name)
+                    TableColumn("Type", value: \.type)
+                    TableColumn("IP Address", value: \.ipAddress)
+                    TableColumn("Status", value: \.status)
+                }
+            } else if section == .accounts {
                 Text("User Accounts")
                     .font(.largeTitle)
                     .bold()
