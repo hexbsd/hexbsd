@@ -124,6 +124,44 @@ let mockPackages: [Package] = [
     Package(name: "sudo", version: "1.9.14p3", description: "Allow users to run commands as root")
 ]
 
+struct FirewallRule: Identifiable {
+    let id = UUID()
+    let ruleNumber: Int
+    let action: String
+    let protocolType: String
+    let source: String
+    let destination: String
+    let port: String
+}
+
+let mockFirewallRules: [FirewallRule] = [
+    FirewallRule(ruleNumber: 100, action: "Allow", protocolType: "TCP", source: "192.168.1.0/24", destination: "Any", port: "22 (SSH)"),
+    FirewallRule(ruleNumber: 200, action: "Allow", protocolType: "TCP", source: "Any", destination: "192.168.1.100", port: "80 (HTTP)"),
+    FirewallRule(ruleNumber: 300, action: "Allow", protocolType: "TCP", source: "Any", destination: "192.168.1.100", port: "443 (HTTPS)"),
+    FirewallRule(ruleNumber: 400, action: "Allow", protocolType: "UDP", source: "Any", destination: "192.168.1.255", port: "53 (DNS)"),
+    FirewallRule(ruleNumber: 500, action: "Deny", protocolType: "Any", source: "Any", destination: "Any", port: "Any"),
+]
+
+struct Service: Identifiable {
+    let id = UUID()
+    let name: String
+    let description: String
+    let status: String
+}
+
+let mockServices: [Service] = [
+    Service(name: "sshd", description: "OpenSSH Daemon", status: "Running"),
+    Service(name: "cron", description: "Daemon to execute scheduled commands", status: "Running"),
+    Service(name: "sendmail", description: "Mail Transfer Agent", status: "Stopped"),
+    Service(name: "syslogd", description: "System Logging Daemon", status: "Running"),
+    Service(name: "dhclient", description: "DHCP Client", status: "Running"),
+    Service(name: "ntpd", description: "Network Time Protocol Daemon", status: "Stopped"),
+    Service(name: "devd", description: "Device State Change Daemon", status: "Running"),
+    Service(name: "local_unbound", description: "Local DNS Resolver", status: "Stopped"),
+    Service(name: "zfsd", description: "ZFS Automatic Device Management Daemon", status: "Running"),
+    Service(name: "bgpd", description: "BGP Routing Daemon", status: "Stopped")
+]
+
 struct ContentView: View {
     @State private var selectedSection: SidebarSection?
     @State private var showConnectSheet = false
@@ -190,7 +228,32 @@ struct DetailView: View {
 
     var body: some View {
         VStack {
-            if section == .packages {
+            if section == .services {
+                Text("System Services")
+                    .font(.largeTitle)
+                    .bold()
+                    .padding(.bottom, 10)
+
+                Table(mockServices) {
+                    TableColumn("Name", value: \.name)
+                    TableColumn("Description", value: \.description)
+                    TableColumn("Status", value: \.status)
+                }
+            } else if section == .security {
+                Text("Firewall Manager")
+                    .font(.largeTitle)
+                    .bold()
+                    .padding(.bottom, 10)
+
+                Table(mockFirewallRules) {
+                    TableColumn("Rule #") { Text("\($0.ruleNumber)") }
+                    TableColumn("Action", value: \.action)
+                    TableColumn("Protocol", value: \.protocolType)
+                    TableColumn("Source", value: \.source)
+                    TableColumn("Destination", value: \.destination)
+                    TableColumn("Port", value: \.port)
+                }
+            } else if section == .packages {
                 Text("Installed Packages")
                     .font(.largeTitle)
                     .bold()
