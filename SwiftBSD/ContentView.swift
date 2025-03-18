@@ -71,16 +71,16 @@ struct UserAccount: Identifiable {
 
 let mockAccounts: [UserAccount] = [
     UserAccount(username: "rhendricks", uid: 1001, primaryGroup: "engineers", additionalGroups: ["wheel", "ssh", "staff"], shell: "/bin/sh", homeDirectory: "/home/rhendricks"),
-    UserAccount(username: "dgilfoyle", uid: 1002, primaryGroup: "engineers", additionalGroups: ["wheel", "security"], shell: "/bin/bash", homeDirectory: "/home/dgilfoyle"),
-    UserAccount(username: "bertram", uid: 1003, primaryGroup: "engineers", additionalGroups: ["games"], shell: "/usr/local/bin/fish", homeDirectory: "/home/bertram"),
+    UserAccount(username: "dgilfoyle", uid: 1002, primaryGroup: "engineers", additionalGroups: ["wheel", "security"], shell: "/bin/sh", homeDirectory: "/home/dgilfoyle"),
+    UserAccount(username: "bertram", uid: 1003, primaryGroup: "engineers", additionalGroups: ["games"], shell: "/bin/sh", homeDirectory: "/home/bertram"),
     UserAccount(username: "cbradley", uid: 1004, primaryGroup: "engineers", additionalGroups: ["dev"], shell: "/bin/csh", homeDirectory: "/home/cbradley"),
     UserAccount(username: "jpmcmillan", uid: 1005, primaryGroup: "engineers", additionalGroups: ["qa"], shell: "/bin/sh", homeDirectory: "/home/jpmcmillan"),
-    UserAccount(username: "rtrung", uid: 1006, primaryGroup: "engineers", additionalGroups: ["devops"], shell: "/usr/bin/zsh", homeDirectory: "/home/rtrung"),
+    UserAccount(username: "rtrung", uid: 1006, primaryGroup: "engineers", additionalGroups: ["devops"], shell: "/bin/sh", homeDirectory: "/home/rtrung"),
     UserAccount(username: "nelsonbighetti", uid: 1007, primaryGroup: "engineers", additionalGroups: ["marketing"], shell: "/bin/sh", homeDirectory: "/home/nelsonbighetti"),
-    UserAccount(username: "ian", uid: 1008, primaryGroup: "engineers", additionalGroups: ["game-dev"], shell: "/bin/zsh", homeDirectory: "/home/ian"),
-    UserAccount(username: "poppy", uid: 1009, primaryGroup: "engineers", additionalGroups: ["game-dev", "qa"], shell: "/bin/fish", homeDirectory: "/home/poppy"),
+    UserAccount(username: "ian", uid: 1008, primaryGroup: "engineers", additionalGroups: ["game-dev"], shell: "/bin/sh", homeDirectory: "/home/ian"),
+    UserAccount(username: "poppy", uid: 1009, primaryGroup: "engineers", additionalGroups: ["game-dev", "qa"], shell: "/bin/sh", homeDirectory: "/home/poppy"),
     UserAccount(username: "jo", uid: 1010, primaryGroup: "engineers", additionalGroups: ["executive"], shell: "/bin/sh", homeDirectory: "/home/jo"),
-    UserAccount(username: "brad", uid: 1011, primaryGroup: "engineers", additionalGroups: ["finance"], shell: "/bin/bash", homeDirectory: "/home/brad")
+    UserAccount(username: "brad", uid: 1011, primaryGroup: "engineers", additionalGroups: ["finance"], shell: "/bin/csh", homeDirectory: "/home/brad")
 ]
 
 struct NFSExport: Identifiable {
