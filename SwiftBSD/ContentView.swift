@@ -145,6 +145,22 @@ struct DetailView: View {
                     TableColumn("Shell", value: \.shell)
                     TableColumn("Home Directory", value: \.homeDirectory)
                 }
+
+                HStack {
+                    Button("Add") {
+                        // UI-only mockup, does nothing
+                    }
+                    Button("Edit") {
+                        // UI-only mockup, does nothing
+                    }
+                    .disabled(true) // Always disabled in mockup
+
+                    Button("Remove") {
+                        // UI-only mockup, does nothing
+                    }
+                    .disabled(true) // Always disabled in mockup
+                }
+                .padding(.top, 10)
             } else {
                 Text(section.rawValue)
                     .font(.largeTitle)
