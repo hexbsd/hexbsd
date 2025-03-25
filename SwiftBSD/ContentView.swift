@@ -434,7 +434,7 @@ struct DetailView: View {
                     TableColumn("Name", value: \.name)
                     TableColumn("IP Address", value: \.ipAddress)
                     TableColumn("Status") { Text($0.status) }
-                    TableColumn("Services") { Text($0.services.joined(separator: ", ")) }
+//                    TableColumn("Services") { Text($0.services.joined(separator: ", ")) }
                 }
 
                 HStack {
