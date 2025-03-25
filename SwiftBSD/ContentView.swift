@@ -394,6 +394,21 @@ struct DetailView: View {
                     TableColumn("IP Address", value: \.ipAddress)
                     TableColumn("Status", value: \.status)
                 }
+                HStack {
+                    Button("Enable") {
+                        // UI-only mockup, does nothing
+                    }
+                    Button("Edit") {
+                        // UI-only mockup, does nothing
+                    }
+                    .disabled(true) // Always disabled in mockup
+
+                    Button("Disable") {
+                        // UI-only mockup, does nothing
+                    }
+                    .disabled(true) // Always disabled in mockup
+                }
+                .padding(.top, 10)
             } else if section == .accounts {
                 Text("User Accounts")
                     .font(.largeTitle)
@@ -445,11 +460,20 @@ struct DetailView: View {
                         // UI-only mockup, does nothing
                     }
                     .disabled(true) // Always disabled in mockup
-
+                    
                     Button("Remove") {
                         // UI-only mockup, does nothing
                     }
                     .disabled(true) // Always disabled in mockup
+                    
+                    Button("Start") {
+                    }
+                    .disabled(true)
+                    
+                    Button("Stop") {
+                    }
+                    .disabled(true)
+                    
                 }
                 .padding(.top, 10)
             } else if section == .sharing {
