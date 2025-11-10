@@ -39,6 +39,11 @@ class SSHConnectionManager {
     // SSH client
     private var client: SSHClient?
 
+    // Network rate tracking
+    private var lastNetworkIn: UInt64 = 0
+    private var lastNetworkOut: UInt64 = 0
+    private var lastNetworkTime: Date?
+
     // Private initializer to enforce singleton
     private init() {}
 
@@ -282,13 +287,50 @@ extension SSHConnectionManager {
         let dfOutput = try await executeCommand("df -h /")
         let (storageUsed, storageTotal) = parseStorageUsage(dfOutput)
 
+        // Get network statistics and calculate rates
+        var networkIn = "0 KB/s"
+        var networkOut = "0 KB/s"
+
+        do {
+            // Get raw netstat output
+            let netstatOutput = try await executeCommand("netstat -ib | grep -v lo0")
+            let (currentIn, currentOut) = parseNetstatBytes(netstatOutput)
+
+            print("DEBUG: Current bytes - In: \(currentIn), Out: \(currentOut)")
+
+            // Calculate rate if we have a previous measurement
+            let now = Date()
+            if let lastTime = lastNetworkTime {
+                let timeInterval = now.timeIntervalSince(lastTime)
+                if timeInterval > 0 {
+                    let inRate = Double(currentIn - lastNetworkIn) / timeInterval
+                    let outRate = Double(currentOut - lastNetworkOut) / timeInterval
+
+                    networkIn = formatBytesPerSecond(inRate)
+                    networkOut = formatBytesPerSecond(outRate)
+
+                    print("DEBUG: Network rates - In: \(networkIn), Out: \(networkOut) (over \(String(format: "%.1f", timeInterval))s)")
+                }
+            }
+
+            // Store current values for next calculation
+            lastNetworkIn = currentIn
+            lastNetworkOut = currentOut
+            lastNetworkTime = now
+        } catch {
+            print("DEBUG: Network stats error: \(error)")
+            // Continue with defaults
+        }
+
         return SystemStatus(
             cpuUsage: String(format: "%.1f%%", cpuUsage),
             memoryUsage: String(format: "%.1f GB / %.1f GB", usedMem, totalMem),
             zfsArcUsage: String(format: "%.1f GB / %.1f GB", arcUsed, arcMax),
             storageUsage: String(format: "%.1f GB / %.1f GB", storageUsed, storageTotal),
             uptime: uptime,
-            loadAverage: String(format: "%.2f, %.2f, %.2f", loads.0, loads.1, loads.2)
+            loadAverage: String(format: "%.2f, %.2f, %.2f", loads.0, loads.1, loads.2),
+            networkIn: networkIn,
+            networkOut: networkOut
         )
     }
 
@@ -389,5 +431,107 @@ extension SSHConnectionManager {
             return number / 1024
         }
         return number
+    }
+
+    private func parseSystatOutput(_ output: String) -> (inbound: String, outbound: String) {
+        // Parse systat -ifstat output
+        // Look for lines with interface data showing KB/s or MB/s
+        let lines = output.components(separatedBy: .newlines).filter { !$0.isEmpty }
+
+        var totalInKB: Double = 0
+        var totalOutKB: Double = 0
+
+        for line in lines {
+            // Skip header lines
+            if line.contains("Interface") || line.contains("---") {
+                continue
+            }
+
+            let components = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            // Typical systat format has KB/s in specific columns
+            if components.count >= 5 {
+                // Try to extract rates (format varies, but typically has In and Out columns)
+                if let inRate = Double(components[components.count - 2]) {
+                    totalInKB += inRate
+                }
+                if let outRate = Double(components[components.count - 1]) {
+                    totalOutKB += outRate
+                }
+            }
+        }
+
+        return (
+            inbound: formatBytesPerSecond(totalInKB * 1024),
+            outbound: formatBytesPerSecond(totalOutKB * 1024)
+        )
+    }
+
+    private func parseNetstatBytes(_ output: String) -> (inbound: UInt64, outbound: UInt64) {
+        // Parse netstat -ib for cumulative bytes
+        let lines = output.components(separatedBy: .newlines).filter { !$0.isEmpty }
+        var totalIn: UInt64 = 0
+        var totalOut: UInt64 = 0
+
+        for (index, line) in lines.enumerated() {
+            // Skip header lines
+            if line.contains("Name") || line.contains("Mtu") || line.contains("<Link#") {
+                continue
+            }
+
+            let components = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+
+            // FreeBSD netstat -ib format:
+            // Name Mtu Network Address Ipkts Ierrs Idrop Ibytes Opkts Oerrs Obytes Coll
+            // Look for lines with numeric data (should have Ibytes and Obytes)
+
+            // Try to find Ibytes and Obytes by looking for large numbers
+            if components.count >= 7 {
+                // Scan from right to left looking for byte counts
+                for i in (0..<components.count).reversed() {
+                    if let value = UInt64(components[i]), value > 1000 {
+                        // This might be Obytes or Ibytes
+                        // Look for two large numbers
+                        if i >= 3 {
+                            if let ibytes = UInt64(components[i-3]), ibytes > 1000,
+                               let obytes = UInt64(components[i]), obytes > 1000 {
+                                totalIn += ibytes
+                                totalOut += obytes
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return (inbound: totalIn, outbound: totalOut)
+    }
+
+    private func formatBytesPerSecond(_ bytesPerSec: Double) -> String {
+        if bytesPerSec >= 1_073_741_824 {
+            return String(format: "%.2f GB/s", bytesPerSec / 1_073_741_824)
+        } else if bytesPerSec >= 1_048_576 {
+            return String(format: "%.2f MB/s", bytesPerSec / 1_048_576)
+        } else if bytesPerSec >= 1024 {
+            return String(format: "%.2f KB/s", bytesPerSec / 1024)
+        } else {
+            return String(format: "%.0f B/s", bytesPerSec)
+        }
+    }
+
+    private func formatBytes(_ bytes: UInt64) -> String {
+        let gb = Double(bytes) / 1_073_741_824
+        let mb = Double(bytes) / 1_048_576
+        let kb = Double(bytes) / 1024
+
+        if gb >= 1 {
+            return String(format: "%.2f GB", gb)
+        } else if mb >= 1 {
+            return String(format: "%.2f MB", mb)
+        } else if kb >= 1 {
+            return String(format: "%.2f KB", kb)
+        } else {
+            return "\(bytes) B"
+        }
     }
 }

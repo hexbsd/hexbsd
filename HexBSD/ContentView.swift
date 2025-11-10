@@ -19,6 +19,8 @@ struct SystemStatus {
     let storageUsage: String
     let uptime: String
     let loadAverage: String
+    let networkIn: String
+    let networkOut: String
 
     // Helper to extract percentage from cpuUsage string
     var cpuPercentage: Double {
@@ -268,6 +270,12 @@ struct ContentView: View {
                 }
             }
         }
+        .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
+            // Auto-refresh dashboard every 5 seconds if connected and viewing dashboard
+            if sshManager.isConnected && selectedSection == .dashboard {
+                loadDataFromServer()
+            }
+        }
     }
 
     func loadSavedServers() {
@@ -318,7 +326,10 @@ struct ContentView: View {
     func loadDataFromServer() {
         Task {
             do {
-                self.systemStatus = try await sshManager.fetchSystemStatus()
+                let status = try await sshManager.fetchSystemStatus()
+                await MainActor.run {
+                    self.systemStatus = status
+                }
             } catch {
                 print("Error loading system status: \(error.localizedDescription)")
             }
@@ -336,12 +347,8 @@ struct DetailView: View {
             if section == .dashboard {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
-                        Text("System Status Dashboard")
-                            .font(.largeTitle)
-                            .bold()
-
                         if let systemStatus = systemStatus {
-                            // Primary metrics grid
+                            // Row 1: CPU and Memory
                             LazyVGrid(columns: [
                                 GridItem(.flexible(), spacing: 20),
                                 GridItem(.flexible(), spacing: 20)
@@ -361,7 +368,13 @@ struct DetailView: View {
                                     color: .green,
                                     systemImage: "memorychip"
                                 )
+                            }
 
+                            // Row 2: Storage and ZFS ARC
+                            LazyVGrid(columns: [
+                                GridItem(.flexible(), spacing: 20),
+                                GridItem(.flexible(), spacing: 20)
+                            ], spacing: 20) {
                                 MetricCard(
                                     title: "Storage",
                                     value: systemStatus.storageUsage,
@@ -379,7 +392,29 @@ struct DetailView: View {
                                 )
                             }
 
-                            // Info cards
+                            // Row 3: Network Traffic (Real-time)
+                            LazyVGrid(columns: [
+                                GridItem(.flexible(), spacing: 20),
+                                GridItem(.flexible(), spacing: 20)
+                            ], spacing: 20) {
+                                MetricCard(
+                                    title: "Network In",
+                                    value: systemStatus.networkIn,
+                                    progress: nil,
+                                    color: .teal,
+                                    systemImage: "arrow.down.circle"
+                                )
+
+                                MetricCard(
+                                    title: "Network Out",
+                                    value: systemStatus.networkOut,
+                                    progress: nil,
+                                    color: .indigo,
+                                    systemImage: "arrow.up.circle"
+                                )
+                            }
+
+                            // Row 4: System Uptime and Load Average
                             LazyVGrid(columns: [
                                 GridItem(.flexible(), spacing: 20),
                                 GridItem(.flexible(), spacing: 20)

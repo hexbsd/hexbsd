@@ -95,6 +95,10 @@ class TerminalCoordinator: NSObject, ObservableObject, TerminalViewDelegate {
     /// Start the interactive shell session
     @available(macOS 15.0, *)
     func startShell() async {
+        await MainActor.run {
+            isConnected = true
+        }
+
         shellTask = Task {
             do {
                 try await sshManager.startInteractiveShell(delegate: self)
@@ -105,7 +109,6 @@ class TerminalCoordinator: NSObject, ObservableObject, TerminalViewDelegate {
                 }
             }
         }
-        isConnected = true
     }
 
     /// Stop the shell session
@@ -113,7 +116,10 @@ class TerminalCoordinator: NSObject, ObservableObject, TerminalViewDelegate {
         shellTask?.cancel()
         shellTask = nil
         stdinWriter = nil
-        isConnected = false
+
+        Task { @MainActor in
+            isConnected = false
+        }
     }
 
     /// Called by SSH manager when shell output is received
