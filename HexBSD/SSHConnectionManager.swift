@@ -256,6 +256,136 @@ class SSHConnectionManager {
             }
         }
     }
+
+    // MARK: - SFTP File Operations
+
+    /// List files in a remote directory
+    func listDirectory(path: String) async throws -> [RemoteFile] {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Use ls command with detailed output
+        let command = "ls -la '\(path)' 2>/dev/null || ls -la ~"
+        let output = try await executeCommand(command)
+
+        return parseLsOutput(output, basePath: path)
+    }
+
+    /// Download a file from the remote server
+    func downloadFile(remotePath: String, localURL: URL) async throws {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Use cat to read the file and save locally
+        let output = try await executeCommand("cat '\(remotePath)'")
+        guard let data = output.data(using: .utf8) else {
+            throw NSError(domain: "SSHConnectionManager", code: 2,
+                         userInfo: [NSLocalizedDescriptionKey: "Failed to convert file data"])
+        }
+
+        try data.write(to: localURL)
+    }
+
+    /// Upload a file to the remote server
+    func uploadFile(localURL: URL, remotePath: String) async throws {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Read local file
+        let data = try Data(contentsOf: localURL)
+        let base64 = data.base64EncodedString()
+
+        // Upload using base64 encoding to handle binary files
+        let command = "echo '\(base64)' | base64 -d > '\(remotePath)'"
+        _ = try await executeCommand(command)
+    }
+
+    /// Delete a file or directory on the remote server
+    func deleteFile(path: String, isDirectory: Bool) async throws {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Use rm -rf for directories, rm for files
+        let command = isDirectory ? "rm -rf '\(path)'" : "rm '\(path)'"
+        _ = try await executeCommand(command)
+    }
+
+    private func parseLsOutput(_ output: String, basePath: String) -> [RemoteFile] {
+        var files: [RemoteFile] = []
+        let lines = output.components(separatedBy: .newlines)
+
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "MMM d HH:mm"
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+
+        for line in lines {
+            // Skip empty lines and total line
+            if line.isEmpty || line.starts(with: "total") {
+                continue
+            }
+
+            let components = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+
+            // Format: permissions links owner group size month day time name
+            // Example: drwxr-xr-x 2 root wheel 512 Jan 10 15:30 Documents
+            guard components.count >= 9 else { continue }
+
+            let permissions = components[0]
+            let isDirectory = permissions.starts(with: "d")
+            let sizeStr = components[4]
+            let month = components[5]
+            let day = components[6]
+            let timeOrYear = components[7]
+            let name = components[8...].joined(separator: " ")
+
+            // Skip . and ..
+            if name == "." || name == ".." {
+                continue
+            }
+
+            // Parse size
+            let size = Int64(sizeStr) ?? 0
+
+            // Parse date
+            let dateStr = "\(month) \(day) \(timeOrYear)"
+            let date = dateFormatter.date(from: dateStr)
+
+            // Build full path
+            let fullPath: String
+            if basePath == "~" || basePath.isEmpty {
+                fullPath = name
+            } else if basePath.hasSuffix("/") {
+                fullPath = basePath + name
+            } else {
+                fullPath = basePath + "/" + name
+            }
+
+            files.append(RemoteFile(
+                name: name,
+                path: fullPath,
+                isDirectory: isDirectory,
+                size: size,
+                permissions: String(permissions.dropFirst()),
+                modifiedDate: date
+            ))
+        }
+
+        // Sort: directories first, then alphabetically
+        return files.sorted { first, second in
+            if first.isDirectory != second.isDirectory {
+                return first.isDirectory
+            }
+            return first.name.localizedCaseInsensitiveCompare(second.name) == .orderedAscending
+        }
+    }
 }
 
 // MARK: - FreeBSD Data Fetchers
