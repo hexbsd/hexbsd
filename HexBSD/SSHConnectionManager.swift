@@ -465,6 +465,83 @@ extension SSHConnectionManager {
     }
 }
 
+// MARK: - Sysctl Operations
+
+extension SSHConnectionManager {
+    /// List available sysctl categories
+    func listSysctlCategories() async throws -> [String] {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Get just the sysctl names (fast) - using -a to be safe, but only extracting first level
+        let command = "sysctl -Na 2>/dev/null | cut -d. -f1 | sort -u"
+        let output = try await executeCommand(command)
+
+        var categories = output.components(separatedBy: .newlines)
+            .filter { !$0.isEmpty }
+
+        return categories
+    }
+
+    /// List sysctls for a specific category
+    func listSysctlsForCategory(_ category: String) async throws -> [SysctlEntry] {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Get sysctls for specific category only (much faster than -a)
+        let command = "sysctl \(category)"
+        let output = try await executeCommand(command)
+
+        return parseSysctlOutput(output)
+    }
+
+    private func parseSysctlOutput(_ output: String) -> [SysctlEntry] {
+        var sysctls: [SysctlEntry] = []
+        let lines = output.components(separatedBy: .newlines)
+
+        for line in lines {
+            // Skip empty lines
+            if line.isEmpty {
+                continue
+            }
+
+            // Format: name: value or name = value
+            let separators = [":", "="]
+            var name = ""
+            var value = ""
+
+            for separator in separators {
+                if let separatorIndex = line.firstIndex(of: Character(separator)) {
+                    name = String(line[..<separatorIndex]).trimmingCharacters(in: .whitespaces)
+                    value = String(line[line.index(after: separatorIndex)...]).trimmingCharacters(in: .whitespaces)
+                    break
+                }
+            }
+
+            // Skip if we couldn't parse
+            if name.isEmpty {
+                continue
+            }
+
+            // For now, assume all sysctls are read-only
+            // We could potentially check writability with `sysctl -d` but that's expensive
+            let writable = false
+
+            sysctls.append(SysctlEntry(
+                name: name,
+                value: value,
+                writable: writable
+            ))
+        }
+
+        return sysctls
+    }
+}
+
 // MARK: - FreeBSD Data Fetchers
 
 extension SSHConnectionManager {
