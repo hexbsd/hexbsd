@@ -19,6 +19,113 @@ struct SystemStatus {
     let storageUsage: String
     let uptime: String
     let loadAverage: String
+
+    // Helper to extract percentage from cpuUsage string
+    var cpuPercentage: Double {
+        let cleaned = cpuUsage.replacingOccurrences(of: "%", with: "")
+        return Double(cleaned) ?? 0
+    }
+
+    // Helper to extract memory usage percentage
+    var memoryPercentage: Double {
+        let parts = memoryUsage.split(separator: "/")
+        guard parts.count == 2,
+              let used = Double(parts[0].trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " GB", with: "")),
+              let total = Double(parts[1].trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " GB", with: ""))
+        else { return 0 }
+        return total > 0 ? (used / total) * 100 : 0
+    }
+
+    // Helper to extract storage usage percentage
+    var storagePercentage: Double {
+        let parts = storageUsage.split(separator: "/")
+        guard parts.count == 2,
+              let used = Double(parts[0].trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " GB", with: "")),
+              let total = Double(parts[1].trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " GB", with: ""))
+        else { return 0 }
+        return total > 0 ? (used / total) * 100 : 0
+    }
+
+    // Helper to extract ZFS ARC usage percentage
+    var arcPercentage: Double {
+        let parts = zfsArcUsage.split(separator: "/")
+        guard parts.count == 2,
+              let used = Double(parts[0].trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " GB", with: "")),
+              let total = Double(parts[1].trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " GB", with: ""))
+        else { return 0 }
+        return total > 0 ? (used / total) * 100 : 0
+    }
+}
+
+// MARK: - Dashboard Components
+
+struct CircularProgressView: View {
+    let progress: Double // 0-100
+    let color: Color
+    let lineWidth: CGFloat = 12
+
+    var body: some View {
+        ZStack {
+            // Background circle
+            Circle()
+                .stroke(color.opacity(0.2), lineWidth: lineWidth)
+
+            // Progress circle
+            Circle()
+                .trim(from: 0, to: min(progress / 100, 1.0))
+                .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .animation(.easeInOut(duration: 0.5), value: progress)
+
+            // Percentage text
+            Text(String(format: "%.0f%%", progress))
+                .font(.system(size: 24, weight: .bold))
+        }
+    }
+}
+
+struct MetricCard: View {
+    let title: String
+    let value: String
+    let progress: Double?
+    let color: Color
+    let systemImage: String
+
+    var body: some View {
+        VStack(spacing: 15) {
+            HStack {
+                Image(systemName: systemImage)
+                    .font(.title2)
+                    .foregroundColor(color)
+                Text(title)
+                    .font(.headline)
+                    .foregroundColor(.primary)
+                Spacer()
+            }
+
+            if let progress = progress {
+                CircularProgressView(progress: progress, color: color)
+                    .frame(width: 120, height: 120)
+
+                Text(value)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                Text(value)
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundColor(.primary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 20)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
+        )
+    }
 }
 
 struct SavedServer: Identifiable, Codable {
@@ -353,29 +460,87 @@ struct DetailView: View {
                     TableColumn("Mountpoint", value: \.mountpoint)
                 }
             } else if section == .dashboard {
-                Text("System Status Dashboard")
-                    .font(.largeTitle)
-                    .bold()
-                    .padding(.bottom, 10)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        Text("System Status Dashboard")
+                            .font(.largeTitle)
+                            .bold()
 
-                if let systemStatus = systemStatus {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("CPU Usage: \(systemStatus.cpuUsage)")
-                        Text("Memory Usage: \(systemStatus.memoryUsage)")
-                        Text("ZFS ARC Usage: \(systemStatus.zfsArcUsage)")
-                        Text("Storage Usage: \(systemStatus.storageUsage)")
-                        Text("Uptime: \(systemStatus.uptime)")
-                        Text("Load Average: \(systemStatus.loadAverage)")
+                        if let systemStatus = systemStatus {
+                            // Primary metrics grid
+                            LazyVGrid(columns: [
+                                GridItem(.flexible(), spacing: 20),
+                                GridItem(.flexible(), spacing: 20)
+                            ], spacing: 20) {
+                                MetricCard(
+                                    title: "CPU Usage",
+                                    value: systemStatus.cpuUsage,
+                                    progress: systemStatus.cpuPercentage,
+                                    color: .blue,
+                                    systemImage: "cpu"
+                                )
+
+                                MetricCard(
+                                    title: "Memory",
+                                    value: systemStatus.memoryUsage,
+                                    progress: systemStatus.memoryPercentage,
+                                    color: .green,
+                                    systemImage: "memorychip"
+                                )
+
+                                MetricCard(
+                                    title: "Storage",
+                                    value: systemStatus.storageUsage,
+                                    progress: systemStatus.storagePercentage,
+                                    color: .orange,
+                                    systemImage: "internaldrive"
+                                )
+
+                                MetricCard(
+                                    title: "ZFS ARC",
+                                    value: systemStatus.zfsArcUsage,
+                                    progress: systemStatus.arcPercentage,
+                                    color: .purple,
+                                    systemImage: "memorychip.fill"
+                                )
+                            }
+
+                            // Info cards
+                            LazyVGrid(columns: [
+                                GridItem(.flexible(), spacing: 20),
+                                GridItem(.flexible(), spacing: 20)
+                            ], spacing: 20) {
+                                MetricCard(
+                                    title: "System Uptime",
+                                    value: systemStatus.uptime,
+                                    progress: nil,
+                                    color: .cyan,
+                                    systemImage: "clock"
+                                )
+
+                                MetricCard(
+                                    title: "Load Average",
+                                    value: systemStatus.loadAverage,
+                                    progress: nil,
+                                    color: .pink,
+                                    systemImage: "chart.line.uptrend.xyaxis"
+                                )
+                            }
+                        } else {
+                            VStack(spacing: 20) {
+                                ProgressView()
+                                    .scaleEffect(1.5)
+                                Text("Loading system status...")
+                                    .font(.headline)
+                                    .foregroundColor(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .padding(100)
+                        }
                     }
-                    .font(.title2)
                     .padding()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.gray.opacity(0.2)))
-                    .padding()
-                } else {
-                    Text("Loading system status...")
-                        .foregroundColor(.secondary)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 Text(section.rawValue)
                     .font(.largeTitle)
