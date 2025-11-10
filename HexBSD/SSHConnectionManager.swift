@@ -616,6 +616,71 @@ extension SSHConnectionManager {
     }
 }
 
+// MARK: - User Session Operations
+
+extension SSHConnectionManager {
+    /// List all active user sessions using w command
+    func listUserSessions() async throws -> [UserSession] {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Use w command to show logged in users with details
+        let command = "w -h"
+        let output = try await executeCommand(command)
+
+        return parseWOutput(output)
+    }
+
+    private func parseWOutput(_ output: String) -> [UserSession] {
+        var sessions: [UserSession] = []
+        let lines = output.components(separatedBy: .newlines)
+
+        for line in lines {
+            // Skip empty lines
+            if line.isEmpty {
+                continue
+            }
+
+            let components = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+
+            // Format: USER TTY FROM LOGIN@ IDLE WHAT
+            // Example: root pts/0 192.168.1.100 3:21PM - w
+            // Example: user1 pts/1 - 2:15PM 1:05 -bash
+            guard components.count >= 4 else { continue }
+
+            let user = components[0]
+            let tty = components[1]
+            let from = components[2]
+            let loginTime = components[3]
+
+            // IDLE and WHAT can vary - idle might be missing
+            var idle = "-"
+            var what = ""
+
+            if components.count >= 5 {
+                idle = components[4]
+            }
+
+            if components.count >= 6 {
+                what = components[5...].joined(separator: " ")
+            }
+
+            sessions.append(UserSession(
+                user: user,
+                tty: tty,
+                from: from == "-" ? "" : from,
+                loginTime: loginTime,
+                idle: idle,
+                what: what
+            ))
+        }
+
+        return sessions
+    }
+}
+
 // MARK: - FreeBSD Data Fetchers
 
 extension SSHConnectionManager {

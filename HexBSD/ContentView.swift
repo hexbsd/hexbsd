@@ -149,6 +149,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case logs = "Logs"
     case sysctl = "Sysctl"
     case sockstat = "Sockstat"
+    case sessions = "Sessions"
     case terminal = "Terminal"
 
     var id: String { rawValue }
@@ -160,6 +161,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .logs: return "doc.text"
         case .sysctl: return "slider.horizontal.3"
         case .sockstat: return "network"
+        case .sessions: return "person.2"
         case .terminal: return "terminal"
         }
     }
@@ -470,6 +472,9 @@ struct DetailView: View {
             } else if section == .sockstat {
                 // Network connections viewer
                 NetworkContentView()
+            } else if section == .sessions {
+                // User sessions viewer
+                SessionsContentView()
             } else if section == .terminal {
                 // Terminal view handled separately with its own coordinator
                 TerminalContentView()
