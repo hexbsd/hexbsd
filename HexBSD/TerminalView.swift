@@ -17,61 +17,19 @@ struct TerminalContentView: View {
     @State private var showError = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            HStack {
-                Text("Terminal")
-                    .font(.title)
-                    .bold()
-
-                Spacer()
-
-                if coordinator.isConnected {
-                    Button(action: {
-                        coordinator.stopShell()
-                    }) {
-                        Label("Disconnect", systemImage: "stop.circle")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
-                } else {
-                    Button(action: {
-                        Task {
-                            if #available(macOS 15.0, *) {
-                                await coordinator.startShell()
-                            }
-                        }
-                    }) {
-                        Label("Connect Terminal", systemImage: "terminal")
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-            }
-            .padding()
-
-            Divider()
-
-            // Terminal view
+        Group {
             if coordinator.isConnected {
                 SSHTerminalView(terminalCoordinator: coordinator)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+                // Show connecting state
                 VStack(spacing: 20) {
-                    Image(systemName: "terminal")
-                        .font(.system(size: 72))
+                    ProgressView()
+                        .scaleEffect(1.5)
+                    Text("Connecting to terminal...")
+                        .font(.headline)
                         .foregroundColor(.secondary)
-
-                    Text("Terminal Not Connected")
-                        .font(.title2)
-                        .foregroundColor(.secondary)
-
-                    Text("Click 'Connect Terminal' to start an interactive shell session")
-                        .font(.body)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding()
             }
         }
         .alert("Terminal Error", isPresented: $showError) {
@@ -85,6 +43,20 @@ struct TerminalContentView: View {
             if newValue != nil {
                 showError = true
             }
+        }
+        .onAppear {
+            // Auto-connect when terminal view appears
+            if !coordinator.isConnected {
+                Task {
+                    if #available(macOS 15.0, *) {
+                        await coordinator.startShell()
+                    }
+                }
+            }
+        }
+        .onDisappear {
+            // Disconnect when navigating away
+            coordinator.stopShell()
         }
     }
 }
