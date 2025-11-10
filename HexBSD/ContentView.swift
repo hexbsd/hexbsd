@@ -21,6 +21,19 @@ struct SystemStatus {
     let loadAverage: String
 }
 
+struct SavedServer: Identifiable, Codable {
+    var id = UUID()
+    let name: String
+    let host: String
+    let port: Int
+    let username: String
+    let keyPath: String  // Store the actual path instead of bookmark
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, host, port, username, keyPath
+    }
+}
+
 enum SidebarSection: String, CaseIterable, Identifiable {
     case accounts = "Accounts"
     case packages = "Packages"
@@ -72,6 +85,8 @@ struct ContentView: View {
     @State private var isConnected = false
     @State private var serverAddress = "Not Connected"
     @State private var sshManager = SSHConnectionManager()
+    @State private var savedServers: [SavedServer] = []
+    @State private var selectedServer: SavedServer?
 
     // Real data from SSH
     @State private var systemStatus: SystemStatus?
@@ -108,16 +123,51 @@ struct ContentView: View {
                 )
             } else {
                 VStack {
-                    Text("Welcome to HexBSD")
-                        .font(.largeTitle)
+                    Text("Servers")
+                        .font(.title)
                         .bold()
                         .padding(.bottom, 10)
 
-                    Button("Connect") {
+                    if savedServers.isEmpty {
+                        Text("No servers configured")
+                            .foregroundColor(.secondary)
+                            .padding()
+                    } else {
+                        List(savedServers) { server in
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(server.name)
+                                        .font(.headline)
+                                    Text("\(server.username)@\(server.host):\(server.port)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+
+                                Spacer()
+
+                                Button("Connect") {
+                                    connectToServer(server)
+                                }
+                                .buttonStyle(.borderedProminent)
+
+                                Button("Remove") {
+                                    removeServer(server)
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                        .frame(maxHeight: 300)
+                    }
+
+                    Button("Add Server") {
+                        selectedServer = nil
                         showConnectSheet.toggle()
                     }
                     .buttonStyle(.borderedProminent)
+                    .padding(.top)
                 }
+                .padding()
             }
         }
         .sheet(isPresented: $showConnectSheet) {
@@ -125,7 +175,11 @@ struct ContentView: View {
                 isConnected: $isConnected,
                 serverAddress: $serverAddress,
                 sshManager: sshManager,
-                onConnected: loadDataFromServer
+                onConnected: loadDataFromServer,
+                onServerSaved: { server in
+                    savedServers.append(server)
+                    saveServers()
+                }
             )
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ShowAboutWindow"))) { _ in
@@ -133,6 +187,54 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showAbout) {
             AboutView()
+        }
+        .onAppear {
+            loadSavedServers()
+        }
+    }
+
+    func loadSavedServers() {
+        if let data = UserDefaults.standard.data(forKey: "savedServers"),
+           let servers = try? JSONDecoder().decode([SavedServer].self, from: data) {
+            savedServers = servers
+        }
+    }
+
+    func saveServers() {
+        if let data = try? JSONEncoder().encode(savedServers) {
+            UserDefaults.standard.set(data, forKey: "savedServers")
+        }
+    }
+
+    func removeServer(_ server: SavedServer) {
+        savedServers.removeAll { $0.id == server.id }
+        saveServers()
+    }
+
+    func connectToServer(_ server: SavedServer) {
+        Task {
+            do {
+                // Use the saved key path directly (relying on entitlements for access)
+                let keyURL = URL(fileURLWithPath: server.keyPath)
+
+                // Verify the key file still exists
+                guard FileManager.default.fileExists(atPath: server.keyPath) else {
+                    print("SSH key file not found at: \(server.keyPath)")
+                    return
+                }
+
+                let authMethod = SSHAuthMethod(username: server.username, privateKeyURL: keyURL)
+
+                try await sshManager.connect(host: server.host, port: server.port, authMethod: authMethod)
+
+                await MainActor.run {
+                    serverAddress = server.host
+                    isConnected = true
+                    loadDataFromServer()
+                }
+            } catch {
+                print("Connection failed: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -334,7 +436,9 @@ struct ConnectView: View {
     @Binding var serverAddress: String
     let sshManager: SSHConnectionManager
     let onConnected: () -> Void
+    let onServerSaved: (SavedServer) -> Void
 
+    @State private var serverName = ""
     @State private var inputAddress = ""
     @State private var username = ""
     @State private var port = "22"
@@ -342,6 +446,8 @@ struct ConnectView: View {
     @State private var selectedKeyPath: String = "No key selected"
     @State private var isConnecting = false
     @State private var errorMessage: String?
+    @State private var showSavePrompt = false
+    @State private var pendingServer: SavedServer?
 
     var body: some View {
         VStack(spacing: 16) {
@@ -350,6 +456,11 @@ struct ConnectView: View {
                 .bold()
 
             VStack(alignment: .leading, spacing: 8) {
+                Text("Server Name (optional)")
+                    .font(.caption)
+                TextField("Will use server address if empty", text: $serverName)
+                    .textFieldStyle(.roundedBorder)
+
                 Text("Server Address")
                     .font(.caption)
                 TextField("hostname or IP", text: $inputAddress)
@@ -405,6 +516,21 @@ struct ConnectView: View {
         }
         .padding()
         .frame(width: 450)
+        .alert("Save Server?", isPresented: $showSavePrompt) {
+            Button("Save") {
+                if let server = pendingServer {
+                    onServerSaved(server)
+                }
+                onConnected()
+                dismiss()
+            }
+            Button("Don't Save") {
+                onConnected()
+                dismiss()
+            }
+        } message: {
+            Text("Would you like to save this server configuration for quick access next time?")
+        }
     }
 
     private func openFilePicker() {
@@ -484,12 +610,26 @@ struct ConnectView: View {
 
                 try await sshManager.connect(host: hostToConnect, port: portInt, authMethod: authMethod)
 
-                // Connection successful
+                // Connection successful - prompt to save server
                 await MainActor.run {
                     serverAddress = inputAddress
                     isConnected = true
-                    onConnected()
-                    dismiss()
+
+                    // Create pending server for save prompt
+                    if let keyURL = selectedKeyURL {
+                        pendingServer = SavedServer(
+                            name: serverName.isEmpty ? inputAddress : serverName,
+                            host: inputAddress,
+                            port: portInt,
+                            username: username,
+                            keyPath: keyURL.path
+                        )
+                        showSavePrompt = true
+                    } else {
+                        // No key selected, just connect without saving
+                        onConnected()
+                        dismiss()
+                    }
                 }
             } catch {
                 await MainActor.run {
