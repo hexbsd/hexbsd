@@ -82,11 +82,11 @@ struct ContentView: View {
     @State private var selectedSection: SidebarSection?
     @State private var showConnectSheet = false
     @State private var showAbout = false
-    @State private var isConnected = false
-    @State private var serverAddress = "Not Connected"
-    @State private var sshManager = SSHConnectionManager()
     @State private var savedServers: [SavedServer] = []
     @State private var selectedServer: SavedServer?
+
+    // Use shared SSH connection manager across all windows
+    var sshManager = SSHConnectionManager.shared
 
     // Real data from SSH
     @State private var systemStatus: SystemStatus?
@@ -102,18 +102,18 @@ struct ContentView: View {
                 NavigationLink(value: section) {
                     Label(section.rawValue, systemImage: section.icon)
                 }
-                .disabled(!isConnected)
+                .disabled(!sshManager.isConnected)
             }
-            .navigationTitle("\(isConnected ? serverAddress : "HexBSD")")
+            .navigationTitle("\(sshManager.isConnected ? sshManager.serverAddress : "HexBSD")")
 
 #if os(macOS)
             .navigationSplitViewColumnWidth(min: 180, ideal: 200)
 #endif
         } detail: {
-            if let section = selectedSection, isConnected {
+            if let section = selectedSection, sshManager.isConnected {
                 DetailView(
                     section: section,
-                    serverAddress: serverAddress,
+                    serverAddress: sshManager.serverAddress,
                     systemStatus: systemStatus,
                     accounts: accounts,
                     packages: packages,
@@ -172,9 +172,6 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showConnectSheet) {
             ConnectView(
-                isConnected: $isConnected,
-                serverAddress: $serverAddress,
-                sshManager: sshManager,
                 onConnected: loadDataFromServer,
                 onServerSaved: { server in
                     savedServers.append(server)
@@ -190,6 +187,11 @@ struct ContentView: View {
         }
         .onAppear {
             loadSavedServers()
+
+            // If already connected (e.g., in a new window), load data
+            if sshManager.isConnected {
+                loadDataFromServer()
+            }
         }
     }
 
@@ -228,8 +230,6 @@ struct ContentView: View {
                 try await sshManager.connect(host: server.host, port: server.port, authMethod: authMethod)
 
                 await MainActor.run {
-                    serverAddress = server.host
-                    isConnected = true
                     loadDataFromServer()
                 }
             } catch {
@@ -432,11 +432,11 @@ struct DetailView: View {
 // MARK: - Connect View
 struct ConnectView: View {
     @Environment(\.dismiss) private var dismiss
-    @Binding var isConnected: Bool
-    @Binding var serverAddress: String
-    let sshManager: SSHConnectionManager
     let onConnected: () -> Void
     let onServerSaved: (SavedServer) -> Void
+
+    // Use shared SSH connection manager
+    var sshManager = SSHConnectionManager.shared
 
     @State private var serverName = ""
     @State private var inputAddress = ""
@@ -612,9 +612,6 @@ struct ConnectView: View {
 
                 // Connection successful - prompt to save server
                 await MainActor.run {
-                    serverAddress = inputAddress
-                    isConnected = true
-
                     // Create pending server for save prompt
                     if let keyURL = selectedKeyURL {
                         pendingServer = SavedServer(

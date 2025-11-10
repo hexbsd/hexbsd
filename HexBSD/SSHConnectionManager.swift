@@ -26,6 +26,9 @@ struct SSHAuthMethod {
 /// SSH connection manager for FreeBSD systems
 @Observable
 class SSHConnectionManager {
+    // Singleton instance shared across all windows
+    static let shared = SSHConnectionManager()
+
     // Connection state
     var isConnected: Bool = false
     var serverAddress: String = ""
@@ -33,6 +36,9 @@ class SSHConnectionManager {
 
     // SSH client
     private var client: SSHClient?
+
+    // Private initializer to enforce singleton
+    private init() {}
 
     /// Connect to a FreeBSD server via SSH using key-based authentication
     func connect(host: String, port: Int = 22, authMethod: SSHAuthMethod) async throws {
