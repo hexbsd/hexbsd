@@ -266,12 +266,6 @@ extension SSHConnectionManager {
         let output = try await executeCommand("pkg info")
         return parsePackages(output)
     }
-
-    /// Fetch list of user accounts
-    func fetchUserAccounts() async throws -> [UserAccount] {
-        let passwdOutput = try await executeCommand("cat /etc/passwd")
-        return parseUserAccounts(passwdOutput)
-    }
 }
 
 // MARK: - Output Parsers
@@ -451,25 +445,5 @@ extension SSHConnectionManager {
             }
         }
         return packages
-    }
-
-    private func parseUserAccounts(_ output: String) -> [UserAccount] {
-        var accounts: [UserAccount] = []
-        let lines = output.components(separatedBy: .newlines).filter { !$0.isEmpty }
-
-        for line in lines {
-            let fields = line.components(separatedBy: ":")
-            if fields.count >= 7, let uid = Int(fields[2]) {
-                accounts.append(UserAccount(
-                    username: fields[0],
-                    uid: uid,
-                    primaryGroup: fields[3],
-                    additionalGroups: [fields[3]], // Primary group only from passwd
-                    shell: fields[6],
-                    homeDirectory: fields[5]
-                ))
-            }
-        }
-        return accounts
     }
 }

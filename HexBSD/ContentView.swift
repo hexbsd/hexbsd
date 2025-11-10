@@ -35,33 +35,21 @@ struct SavedServer: Identifiable, Codable {
 }
 
 enum SidebarSection: String, CaseIterable, Identifiable {
-    case accounts = "Accounts"
+    case dashboard = "Dashboard"
     case packages = "Packages"
     case services = "Services"
-    case status = "Status"
     case storage = "Storage"
 
     var id: String { rawValue }
 
     var icon: String {
         switch self {
-        case .accounts: return "person.2"
+        case .dashboard: return "chart.bar"
         case .packages: return "shippingbox"
         case .services: return "gear"
         case .storage: return "externaldrive"
-        case .status: return "chart.bar"
         }
     }
-}
-
-struct UserAccount: Identifiable {
-    let id = UUID()
-    let username: String
-    let uid: Int
-    let primaryGroup: String
-    let additionalGroups: [String]
-    let shell: String
-    let homeDirectory: String
 }
 
 struct Package: Identifiable {
@@ -90,7 +78,6 @@ struct ContentView: View {
 
     // Real data from SSH
     @State private var systemStatus: SystemStatus?
-    @State private var accounts: [UserAccount] = []
     @State private var packages: [Package] = []
     @State private var services: [Service] = []
     @State private var zfsPools: [ZFSPool] = []
@@ -115,7 +102,6 @@ struct ContentView: View {
                     section: section,
                     serverAddress: sshManager.serverAddress,
                     systemStatus: systemStatus,
-                    accounts: accounts,
                     packages: packages,
                     services: services,
                     zfsPools: zfsPools,
@@ -172,7 +158,11 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showConnectSheet) {
             ConnectView(
-                onConnected: loadDataFromServer,
+                onConnected: {
+                    loadDataFromServer()
+                    // Navigate to status screen after connection
+                    selectedSection = .dashboard
+                },
                 onServerSaved: { server in
                     savedServers.append(server)
                     saveServers()
@@ -188,9 +178,13 @@ struct ContentView: View {
         .onAppear {
             loadSavedServers()
 
-            // If already connected (e.g., in a new window), load data
+            // If already connected (e.g., in a new window), load data and navigate to status
             if sshManager.isConnected {
                 loadDataFromServer()
+                // Navigate to status screen if no section is selected
+                if selectedSection == nil {
+                    selectedSection = .dashboard
+                }
             }
         }
     }
@@ -231,6 +225,8 @@ struct ContentView: View {
 
                 await MainActor.run {
                     loadDataFromServer()
+                    // Navigate to status screen after successful connection
+                    selectedSection = .dashboard
                 }
             } catch {
                 print("Connection failed: \(error.localizedDescription)")
@@ -245,12 +241,6 @@ struct ContentView: View {
                 self.systemStatus = try await sshManager.fetchSystemStatus()
             } catch {
                 print("Error loading system status: \(error.localizedDescription)")
-            }
-
-            do {
-                self.accounts = try await sshManager.fetchUserAccounts()
-            } catch {
-                print("Error loading accounts: \(error.localizedDescription)")
             }
 
             do {
@@ -302,7 +292,6 @@ struct DetailView: View {
     let section: SidebarSection
     let serverAddress: String
     let systemStatus: SystemStatus?
-    let accounts: [UserAccount]
     let packages: [Package]
     let services: [Service]
     let zfsPools: [ZFSPool]
@@ -332,36 +321,6 @@ struct DetailView: View {
                     TableColumn("Version", value: \.version)
                     TableColumn("Description", value: \.description)
                 }
-            } else if section == .accounts {
-                Text("User Accounts")
-                    .font(.largeTitle)
-                    .bold()
-                    .padding(.bottom, 10)
-
-                Table(accounts.filter { $0.username != "root" }) {
-                    TableColumn("Username", value: \.username)
-                    TableColumn("UID") { Text("\($0.uid)") }
-                    TableColumn("Primary Group", value: \.primaryGroup)
-                    TableColumn("Additional Groups") { Text($0.additionalGroups.joined(separator: ", ")) }
-                    TableColumn("Shell", value: \.shell)
-                    TableColumn("Home Directory", value: \.homeDirectory)
-                }
-
-                HStack {
-                    Button("Add") {
-                        // UI-only mockup, does nothing
-                    }
-                    Button("Edit") {
-                        // UI-only mockup, does nothing
-                    }
-                    .disabled(true) // Always disabled in mockup
-
-                    Button("Remove") {
-                        // UI-only mockup, does nothing
-                    }
-                    .disabled(true) // Always disabled in mockup
-                }
-                .padding(.top, 10)
             } else if section == .storage {
                 Text("ZFS Storage")
                     .font(.largeTitle)
@@ -393,7 +352,7 @@ struct DetailView: View {
                     TableColumn("Used", value: \.used)
                     TableColumn("Mountpoint", value: \.mountpoint)
                 }
-            } else if section == .status {
+            } else if section == .dashboard {
                 Text("System Status Dashboard")
                     .font(.largeTitle)
                     .bold()
