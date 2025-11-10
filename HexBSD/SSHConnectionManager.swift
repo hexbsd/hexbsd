@@ -388,6 +388,83 @@ class SSHConnectionManager {
     }
 }
 
+// MARK: - Log File Operations
+
+extension SSHConnectionManager {
+    /// List log files in /var/log directory
+    func listLogFiles() async throws -> [LogFile] {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // List only readable files, excluding directories and compressed archives
+        let command = """
+        for f in /var/log/*; do
+            if [ -f "$f" ] && [ -r "$f" ]; then
+                case "$f" in
+                    *.bz2|*.gz|*.xz) ;;
+                    *) ls -lh "$f" ;;
+                esac
+            fi
+        done
+        """
+        let output = try await executeCommand(command)
+
+        return parseLogFiles(output)
+    }
+
+    /// Read log file content (last N lines)
+    func readLogFile(path: String, lines: Int) async throws -> String {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Use tail to get last N lines
+        let command = "tail -n \(lines) '\(path)'"
+        return try await executeCommand(command)
+    }
+
+    private func parseLogFiles(_ output: String) -> [LogFile] {
+        var files: [LogFile] = []
+        let lines = output.components(separatedBy: .newlines)
+
+        for line in lines {
+            // Skip empty lines
+            if line.isEmpty {
+                continue
+            }
+
+            let components = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+
+            // Format: permissions links owner group size month day time path
+            // Example: -rw-r--r-- 1 root wheel 1.2K Jan 10 15:30 /var/log/messages
+            guard components.count >= 9 else { continue }
+
+            let size = components[4]
+            let fullPath = components[8...].joined(separator: " ")
+
+            // Skip if it's a directory marker
+            if components[0].starts(with: "d") {
+                continue
+            }
+
+            // Extract just the filename from the full path for display
+            let name = (fullPath as NSString).lastPathComponent
+
+            files.append(LogFile(
+                name: name,
+                path: fullPath,
+                size: size
+            ))
+        }
+
+        // Sort alphabetically
+        return files.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+}
+
 // MARK: - FreeBSD Data Fetchers
 
 extension SSHConnectionManager {

@@ -146,6 +146,7 @@ struct SavedServer: Identifiable, Codable {
 enum SidebarSection: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"
     case files = "Files"
+    case logs = "Logs"
     case terminal = "Terminal"
 
     var id: String { rawValue }
@@ -154,6 +155,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         switch self {
         case .dashboard: return "chart.bar"
         case .files: return "folder"
+        case .logs: return "doc.text"
         case .terminal: return "terminal"
         }
     }
@@ -455,6 +457,9 @@ struct DetailView: View {
             } else if section == .files {
                 // Files browser view
                 FilesContentView()
+            } else if section == .logs {
+                // Logs viewer
+                LogsContentView()
             } else if section == .terminal {
                 // Terminal view handled separately with its own coordinator
                 TerminalContentView()
