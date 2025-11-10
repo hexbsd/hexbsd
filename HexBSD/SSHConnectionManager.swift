@@ -542,6 +542,80 @@ extension SSHConnectionManager {
     }
 }
 
+// MARK: - Network Connection Operations
+
+extension SSHConnectionManager {
+    /// List all network connections using sockstat
+    func listNetworkConnections() async throws -> [NetworkConnection] {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Use sockstat to show all network connections with protocol info
+        // -4 = IPv4, -6 = IPv6, -l = listening sockets, -c = connected sockets
+        let command = "sockstat -46"
+        let output = try await executeCommand(command)
+
+        return parseSockstatOutput(output)
+    }
+
+    private func parseSockstatOutput(_ output: String) -> [NetworkConnection] {
+        var connections: [NetworkConnection] = []
+        let lines = output.components(separatedBy: .newlines)
+
+        for (index, line) in lines.enumerated() {
+            // Skip header line and empty lines
+            if index == 0 || line.isEmpty {
+                continue
+            }
+
+            let components = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+
+            // Format: USER COMMAND PID FD PROTO LOCAL ADDRESS FOREIGN ADDRESS
+            // Example: root sshd 1234 3 tcp4 192.168.1.100:22 192.168.1.50:54321
+            // Example: nobody httpd 5678 4 tcp6 *:80 *:*
+            guard components.count >= 7 else { continue }
+
+            let user = components[0]
+            let command = components[1]
+            let pid = components[2]
+            // Skip FD (file descriptor) at index 3
+            let proto = components[4]
+            let localAddress = components[5]
+            let foreignAddress = components[6]
+
+            // Determine state (TCP connections may have state info)
+            var state = ""
+            if proto.lowercased().contains("tcp") {
+                // Check if there's additional state info
+                if components.count > 7 {
+                    state = components[7]
+                } else {
+                    // Infer state from addresses
+                    if foreignAddress == "*:*" {
+                        state = "LISTEN"
+                    } else {
+                        state = "ESTABLISHED"
+                    }
+                }
+            }
+
+            connections.append(NetworkConnection(
+                user: user,
+                command: command,
+                pid: pid,
+                proto: proto,
+                localAddress: localAddress,
+                foreignAddress: foreignAddress,
+                state: state
+            ))
+        }
+
+        return connections
+    }
+}
+
 // MARK: - FreeBSD Data Fetchers
 
 extension SSHConnectionManager {
