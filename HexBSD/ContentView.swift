@@ -143,34 +143,16 @@ struct SavedServer: Identifiable, Codable {
 
 enum SidebarSection: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"
-    case packages = "Packages"
-    case services = "Services"
-    case storage = "Storage"
+    case terminal = "Terminal"
 
     var id: String { rawValue }
 
     var icon: String {
         switch self {
         case .dashboard: return "chart.bar"
-        case .packages: return "shippingbox"
-        case .services: return "gear"
-        case .storage: return "externaldrive"
+        case .terminal: return "terminal"
         }
     }
-}
-
-struct Package: Identifiable {
-    let id = UUID()
-    let name: String
-    let version: String
-    let description: String
-}
-
-struct Service: Identifiable {
-    let id = UUID()
-    let name: String
-    let description: String
-    let status: String
 }
 
 struct ContentView: View {
@@ -185,10 +167,6 @@ struct ContentView: View {
 
     // Real data from SSH
     @State private var systemStatus: SystemStatus?
-    @State private var packages: [Package] = []
-    @State private var services: [Service] = []
-    @State private var zfsPools: [ZFSPool] = []
-    @State private var zfsDatasets: [ZFSDataset] = []
 
     var body: some View {
         NavigationSplitView {
@@ -208,11 +186,7 @@ struct ContentView: View {
                 DetailView(
                     section: section,
                     serverAddress: sshManager.serverAddress,
-                    systemStatus: systemStatus,
-                    packages: packages,
-                    services: services,
-                    zfsPools: zfsPools,
-                    zfsDatasets: zfsDatasets
+                    systemStatus: systemStatus
                 )
             } else {
                 VStack {
@@ -343,123 +317,23 @@ struct ContentView: View {
 
     func loadDataFromServer() {
         Task {
-            // Load data individually to avoid failing everything on one error
             do {
                 self.systemStatus = try await sshManager.fetchSystemStatus()
             } catch {
                 print("Error loading system status: \(error.localizedDescription)")
             }
-
-            do {
-                self.packages = try await sshManager.fetchPackages()
-            } catch {
-                print("Error loading packages: \(error.localizedDescription)")
-            }
-
-            do {
-                self.services = try await sshManager.fetchServices()
-            } catch {
-                print("Error loading services: \(error.localizedDescription)")
-            }
-
-            do {
-                self.zfsPools = try await sshManager.fetchZFSPools()
-            } catch {
-                print("Error loading ZFS pools: \(error.localizedDescription)")
-            }
-
-            do {
-                self.zfsDatasets = try await sshManager.fetchZFSDatasets()
-            } catch {
-                print("Error loading ZFS datasets: \(error.localizedDescription)")
-            }
         }
     }
-}
-
-// MARK: - ZFS Storage Models
-struct ZFSPool: Identifiable {
-    let id = UUID()
-    let name: String
-    let size: String
-    let used: String
-    let available: String
-    let status: String
-}
-
-struct ZFSDataset: Identifiable {
-    let id = UUID()
-    let name: String
-    let pool: String
-    let used: String
-    let mountpoint: String
 }
 
 struct DetailView: View {
     let section: SidebarSection
     let serverAddress: String
     let systemStatus: SystemStatus?
-    let packages: [Package]
-    let services: [Service]
-    let zfsPools: [ZFSPool]
-    let zfsDatasets: [ZFSDataset]
 
     var body: some View {
         VStack {
-            if section == .services {
-                Text("System Services")
-                    .font(.largeTitle)
-                    .bold()
-                    .padding(.bottom, 10)
-
-                Table(services) {
-                    TableColumn("Name", value: \.name)
-                    TableColumn("Description", value: \.description)
-                    TableColumn("Status", value: \.status)
-                }
-            } else if section == .packages {
-                Text("Installed Packages")
-                    .font(.largeTitle)
-                    .bold()
-                    .padding(.bottom, 10)
-
-                Table(packages) {
-                    TableColumn("Name", value: \.name)
-                    TableColumn("Version", value: \.version)
-                    TableColumn("Description", value: \.description)
-                }
-            } else if section == .storage {
-                Text("ZFS Storage")
-                    .font(.largeTitle)
-                    .bold()
-                    .padding(.bottom, 10)
-
-                Text("ZFS Pools")
-                    .font(.title2)
-                    .bold()
-                    .padding(.top, 10)
-
-                Table(zfsPools) {
-                    TableColumn("Pool Name", value: \.name)
-                    TableColumn("Size", value: \.size)
-                    TableColumn("Used", value: \.used)
-                    TableColumn("Available", value: \.available)
-                    TableColumn("Status", value: \.status)
-                }
-                .padding(.bottom, 20)
-
-                Text("ZFS Datasets")
-                    .font(.title2)
-                    .bold()
-                    .padding(.top, 10)
-
-                Table(zfsDatasets) {
-                    TableColumn("Dataset Name", value: \.name)
-                    TableColumn("Pool", value: \.pool)
-                    TableColumn("Used", value: \.used)
-                    TableColumn("Mountpoint", value: \.mountpoint)
-                }
-            } else if section == .dashboard {
+            if section == .dashboard {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
                         Text("System Status Dashboard")
@@ -541,6 +415,9 @@ struct DetailView: View {
                     .padding()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if section == .terminal {
+                // Terminal view handled separately with its own coordinator
+                TerminalContentView()
             } else {
                 Text(section.rawValue)
                     .font(.largeTitle)
@@ -795,6 +672,39 @@ struct AboutView: View {
                             .font(.caption)
 
                         Link("https://github.com/orlandos-nl/Citadel", destination: URL(string: "https://github.com/orlandos-nl/Citadel")!)
+                            .font(.caption)
+
+                        Divider()
+
+                        Text("MIT License")
+                            .font(.caption)
+                            .bold()
+
+                        Text("""
+                        Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+                        The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+                        THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+                        """)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    }
+                    .padding()
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.gray.opacity(0.1)))
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("SwiftTerm")
+                            .font(.headline)
+
+                        Text("VT100/Xterm Terminal Emulator")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+
+                        Text("Copyright (c) Miguel de Icaza")
+                            .font(.caption)
+
+                        Link("https://github.com/migueldeicaza/SwiftTerm", destination: URL(string: "https://github.com/migueldeicaza/SwiftTerm")!)
                             .font(.caption)
 
                         Divider()

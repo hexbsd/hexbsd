@@ -1,0 +1,251 @@
+//
+//  TerminalView.swift
+//  HexBSD
+//
+//  Created by Joseph Maloney on 3/17/25.
+//
+
+import SwiftUI
+import SwiftTerm
+import Citadel
+import NIOCore
+import AppKit
+
+/// Main terminal content view that manages the terminal session
+struct TerminalContentView: View {
+    @StateObject private var coordinator = TerminalCoordinator(sshManager: SSHConnectionManager.shared)
+    @State private var showError = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Text("Terminal")
+                    .font(.title)
+                    .bold()
+
+                Spacer()
+
+                if coordinator.isConnected {
+                    Button(action: {
+                        coordinator.stopShell()
+                    }) {
+                        Label("Disconnect", systemImage: "stop.circle")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                } else {
+                    Button(action: {
+                        Task {
+                            if #available(macOS 15.0, *) {
+                                await coordinator.startShell()
+                            }
+                        }
+                    }) {
+                        Label("Connect Terminal", systemImage: "terminal")
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding()
+
+            Divider()
+
+            // Terminal view
+            if coordinator.isConnected {
+                SSHTerminalView(terminalCoordinator: coordinator)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                VStack(spacing: 20) {
+                    Image(systemName: "terminal")
+                        .font(.system(size: 72))
+                        .foregroundColor(.secondary)
+
+                    Text("Terminal Not Connected")
+                        .font(.title2)
+                        .foregroundColor(.secondary)
+
+                    Text("Click 'Connect Terminal' to start an interactive shell session")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding()
+            }
+        }
+        .alert("Terminal Error", isPresented: $showError) {
+            Button("OK") {
+                showError = false
+            }
+        } message: {
+            Text(coordinator.error ?? "Unknown error")
+        }
+        .onChange(of: coordinator.error) { oldValue, newValue in
+            if newValue != nil {
+                showError = true
+            }
+        }
+    }
+}
+
+/// SwiftUI wrapper for SwiftTerm's terminal view
+struct SSHTerminalView: NSViewRepresentable {
+    @ObservedObject var terminalCoordinator: TerminalCoordinator
+
+    func makeNSView(context: Context) -> TerminalViewImpl {
+        let terminal = TerminalViewImpl(frame: .zero)
+        terminal.terminalDelegate = terminalCoordinator
+        terminalCoordinator.terminalView = terminal
+        return terminal
+    }
+
+    func updateNSView(_ nsView: TerminalViewImpl, context: Context) {
+        // Terminal view updates handled through coordinator
+    }
+}
+
+/// Coordinator that bridges between SwiftTerm and SSH connection
+class TerminalCoordinator: NSObject, ObservableObject, TerminalViewDelegate {
+    weak var terminalView: TerminalViewImpl?
+    private var sshManager: SSHConnectionManager
+    private var stdinWriter: ((ByteBuffer) async throws -> Void)?
+    private var shellTask: Task<Void, Error>?
+
+    @Published var isConnected = false
+    @Published var error: String?
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+        super.init()
+    }
+
+    /// Start the interactive shell session
+    @available(macOS 15.0, *)
+    func startShell() async {
+        shellTask = Task {
+            do {
+                try await sshManager.startInteractiveShell(delegate: self)
+            } catch {
+                await MainActor.run {
+                    self.error = "Failed to start shell: \(error.localizedDescription)"
+                    self.isConnected = false
+                }
+            }
+        }
+        isConnected = true
+    }
+
+    /// Stop the shell session
+    func stopShell() {
+        shellTask?.cancel()
+        shellTask = nil
+        stdinWriter = nil
+        isConnected = false
+    }
+
+    /// Called by SSH manager when shell output is received
+    func receiveOutput(_ data: Data) {
+        guard let terminalView = terminalView else { return }
+
+        // Convert Data to array of UInt8 and feed to terminal
+        let bytes = [UInt8](data)
+        DispatchQueue.main.async {
+            terminalView.feed(byteArray: bytes[...])
+        }
+    }
+
+    /// Called by SSH manager to provide stdin writer
+    func setStdinWriter(_ writer: @escaping (ByteBuffer) async throws -> Void) {
+        self.stdinWriter = writer
+    }
+
+    // MARK: - TerminalViewDelegate
+
+    func send(source: TerminalView, data: ArraySlice<UInt8>) {
+        // Send user input to SSH
+        guard let stdinWriter = stdinWriter else { return }
+
+        Task {
+            do {
+                var buffer = ByteBuffer()
+                buffer.writeBytes(Array(data))
+                try await stdinWriter(buffer)
+            } catch {
+                await MainActor.run {
+                    self.error = "Failed to send data: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+        // Handle terminal resize - would need to send SIGWINCH to remote
+        // For now, initial size is set when starting PTY
+    }
+
+    func setTerminalTitle(source: TerminalView, title: String) {
+        // Could update window title here if desired
+    }
+
+    func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
+        // Optional: track current directory
+    }
+
+    func scrolled(source: TerminalView, position: Double) {
+        // Handle scroll position changes if needed
+    }
+
+    func requestOpenLink(source: TerminalView, link: String, params: [String:String]) {
+        // Handle link clicks - could open in browser
+        #if os(macOS)
+        if let url = URL(string: link) {
+            NSWorkspace.shared.open(url)
+        }
+        #endif
+    }
+
+    func bell(source: TerminalView) {
+        // Handle terminal bell
+        #if os(macOS)
+        NSSound.beep()
+        #endif
+    }
+
+    func clipboardCopy(source: TerminalView, content: Data) {
+        // Handle clipboard copy
+        #if os(macOS)
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setData(content, forType: .string)
+        #endif
+    }
+
+    func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {
+        // Handle iTerm2-specific content
+    }
+
+    func rangeChanged(source: TerminalView, startY: Int, endY: Int) {
+        // Handle visual changes notification
+    }
+}
+
+/// Custom terminal view class (extends SwiftTerm's TerminalView for macOS)
+class TerminalViewImpl: TerminalView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        configureTerminal()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureTerminal()
+    }
+
+    private func configureTerminal() {
+        // Configure terminal appearance
+        nativeForegroundColor = NSColor.white
+        nativeBackgroundColor = NSColor.black
+        font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    }
+}

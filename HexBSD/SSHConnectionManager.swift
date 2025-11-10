@@ -9,6 +9,8 @@ import Foundation
 import Citadel
 import Crypto
 import _CryptoExtras
+import NIOCore
+import NIOSSH
 
 /// SSH key type
 enum SSHKeyType {
@@ -202,6 +204,53 @@ class SSHConnectionManager {
 
         return (stdout: stdout, stderr: stderr)
     }
+
+    /// Start an interactive shell session with PTY
+    @available(macOS 15.0, *)
+    func startInteractiveShell(delegate: TerminalCoordinator) async throws {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Configure PTY request
+        let ptyRequest = SSHChannelRequestEvent.PseudoTerminalRequest(
+            wantReply: true,
+            term: "xterm-256color",
+            terminalCharacterWidth: 80,
+            terminalRowHeight: 24,
+            terminalPixelWidth: 0,
+            terminalPixelHeight: 0,
+            terminalModes: SSHTerminalModes([
+                .ECHO: 1,
+                .ICRNL: 1,
+                .OPOST: 1,
+                .ONLCR: 1
+            ])
+        )
+
+        // Start PTY session
+        try await client.withPTY(ptyRequest) { ttyOutput, ttyStdinWriter in
+            // Provide stdin writer to delegate
+            await MainActor.run {
+                delegate.setStdinWriter { buffer in
+                    try await ttyStdinWriter.write(buffer)
+                }
+            }
+
+            // Stream output to delegate
+            for try await output in ttyOutput {
+                switch output {
+                case .stdout(let buffer), .stderr(let buffer):
+                    // Convert ByteBuffer to Data
+                    let data = Data(buffer: buffer)
+                    await MainActor.run {
+                        delegate.receiveOutput(data)
+                    }
+                }
+            }
+        }
+    }
 }
 
 // MARK: - FreeBSD Data Fetchers
@@ -243,29 +292,6 @@ extension SSHConnectionManager {
         )
     }
 
-    /// Fetch list of ZFS pools
-    func fetchZFSPools() async throws -> [ZFSPool] {
-        let output = try await executeCommand("zpool list -H")
-        return parseZFSPools(output)
-    }
-
-    /// Fetch list of ZFS datasets
-    func fetchZFSDatasets() async throws -> [ZFSDataset] {
-        let output = try await executeCommand("zfs list -H")
-        return parseZFSDatasets(output)
-    }
-
-    /// Fetch list of services
-    func fetchServices() async throws -> [Service] {
-        let output = try await executeCommand("service -e")
-        return parseServices(output)
-    }
-
-    /// Fetch list of installed packages
-    func fetchPackages() async throws -> [Package] {
-        let output = try await executeCommand("pkg info")
-        return parsePackages(output)
-    }
 }
 
 // MARK: - Output Parsers
@@ -363,87 +389,5 @@ extension SSHConnectionManager {
             return number / 1024
         }
         return number
-    }
-
-    private func parseZFSPools(_ output: String) -> [ZFSPool] {
-        var pools: [ZFSPool] = []
-        let lines = output.components(separatedBy: .newlines).filter { !$0.isEmpty }
-
-        for line in lines {
-            let components = line.components(separatedBy: "\t")
-            if components.count >= 7 {
-                pools.append(ZFSPool(
-                    name: components[0],
-                    size: components[1],
-                    used: components[2],
-                    available: components[3],
-                    status: components[6]
-                ))
-            }
-        }
-        return pools
-    }
-
-    private func parseZFSDatasets(_ output: String) -> [ZFSDataset] {
-        var datasets: [ZFSDataset] = []
-        let lines = output.components(separatedBy: .newlines).filter { !$0.isEmpty }
-
-        for line in lines {
-            let components = line.components(separatedBy: "\t")
-            if components.count >= 5 {
-                let fullName = components[0]
-                let poolName = fullName.components(separatedBy: "/").first ?? fullName
-                datasets.append(ZFSDataset(
-                    name: fullName,
-                    pool: poolName,
-                    used: components[1],
-                    mountpoint: components[4]
-                ))
-            }
-        }
-        return datasets
-    }
-
-    private func parseServices(_ output: String) -> [Service] {
-        var services: [Service] = []
-        let lines = output.components(separatedBy: .newlines).filter { !$0.isEmpty }
-
-        for line in lines {
-            let serviceName = line.trimmingCharacters(in: .whitespaces)
-                .replacingOccurrences(of: "/etc/rc.d/", with: "")
-                .replacingOccurrences(of: "/usr/local/etc/rc.d/", with: "")
-
-            if !serviceName.isEmpty {
-                services.append(Service(
-                    name: serviceName,
-                    description: serviceName.capitalized,
-                    status: "Running" // service -e only shows running services
-                ))
-            }
-        }
-        return services
-    }
-
-    private func parsePackages(_ output: String) -> [Package] {
-        var packages: [Package] = []
-        let lines = output.components(separatedBy: .newlines).filter { !$0.isEmpty }
-
-        for line in lines {
-            // Format: "package-1.2.3    Description here"
-            let components = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
-            if let first = components.first {
-                let nameVersion = first.components(separatedBy: "-")
-                let name = nameVersion.dropLast().joined(separator: "-")
-                let version = nameVersion.last ?? ""
-                let description = components.dropFirst().joined(separator: " ")
-
-                packages.append(Package(
-                    name: name,
-                    version: version,
-                    description: description
-                ))
-            }
-        }
-        return packages
     }
 }

@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		36BA8A8B2EC178B000710389 /* Citadel in Frameworks */ = {isa = PBXBuildFile; productRef = 36BA8A8A2EC178B000710389 /* Citadel */; };
+		36C321932EC2883C0025DCE1 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 36C321922EC2883C0025DCE1 /* SwiftTerm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -27,6 +28,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				36C321932EC2883C0025DCE1 /* SwiftTerm in Frameworks */,
 				36BA8A8B2EC178B000710389 /* Citadel in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -71,6 +73,7 @@
 			name = HexBSD;
 			packageProductDependencies = (
 				36BA8A8A2EC178B000710389 /* Citadel */,
+				36C321922EC2883C0025DCE1 /* SwiftTerm */,
 			);
 			productName = HexBSD;
 			productReference = 36AD979C2D891FD5005B6A4B /* HexBSD.app */;
@@ -102,6 +105,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				36BA8A892EC178B000710389 /* XCRemoteSwiftPackageReference "Citadel" */,
+				36C321912EC2883C0025DCE1 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 36AD979D2D891FD5005B6A4B /* Products */;
@@ -358,6 +362,14 @@
 				minimumVersion = 0.11.1;
 			};
 		};
+		36C321912EC2883C0025DCE1 /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.5.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -365,6 +377,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 36BA8A892EC178B000710389 /* XCRemoteSwiftPackageReference "Citadel" */;
 			productName = Citadel;
+		};
+		36C321922EC2883C0025DCE1 /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 36C321912EC2883C0025DCE1 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
+			productName = SwiftTerm;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
