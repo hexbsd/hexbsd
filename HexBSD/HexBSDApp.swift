@@ -1,6 +1,6 @@
 //
-//  SwiftBSDApp.swift
-//  SwiftBSD
+//  HexBSDApp.swift
+//  HexBSD
 //
 //  Created by Joseph Maloney on 3/17/25.
 //
@@ -9,7 +9,7 @@ import SwiftUI
 import SwiftData
 
 @main
-struct SwiftBSDApp: App {
+struct HexBSDApp: App {
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
             Item.self,
@@ -28,5 +28,12 @@ struct SwiftBSDApp: App {
             ContentView()
         }
         .modelContainer(sharedModelContainer)
+        .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About HexBSD") {
+                    NotificationCenter.default.post(name: NSNotification.Name("ShowAboutWindow"), object: nil)
+                }
+            }
+        }
     }
 }

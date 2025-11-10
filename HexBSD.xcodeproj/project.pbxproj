@@ -6,14 +6,18 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		36BA8A8B2EC178B000710389 /* Citadel in Frameworks */ = {isa = PBXBuildFile; productRef = 36BA8A8A2EC178B000710389 /* Citadel */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
-		36AD979C2D891FD5005B6A4B /* SwiftBSD.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SwiftBSD.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		36AD979C2D891FD5005B6A4B /* HexBSD.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HexBSD.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		36AD979E2D891FD5005B6A4B /* SwiftBSD */ = {
+		36AD979E2D891FD5005B6A4B /* HexBSD */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = SwiftBSD;
+			path = HexBSD;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -23,6 +27,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				36BA8A8B2EC178B000710389 /* Citadel in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -32,7 +37,7 @@
 		36AD97932D891FD5005B6A4B = {
 			isa = PBXGroup;
 			children = (
-				36AD979E2D891FD5005B6A4B /* SwiftBSD */,
+				36AD979E2D891FD5005B6A4B /* HexBSD */,
 				36AD979D2D891FD5005B6A4B /* Products */,
 			);
 			sourceTree = "<group>";
@@ -40,7 +45,7 @@
 		36AD979D2D891FD5005B6A4B /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				36AD979C2D891FD5005B6A4B /* SwiftBSD.app */,
+				36AD979C2D891FD5005B6A4B /* HexBSD.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -48,9 +53,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		36AD979B2D891FD5005B6A4B /* SwiftBSD */ = {
+		36AD979B2D891FD5005B6A4B /* HexBSD */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 36AD97AD2D891FD6005B6A4B /* Build configuration list for PBXNativeTarget "SwiftBSD" */;
+			buildConfigurationList = 36AD97AD2D891FD6005B6A4B /* Build configuration list for PBXNativeTarget "HexBSD" */;
 			buildPhases = (
 				36AD97982D891FD5005B6A4B /* Sources */,
 				36AD97992D891FD5005B6A4B /* Frameworks */,
@@ -61,13 +66,14 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				36AD979E2D891FD5005B6A4B /* SwiftBSD */,
+				36AD979E2D891FD5005B6A4B /* HexBSD */,
 			);
-			name = SwiftBSD;
+			name = HexBSD;
 			packageProductDependencies = (
+				36BA8A8A2EC178B000710389 /* Citadel */,
 			);
-			productName = SwiftBSD;
-			productReference = 36AD979C2D891FD5005B6A4B /* SwiftBSD.app */;
+			productName = HexBSD;
+			productReference = 36AD979C2D891FD5005B6A4B /* HexBSD.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -85,7 +91,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 36AD97972D891FD5005B6A4B /* Build configuration list for PBXProject "SwiftBSD" */;
+			buildConfigurationList = 36AD97972D891FD5005B6A4B /* Build configuration list for PBXProject "HexBSD" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -94,12 +100,15 @@
 			);
 			mainGroup = 36AD97932D891FD5005B6A4B;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				36BA8A892EC178B000710389 /* XCRemoteSwiftPackageReference "Citadel" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 36AD979D2D891FD5005B6A4B /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				36AD979B2D891FD5005B6A4B /* SwiftBSD */,
+				36AD979B2D891FD5005B6A4B /* HexBSD */,
 			);
 		};
 /* End PBXProject section */
@@ -244,10 +253,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = SwiftBSD/SwiftBSD.entitlements;
+				CODE_SIGN_ENTITLEMENTS = HexBSD/HexBSD.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_ASSET_PATHS = "\"SwiftBSD/Preview Content\"";
+				DEVELOPMENT_ASSET_PATHS = "\"HexBSD/Preview Content\"";
 				DEVELOPMENT_TEAM = 58E5WFM22S;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
@@ -267,7 +276,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = io.pkgdemon.github.SwiftBSD.SwiftBSD;
+				PRODUCT_BUNDLE_IDENTIFIER = io.pkgdemon.github.HexBSD.HexBSD;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = auto;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
@@ -283,10 +292,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = SwiftBSD/SwiftBSD.entitlements;
+				CODE_SIGN_ENTITLEMENTS = HexBSD/HexBSD.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_ASSET_PATHS = "\"SwiftBSD/Preview Content\"";
+				DEVELOPMENT_ASSET_PATHS = "\"HexBSD/Preview Content\"";
 				DEVELOPMENT_TEAM = 58E5WFM22S;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
@@ -306,7 +315,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = io.pkgdemon.github.SwiftBSD.SwiftBSD;
+				PRODUCT_BUNDLE_IDENTIFIER = io.pkgdemon.github.HexBSD.HexBSD;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = auto;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
@@ -320,7 +329,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		36AD97972D891FD5005B6A4B /* Build configuration list for PBXProject "SwiftBSD" */ = {
+		36AD97972D891FD5005B6A4B /* Build configuration list for PBXProject "HexBSD" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				36AD97AB2D891FD6005B6A4B /* Debug */,
@@ -329,7 +338,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		36AD97AD2D891FD6005B6A4B /* Build configuration list for PBXNativeTarget "SwiftBSD" */ = {
+		36AD97AD2D891FD6005B6A4B /* Build configuration list for PBXNativeTarget "HexBSD" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				36AD97AE2D891FD6005B6A4B /* Debug */,
@@ -339,6 +348,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		36BA8A892EC178B000710389 /* XCRemoteSwiftPackageReference "Citadel" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/orlandos-nl/Citadel";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.11.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		36BA8A8A2EC178B000710389 /* Citadel */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 36BA8A892EC178B000710389 /* XCRemoteSwiftPackageReference "Citadel" */;
+			productName = Citadel;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 36AD97942D891FD5005B6A4B /* Project object */;
 }
