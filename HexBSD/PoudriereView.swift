@@ -14,6 +14,8 @@ struct PoudriereInfo: Equatable {
     let isInstalled: Bool
     let htmlPath: String
     let dataPath: String
+    let configPath: String?
+    let runningBuilds: [String]
 }
 
 // MARK: - Custom URL Scheme Handler for SSH Assets
@@ -75,10 +77,11 @@ class PoudriereSchemeHandler: NSObject, WKURLSchemeHandler {
 
         // Build full path - determine which base to use
         // - data/ files come from POUDRIERE_DATA/logs/bulk/ (strip the data/ prefix)
-        // - assets/ files come from HTML template directory
+        // - assets/ files come from HTML template directory (basePath = htmlPath from config)
         let fullPath: String
         if path.hasPrefix("data/") && !dataPath.isEmpty {
             // Data files are in the poudriere data directory
+            // dataPath is POUDRIERE_DATA, need to append /logs/bulk
             // Strip "data/" prefix since files are directly in bulk/, not in bulk/data/
             let dataFilePath = String(path.dropFirst(5)) // Remove "data/"
             let dataBasePath = dataPath.hasSuffix("/") ? "\(dataPath)logs/bulk" : "\(dataPath)/logs/bulk"
@@ -87,14 +90,16 @@ class PoudriereSchemeHandler: NSObject, WKURLSchemeHandler {
             } else {
                 fullPath = dataBasePath + "/" + dataFilePath
             }
-            print("DEBUG: Loading data file from POUDRIERE_DATA: \(dataBasePath), file: \(dataFilePath)")
+            print("DEBUG: Data file - POUDRIERE_DATA=\(dataPath), bulk=\(dataBasePath), file=\(dataFilePath)")
         } else {
             // Assets are in the HTML template directory
+            // basePath is already the full path to the HTML directory (includes logs/bulk for custom configs)
             if basePath.hasSuffix("/") {
                 fullPath = basePath + path
             } else {
                 fullPath = basePath + "/" + path
             }
+            print("DEBUG: Asset file - basePath=\(basePath), file=\(path)")
         }
 
         print("DEBUG: Poudriere loading asset - URL: \(url.absoluteString), Host: \(url.host ?? "nil"), URLPath: \(url.path), CombinedPath: \(path), FullPath: \(fullPath)")
@@ -332,6 +337,31 @@ struct PoudriereContentView: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
+
+                    if !viewModel.runningBuilds.isEmpty {
+                        Text("•")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        HStack(spacing: 4) {
+                            Image(systemName: "hammer.fill")
+                                .foregroundColor(.orange)
+                                .font(.caption)
+                            Text("\(viewModel.runningBuilds.count) build\(viewModel.runningBuilds.count == 1 ? "" : "s") running")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    if let configPath = viewModel.configPath {
+                        Text("•")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text("Config: \(configPath)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                 } else {
                     HStack(spacing: 4) {
                         Image(systemName: "xmark.circle.fill")
@@ -371,7 +401,7 @@ struct PoudriereContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if !viewModel.isInstalled {
                 VStack(spacing: 20) {
-                    Image(systemName: "shippingbox.slash")
+                    Image(systemName: "shippingbox")
                         .font(.system(size: 72))
                         .foregroundColor(.secondary)
                     Text("Poudriere Not Installed")
@@ -397,6 +427,14 @@ struct PoudriereContentView: View {
                     sshManager: SSHConnectionManager.shared
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .onAppear {
+                    print("DEBUG: WebView using paths:")
+                    print("  - HTML/Assets: \(viewModel.htmlPath)")
+                    print("  - Data: \(viewModel.dataPath)")
+                    if let config = viewModel.configPath {
+                        print("  - Config: \(config)")
+                    }
+                }
             } else {
                 VStack(spacing: 20) {
                     Image(systemName: "doc.text")
@@ -440,6 +478,8 @@ class PoudriereViewModel: ObservableObject {
     @Published var isInstalled = false
     @Published var htmlPath = ""
     @Published var dataPath = ""
+    @Published var configPath: String?
+    @Published var runningBuilds: [String] = []
     @Published var htmlContent: String?
     @Published var isLoading = false
     @Published var error: String?
@@ -455,6 +495,8 @@ class PoudriereViewModel: ObservableObject {
             isInstalled = info.isInstalled
             htmlPath = info.htmlPath
             dataPath = info.dataPath
+            configPath = info.configPath
+            runningBuilds = info.runningBuilds
 
             if isInstalled && !htmlPath.isEmpty {
                 // Try to load the index.html

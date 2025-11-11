@@ -684,6 +684,59 @@ extension SSHConnectionManager {
 // MARK: - Poudriere Operations
 
 extension SSHConnectionManager {
+    /// Detect custom poudriere config path from running processes
+    private func detectPoudriereConfigPath() async throws -> String? {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Find running poudriere bulk processes and extract config path from open files
+        let command = """
+        # Find poudriere bulk.sh processes
+        BULK_PID=$(ps -auwx | grep 'poudriere.*bulk.sh' | grep -v grep | head -1 | awk '{print $2}')
+
+        if [ -n "$BULK_PID" ]; then
+            # Extract config path from open files using procstat
+            # Data path pattern: /some/base/poudriere/data/...
+            # Config path: /some/base/etc/poudriere.conf
+            procstat files "$BULK_PID" 2>/dev/null | awk '{print $NF}' \
+             | sed -n 's#^\\(.*\\)/poudriere/data/.*#\\1/etc/poudriere.conf#p' | head -1
+        fi
+        """
+
+        let output = try await executeCommand(command)
+        let configPath = output.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !configPath.isEmpty {
+            print("DEBUG: Detected custom poudriere config from running process: \(configPath)")
+            return configPath
+        }
+
+        return nil
+    }
+
+    /// Check for running poudriere bulk builds
+    func getRunningPoudriereBulk() async throws -> [String] {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Extract jail-ports combinations from running bulk processes
+        let command = """
+        ps -auwx | grep 'sh: poudriere\\[' | grep -v grep | sed -n 's/.*poudriere\\[\\([^]]*\\)\\].*/\\1/p' | sort -u
+        """
+
+        let output = try await executeCommand(command)
+        let builds = output.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
+        print("DEBUG: Running poudriere builds: \(builds)")
+        return builds
+    }
+
     /// Check if poudriere is installed and get config
     func checkPoudriere() async throws -> PoudriereInfo {
         guard let client = client else {
@@ -696,59 +749,130 @@ extension SSHConnectionManager {
         let checkOutput = try await executeCommand(checkCommand)
 
         if checkOutput.trimmingCharacters(in: .whitespacesAndNewlines) != "installed" {
-            return PoudriereInfo(isInstalled: false, htmlPath: "", dataPath: "")
+            return PoudriereInfo(isInstalled: false, htmlPath: "", dataPath: "", configPath: nil, runningBuilds: [])
         }
 
-        // Read poudriere.conf to get paths
-        let confCommand = """
-        if [ -f /usr/local/etc/poudriere.conf ]; then
-            cat /usr/local/etc/poudriere.conf
-        elif [ -f /etc/poudriere.conf ]; then
-            cat /etc/poudriere.conf
-        else
-            echo ""
-        fi
-        """
+        // Try to detect custom poudriere config path from running processes
+        let customConfigPath = try? await detectPoudriereConfigPath()
+
+        // Read poudriere.conf to get paths - use custom path if detected
+        let confCommand: String
+        if let customPath = customConfigPath, !customPath.isEmpty {
+            print("DEBUG: Using custom poudriere config: \(customPath)")
+            confCommand = """
+            if [ -f '\(customPath)' ]; then
+                cat '\(customPath)'
+            else
+                echo ""
+            fi
+            """
+        } else {
+            confCommand = """
+            if [ -f /usr/local/etc/poudriere.conf ]; then
+                cat /usr/local/etc/poudriere.conf
+            elif [ -f /etc/poudriere.conf ]; then
+                cat /etc/poudriere.conf
+            else
+                echo ""
+            fi
+            """
+        }
         let confOutput = try await executeCommand(confCommand)
 
         // Use shell to evaluate poudriere config and get actual paths
         // This sources the config file and uses poudriere's own logic
-        let pathDetectionCommand = """
-        # Source poudriere functions to get actual configured paths
-        if [ -f /usr/local/etc/poudriere.conf ]; then
-            POUDRIERE_ETC=/usr/local/etc
-        elif [ -f /etc/poudriere.conf ]; then
-            POUDRIERE_ETC=/etc
-        else
-            # No config found, use defaults
-            echo "DATA:/usr/local/poudriere/data"
-            echo "HTML:/usr/local/share/poudriere/html"
-            exit 0
-        fi
+        let pathDetectionCommand: String
+        if let customPath = customConfigPath, !customPath.isEmpty {
+            pathDetectionCommand = """
+            # Use custom poudriere config path
+            if [ -f '\(customPath)' ]; then
+                # Source the config file directly to preserve variable expansion
+                . '\(customPath)'
 
-        # Source the config (safely - just extract variables)
-        eval $(grep -E '^[A-Z_]+=' ${POUDRIERE_ETC}/poudriere.conf 2>/dev/null)
+                # Output diagnostic info with DIAG: prefix
+                echo "DIAG:Sourced config: \(customPath)"
+                echo "DIAG:BASEFS='${BASEFS}'"
+                echo "DIAG:POUDRIERE_DATA='${POUDRIERE_DATA}'"
+            else
+                # Config not found, use defaults
+                echo "DIAG:Config file not found: \(customPath)"
+                echo "DATA:/usr/local/poudriere/data"
+                echo "HTML:/usr/local/share/poudriere/html"
+                exit 0
+            fi
 
-        # Get POUDRIERE_DATA (with default)
-        POUDRIERE_DATA=${POUDRIERE_DATA:-${BASEFS}/data}
-        POUDRIERE_DATA=${POUDRIERE_DATA:-/usr/local/poudriere/data}
+            # Get POUDRIERE_DATA (with default fallback to BASEFS/data)
+            if [ -z "$POUDRIERE_DATA" ]; then
+                if [ -n "$BASEFS" ]; then
+                    POUDRIERE_DATA="${BASEFS}/data"
+                    echo "DIAG:Computed POUDRIERE_DATA from BASEFS: '${POUDRIERE_DATA}'"
+                else
+                    POUDRIERE_DATA="/usr/local/poudriere/data"
+                    echo "DIAG:Using default POUDRIERE_DATA (BASEFS empty): '${POUDRIERE_DATA}'"
+                fi
+            else
+                echo "DIAG:POUDRIERE_DATA already set: '${POUDRIERE_DATA}'"
+            fi
 
-        # Output the paths
-        echo "DATA:${POUDRIERE_DATA}"
+            # Output the paths
+            echo "DATA:${POUDRIERE_DATA}"
 
-        # Determine HTML path - check where index.html actually exists
-        if [ -f "${POUDRIERE_DATA}/logs/bulk/index.html" ]; then
-            echo "HTML:${POUDRIERE_DATA}/logs/bulk"
-        elif [ -f "/usr/local/share/poudriere/html/index.html" ]; then
-            echo "HTML:/usr/local/share/poudriere/html"
-        elif [ -d "${POUDRIERE_DATA}/logs/bulk" ]; then
-            echo "HTML:${POUDRIERE_DATA}/logs/bulk"
-        elif [ -d "/usr/local/share/poudriere/html" ]; then
-            echo "HTML:/usr/local/share/poudriere/html"
-        else
-            echo "HTML:/usr/local/share/poudriere/html"
-        fi
-        """
+            # Determine HTML path - HTML templates are typically in standard location
+            # even with custom POUDRIERE_DATA paths
+            # Check standard HTML template location first
+            if [ -f "/usr/local/share/poudriere/html/index.html" ]; then
+                echo "HTML:/usr/local/share/poudriere/html"
+                echo "DIAG:Using standard HTML templates"
+            elif [ -f "${POUDRIERE_DATA}/logs/bulk/index.html" ]; then
+                echo "HTML:${POUDRIERE_DATA}/logs/bulk"
+                echo "DIAG:Using HTML from data directory"
+            elif [ -d "${POUDRIERE_DATA}/logs/bulk" ]; then
+                # Data dir exists but no HTML yet, use standard templates
+                echo "HTML:/usr/local/share/poudriere/html"
+                echo "DIAG:Data dir exists, using standard HTML templates"
+            else
+                echo "HTML:/usr/local/share/poudriere/html"
+                echo "DIAG:Fallback to standard HTML templates"
+            fi
+            """
+        } else {
+            pathDetectionCommand = """
+            # Source poudriere functions to get actual configured paths
+            if [ -f /usr/local/etc/poudriere.conf ]; then
+                POUDRIERE_ETC=/usr/local/etc
+            elif [ -f /etc/poudriere.conf ]; then
+                POUDRIERE_ETC=/etc
+            else
+                # No config found, use defaults
+                echo "DATA:/usr/local/poudriere/data"
+                echo "HTML:/usr/local/share/poudriere/html"
+                exit 0
+            fi
+
+            # Source the config (safely - just extract variables)
+            eval $(grep -E '^[A-Z_]+=' ${POUDRIERE_ETC}/poudriere.conf 2>/dev/null)
+
+            # Get POUDRIERE_DATA (with default)
+            POUDRIERE_DATA=${POUDRIERE_DATA:-${BASEFS}/data}
+            POUDRIERE_DATA=${POUDRIERE_DATA:-/usr/local/poudriere/data}
+
+            # Output the paths
+            echo "DATA:${POUDRIERE_DATA}"
+
+            # Determine HTML path - check where index.html actually exists
+            if [ -f "${POUDRIERE_DATA}/logs/bulk/index.html" ]; then
+                echo "HTML:${POUDRIERE_DATA}/logs/bulk"
+            elif [ -f "/usr/local/share/poudriere/html/index.html" ]; then
+                echo "HTML:/usr/local/share/poudriere/html"
+            elif [ -d "${POUDRIERE_DATA}/logs/bulk" ]; then
+                echo "HTML:${POUDRIERE_DATA}/logs/bulk"
+            elif [ -d "/usr/local/share/poudriere/html" ]; then
+                echo "HTML:/usr/local/share/poudriere/html"
+            else
+                echo "HTML:/usr/local/share/poudriere/html"
+            fi
+            """
+        }
 
         let pathOutput = try await executeCommand(pathDetectionCommand)
         print("DEBUG: Path detection output:\n\(pathOutput)")
@@ -765,9 +889,22 @@ extension SSHConnectionManager {
             }
         }
 
-        print("DEBUG: Final paths - DATA: \(dataPath), HTML: \(htmlPath)")
+        print("DEBUG: Poudriere Configuration Summary:")
+        print("  - Config Path: \(customConfigPath ?? "standard")")
+        print("  - DATA Path: \(dataPath)")
+        print("  - HTML Path: \(htmlPath)")
 
-        return PoudriereInfo(isInstalled: true, htmlPath: htmlPath, dataPath: dataPath)
+        // Get running builds
+        let runningBuilds = (try? await getRunningPoudriereBulk()) ?? []
+        print("  - Running Builds: \(runningBuilds.joined(separator: ", "))")
+
+        return PoudriereInfo(
+            isInstalled: true,
+            htmlPath: htmlPath,
+            dataPath: dataPath,
+            configPath: customConfigPath,
+            runningBuilds: runningBuilds
+        )
     }
 
     /// Load HTML content from poudriere
@@ -1070,6 +1207,437 @@ extension SSHConnectionManager {
         }
 
         return options
+    }
+}
+
+// MARK: - Security Operations
+
+extension SSHConnectionManager {
+    /// Audit packages for security vulnerabilities using pkg audit
+    func auditPackageVulnerabilities() async throws -> [Vulnerability] {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Run pkg audit with -F to fetch latest VuXML database
+        // Output format:
+        // package-version is vulnerable:
+        // CVE-XXXX-YYYY -- description
+        // WWW: url
+        // Note: pkg audit returns exit code 1 when vulnerabilities are found,
+        // so we wrap it to always succeed
+        let command = "pkg audit -F 2>&1; true"
+        print("DEBUG: Running pkg audit...")
+        let output = try await executeCommand(command)
+        print("DEBUG: pkg audit output length: \(output.count)")
+        print("DEBUG: pkg audit output preview: \(String(output.prefix(500)))")
+
+        return parseVulnerabilities(output)
+    }
+
+    private func parseVulnerabilities(_ output: String) -> [Vulnerability] {
+        var vulnerabilities: [Vulnerability] = []
+        let lines = output.components(separatedBy: .newlines)
+
+        var currentPackage = ""
+        var currentVersion = ""
+        var i = 0
+
+        while i < lines.count {
+            let line = lines[i].trimmingCharacters(in: .whitespaces)
+
+            // Look for package line: "package-version is vulnerable:"
+            if line.hasSuffix("is vulnerable:") {
+                // Extract package name and version
+                let parts = line.replacingOccurrences(of: " is vulnerable:", with: "")
+                    .components(separatedBy: "-")
+
+                // Version is usually the last part
+                if !parts.isEmpty {
+                    currentVersion = parts.last ?? ""
+                    currentPackage = parts.dropLast().joined(separator: "-")
+                }
+
+                i += 1
+                continue
+            }
+
+            // Look for CVE/vulnerability line
+            if !currentPackage.isEmpty && line.contains("--") {
+                let vulnParts = line.components(separatedBy: " -- ")
+                if vulnParts.count >= 2 {
+                    let vulnId = vulnParts[0].trimmingCharacters(in: .whitespaces)
+                    let description = vulnParts[1].trimmingCharacters(in: .whitespaces)
+
+                    // Look ahead for WWW line
+                    var url = ""
+                    if i + 1 < lines.count {
+                        let nextLine = lines[i + 1].trimmingCharacters(in: .whitespaces)
+                        if nextLine.hasPrefix("WWW:") {
+                            url = nextLine.replacingOccurrences(of: "WWW:", with: "")
+                                .trimmingCharacters(in: .whitespaces)
+                            i += 1 // Skip the WWW line
+                        }
+                    }
+
+                    vulnerabilities.append(Vulnerability(
+                        packageName: currentPackage,
+                        version: currentVersion,
+                        vuln: vulnId,
+                        description: description,
+                        url: url
+                    ))
+                }
+            }
+
+            i += 1
+        }
+
+        print("DEBUG: Parsed \(vulnerabilities.count) vulnerabilities")
+        return vulnerabilities
+    }
+}
+
+// MARK: - Jails Operations
+
+extension SSHConnectionManager {
+    /// Check if user is root
+    func hasElevatedPrivileges() async throws -> Bool {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Check if user is root (UID = 0)
+        let uidCommand = "id -u"
+        let uid = try await executeCommand(uidCommand).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let isRoot = uid == "0"
+        print("DEBUG: User UID: \(uid), is root: \(isRoot)")
+        return isRoot
+    }
+
+    /// List all jails (running and configured)
+    func listJails() async throws -> [Jail] {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Use jls to get running jails
+        // Format: JID IP Hostname Path
+        let command = "jls -n jid name host.hostname path ip4.addr 2>/dev/null || echo ''"
+        print("DEBUG: Listing jails...")
+        let output = try await executeCommand(command)
+        print("DEBUG: jls output: \(output)")
+
+        // Get list of jails configured in rc.conf
+        let rcConfJails = try await getManagedJails()
+
+        return parseJails(output, managedJails: rcConfJails)
+    }
+
+    /// Get list of jails configured in /etc/jail.conf and /etc/jail.conf.d/
+    private func getManagedJails() async throws -> Set<String> {
+        // Check jail.conf and jail.conf.d for jail definitions
+        let command = """
+        {
+            # Check main jail.conf
+            if [ -f /etc/jail.conf ]; then
+                awk '/^[[:space:]]*[a-zA-Z0-9_-]+[[:space:]]*{/ {gsub(/[[:space:]]*{.*/, ""); print}' /etc/jail.conf
+            fi
+            # Check jail.conf.d directory
+            if [ -d /etc/jail.conf.d ]; then
+                find /etc/jail.conf.d -type f \\( -name "*.conf" -o -name "*" ! -name ".*" \\) -exec awk '/^[[:space:]]*[a-zA-Z0-9_-]+[[:space:]]*{/ {gsub(/[[:space:]]*{.*/, ""); print}' {} \\;
+            fi
+        } | sort -u
+        """
+        let output = try await executeCommand(command).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !output.isEmpty else {
+            print("DEBUG: No jails configured in /etc/jail.conf or /etc/jail.conf.d/")
+            return Set()
+        }
+
+        // Parse list of jail names (one per line)
+        let jailNames = output.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        print("DEBUG: Managed jails from jail.conf: \(jailNames)")
+        return Set(jailNames)
+    }
+
+    /// Start a jail
+    func startJail(name: String) async throws {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Try multiple methods to start jail
+        let command = """
+        if [ -f /etc/rc.d/jail ]; then
+            service jail start \(name)
+        elif [ -x /usr/local/bin/ezjail-admin ]; then
+            ezjail-admin start \(name)
+        elif [ -x /usr/local/bin/iocage ]; then
+            iocage start \(name)
+        else
+            jail -c \(name)
+        fi
+        """
+        print("DEBUG: Starting jail: \(name)")
+        _ = try await executeCommand(command)
+    }
+
+    /// Stop a jail
+    func stopJail(name: String) async throws {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Try multiple methods to stop jail
+        let command = """
+        if [ -f /etc/rc.d/jail ]; then
+            service jail stop \(name)
+        elif [ -x /usr/local/bin/ezjail-admin ]; then
+            ezjail-admin stop \(name)
+        elif [ -x /usr/local/bin/iocage ]; then
+            iocage stop \(name)
+        else
+            jail -r \(name)
+        fi
+        """
+        print("DEBUG: Stopping jail: \(name)")
+        _ = try await executeCommand(command)
+    }
+
+    /// Restart a jail
+    func restartJail(name: String) async throws {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Try multiple methods to restart jail
+        let command = """
+        if [ -f /etc/rc.d/jail ]; then
+            service jail restart \(name)
+        elif [ -x /usr/local/bin/ezjail-admin ]; then
+            ezjail-admin restart \(name)
+        elif [ -x /usr/local/bin/iocage ]; then
+            iocage restart \(name)
+        else
+            jail -rc \(name)
+        fi
+        """
+        print("DEBUG: Restarting jail: \(name)")
+        _ = try await executeCommand(command)
+    }
+
+    /// Get jail configuration from /etc/jail.conf or /etc/jail.conf.d/
+    func getJailConfig(name: String) async throws -> JailConfig {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Check both /etc/jail.conf and /etc/jail.conf.d/ for jail configuration
+        // Only extract the specific jail's configuration block
+        let command = """
+        {
+            # Check main jail.conf
+            if [ -f /etc/jail.conf ]; then
+                awk '
+                    /^[[:space:]]*\(name)[[:space:]]*\\{/ { found=1; print; next }
+                    found && /^[[:space:]]*\\}/ { print; found=0; exit }
+                    found { print }
+                ' /etc/jail.conf 2>/dev/null
+            fi
+
+            # Check jail.conf.d directory
+            if [ -d /etc/jail.conf.d ]; then
+                find /etc/jail.conf.d -type f \\( -name "*.conf" -o -name "*" ! -name ".*" \\) -exec awk '
+                    /^[[:space:]]*\(name)[[:space:]]*\\{/ { found=1; print; next }
+                    found && /^[[:space:]]*\\}/ { print; found=0; exit }
+                    found { print }
+                ' {} \\; 2>/dev/null
+            fi
+        } | head -1000
+        """
+        let output = try await executeCommand(command)
+
+        return parseJailConfig(name: name, output: output)
+    }
+
+    /// Get jail resource usage
+    func getJailResourceUsage(name: String) async throws -> JailResourceUsage {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Get process count and CPU usage via jexec
+        let psCommand = "jexec \(name) ps aux 2>/dev/null | wc -l"
+        let procCount = try await executeCommand(psCommand)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Get memory usage from jls
+        let memCommand = "jls -j \(name) -h name memoryuse 2>/dev/null | tail -1 | awk '{print $2}'"
+        let memUsed = try await executeCommand(memCommand)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // CPU percentage is harder to get, use a placeholder for now
+        let cpuPercent = 0.0
+
+        return JailResourceUsage(
+            cpuPercent: cpuPercent,
+            memoryUsed: formatBytes(memUsed),
+            memoryLimit: "",
+            processCount: Int(procCount) ?? 0
+        )
+    }
+
+    // MARK: - Helpers
+
+    private func parseJails(_ output: String, managedJails: Set<String>) -> [Jail] {
+        var jails: [Jail] = []
+        var runningJailNames: Set<String> = []
+
+        // Parse running jails from jls output
+        for line in output.components(separatedBy: .newlines) {
+            guard !line.isEmpty else { continue }
+
+            // Parse jls -n output format: key=value key=value
+            var jid = ""
+            var name = ""
+            var hostname = ""
+            var path = ""
+            var ip = ""
+
+            let parts = line.components(separatedBy: .whitespaces)
+            for part in parts {
+                let keyValue = part.components(separatedBy: "=")
+                guard keyValue.count == 2 else { continue }
+
+                let key = keyValue[0]
+                let value = keyValue[1]
+
+                switch key {
+                case "jid": jid = value
+                case "name": name = value
+                case "host.hostname": hostname = value
+                case "path": path = value
+                case "ip4.addr": ip = value
+                default: break
+                }
+            }
+
+            if !jid.isEmpty && !name.isEmpty {
+                let isManaged = managedJails.contains(name)
+                print("DEBUG: Running jail \(name) isManaged: \(isManaged)")
+                runningJailNames.insert(name)
+
+                jails.append(Jail(
+                    id: name,
+                    jid: jid,
+                    name: name,
+                    hostname: hostname,
+                    path: path,
+                    ip: ip,
+                    status: .running,
+                    isManaged: isManaged
+                ))
+            }
+        }
+
+        // Add stopped jails from configuration
+        for managedJailName in managedJails {
+            if !runningJailNames.contains(managedJailName) {
+                print("DEBUG: Adding stopped jail: \(managedJailName)")
+                jails.append(Jail(
+                    id: managedJailName,
+                    jid: "",  // No JID for stopped jails
+                    name: managedJailName,
+                    hostname: "",
+                    path: "",
+                    ip: "",
+                    status: .stopped,
+                    isManaged: true  // By definition, it's from the config
+                ))
+            }
+        }
+
+        print("DEBUG: Parsed \(jails.count) total jails (\(runningJailNames.count) running, \(jails.count - runningJailNames.count) stopped)")
+        return jails
+    }
+
+    private func parseJailConfig(name: String, output: String) -> JailConfig {
+        var parameters: [String: String] = [:]
+        var path = ""
+        var hostname = ""
+        var ip = ""
+
+        for line in output.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty && !trimmed.hasPrefix("#") else { continue }
+
+            // Parse "key = value;" format
+            if let equalsIndex = trimmed.firstIndex(of: "=") {
+                let key = String(trimmed[..<equalsIndex]).trimmingCharacters(in: .whitespaces)
+                var value = String(trimmed[trimmed.index(after: equalsIndex)...])
+                    .trimmingCharacters(in: .whitespaces)
+
+                // Remove trailing semicolon
+                if value.hasSuffix(";") {
+                    value = String(value.dropLast())
+                        .trimmingCharacters(in: .whitespaces)
+                }
+
+                // Remove quotes
+                if value.hasPrefix("\"") && value.hasSuffix("\"") {
+                    value = String(value.dropFirst().dropLast())
+                }
+
+                parameters[key] = value
+
+                // Extract common fields
+                switch key {
+                case "path": path = value
+                case "host.hostname": hostname = value
+                case "ip4.addr": ip = value
+                default: break
+                }
+            }
+        }
+
+        return JailConfig(
+            name: name,
+            path: path,
+            hostname: hostname,
+            ip: ip,
+            parameters: parameters
+        )
+    }
+
+    private func formatBytes(_ bytesStr: String) -> String {
+        guard let bytes = Int(bytesStr) else { return bytesStr }
+
+        let kb = Double(bytes) / 1024
+        let mb = kb / 1024
+        let gb = mb / 1024
+
+        if gb >= 1 {
+            return String(format: "%.2f GB", gb)
+        } else if mb >= 1 {
+            return String(format: "%.2f MB", mb)
+        } else if kb >= 1 {
+            return String(format: "%.2f KB", kb)
+        } else {
+            return "\(bytes) B"
+        }
     }
 }
 

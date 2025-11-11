@@ -146,9 +146,11 @@ struct SavedServer: Identifiable, Codable {
 enum SidebarSection: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"
     case files = "Files"
+    case jails = "Jails"
     case logs = "Logs"
     case ports = "Ports"
     case poudriere = "Poudriere"
+    case security = "Security"
     case sessions = "Sessions"
     case sockstat = "Sockstat"
     case sysctl = "Sysctl"
@@ -160,9 +162,11 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         switch self {
         case .dashboard: return "chart.bar"
         case .files: return "folder"
+        case .jails: return "building.2"
         case .logs: return "doc.text"
         case .ports: return "app.connected.to.app.below.fill"
         case .poudriere: return "shippingbox"
+        case .security: return "shield.lefthalf.filled"
         case .sessions: return "person.2"
         case .sockstat: return "network"
         case .sysctl: return "slider.horizontal.3"
@@ -288,6 +292,30 @@ struct ContentView: View {
             // Auto-refresh dashboard every 5 seconds if connected and viewing dashboard
             if sshManager.isConnected && selectedSection == .dashboard {
                 loadDataFromServer()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openTerminalWithCommand)) { notification in
+            // Switch to terminal tab when jail console is requested
+            print("DEBUG: ContentView received openTerminalWithCommand notification")
+            if sshManager.isConnected {
+                let wasNotOnTerminal = selectedSection != .terminal
+                print("DEBUG: Switching to terminal section (was on terminal: \(!wasNotOnTerminal))")
+                selectedSection = .terminal
+
+                // Only re-post if we just switched to terminal tab (so TerminalContentView gets created)
+                if wasNotOnTerminal, let command = notification.userInfo?["command"] as? String {
+                    print("DEBUG: Will re-post command after terminal loads: \(command)")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        print("DEBUG: Re-posting command notification")
+                        NotificationCenter.default.post(
+                            name: .openTerminalWithCommand,
+                            object: nil,
+                            userInfo: ["command": command]
+                        )
+                    }
+                }
+            } else {
+                print("DEBUG: Not connected, cannot switch to terminal")
             }
         }
     }
@@ -467,6 +495,9 @@ struct DetailView: View {
             } else if section == .files {
                 // Files browser view
                 FilesContentView()
+            } else if section == .jails {
+                // Jails management
+                JailsContentView()
             } else if section == .logs {
                 // Logs viewer
                 LogsContentView()
@@ -485,6 +516,9 @@ struct DetailView: View {
             } else if section == .poudriere {
                 // Poudriere build status viewer
                 PoudriereContentView()
+            } else if section == .security {
+                // Security vulnerability scanner
+                SecurityContentView()
             } else if section == .terminal {
                 // Terminal view handled separately with its own coordinator
                 TerminalContentView()

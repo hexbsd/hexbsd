@@ -15,6 +15,7 @@ import AppKit
 struct TerminalContentView: View {
     @StateObject private var coordinator = TerminalCoordinator(sshManager: SSHConnectionManager.shared)
     @State private var showError = false
+    @State private var pendingCommand: String?
 
     var body: some View {
         Group {
@@ -44,6 +45,17 @@ struct TerminalContentView: View {
                 showError = true
             }
         }
+        .onChange(of: coordinator.isReady) { oldValue, newValue in
+            // When terminal becomes ready (stdin writer available), send any pending command
+            if newValue && !oldValue, let command = pendingCommand {
+                print("DEBUG: Terminal ready, sending pending command: \(command)")
+                // Wait a bit for the shell prompt to appear
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    coordinator.sendCommand(command)
+                    pendingCommand = nil
+                }
+            }
+        }
         .onAppear {
             // Auto-connect when terminal view appears
             if !coordinator.isConnected {
@@ -52,11 +64,35 @@ struct TerminalContentView: View {
                         await coordinator.startShell()
                     }
                 }
+            } else if let command = pendingCommand {
+                // Terminal already connected, send command immediately
+                print("DEBUG: Terminal already connected, sending command: \(command)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    coordinator.sendCommand(command)
+                    pendingCommand = nil
+                }
             }
         }
         .onDisappear {
             // Disconnect when navigating away
             coordinator.stopShell()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openTerminalWithCommand)) { notification in
+            // Listen for command notifications
+            if let command = notification.userInfo?["command"] as? String {
+                print("DEBUG: Terminal received command notification: \(command)")
+                if coordinator.isConnected && coordinator.isReady {
+                    // Terminal is ready, send immediately
+                    print("DEBUG: Sending command immediately")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        coordinator.sendCommand(command)
+                    }
+                } else {
+                    // Store command to send when terminal is ready
+                    print("DEBUG: Storing pending command")
+                    pendingCommand = command
+                }
+            }
         }
     }
 }
@@ -85,6 +121,7 @@ class TerminalCoordinator: NSObject, ObservableObject, TerminalViewDelegate {
     private var shellTask: Task<Void, Error>?
 
     @Published var isConnected = false
+    @Published var isReady = false  // True when stdinWriter is available
     @Published var error: String?
 
     init(sshManager: SSHConnectionManager) {
@@ -119,6 +156,7 @@ class TerminalCoordinator: NSObject, ObservableObject, TerminalViewDelegate {
 
         Task { @MainActor in
             isConnected = false
+            isReady = false
         }
     }
 
@@ -136,6 +174,34 @@ class TerminalCoordinator: NSObject, ObservableObject, TerminalViewDelegate {
     /// Called by SSH manager to provide stdin writer
     func setStdinWriter(_ writer: @escaping (ByteBuffer) async throws -> Void) {
         self.stdinWriter = writer
+        Task { @MainActor in
+            self.isReady = true
+            print("DEBUG: Terminal is now ready (stdin writer set)")
+        }
+    }
+
+    /// Send a command string to the terminal
+    func sendCommand(_ command: String) {
+        guard let stdinWriter = stdinWriter else {
+            print("DEBUG: Cannot send command, no stdin writer available")
+            return
+        }
+
+        print("DEBUG: Sending command to terminal: \(command)")
+        Task {
+            do {
+                // Send the command followed by Enter
+                var buffer = ByteBuffer()
+                buffer.writeString(command + "\n")
+                try await stdinWriter(buffer)
+                print("DEBUG: Command sent successfully")
+            } catch {
+                print("DEBUG: Failed to send command: \(error)")
+                await MainActor.run {
+                    self.error = "Failed to send command: \(error.localizedDescription)"
+                }
+            }
+        }
     }
 
     // MARK: - TerminalViewDelegate
