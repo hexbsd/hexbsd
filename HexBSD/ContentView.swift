@@ -598,6 +598,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case files = "Files"
     case jails = "Jails"
     case logs = "Logs"
+    case nis = "NIS"
     case ports = "Ports"
     case poudriere = "Poudriere"
     case security = "Security"
@@ -615,6 +616,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .files: return "folder"
         case .jails: return "building.2"
         case .logs: return "doc.text"
+        case .nis: return "dot.radiowaves.left.and.right"
         case .ports: return "app.connected.to.app.below.fill"
         case .poudriere: return "shippingbox"
         case .security: return "shield.lefthalf.filled"
@@ -987,6 +989,9 @@ struct DetailView: View {
             } else if section == .zfs {
                 // ZFS pool and dataset management
                 ZFSContentView()
+            } else if section == .nis {
+                // NIS (Network Information Service) management
+                NISContentView()
             } else {
                 Text(section.rawValue)
                     .font(.largeTitle)

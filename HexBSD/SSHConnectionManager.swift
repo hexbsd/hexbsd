@@ -2640,4 +2640,272 @@ extension SSHConnectionManager {
     func unmountBootEnvironment(name: String) async throws {
         _ = try await executeCommand("bectl unmount \(name)")
     }
+
+    // MARK: - NIS (Network Information Service) Methods
+
+    /// Get NIS status (client and server)
+    func getNISStatus() async throws -> NISStatus {
+        // Check domain
+        let domainOutput = try await executeCommand("domainname 2>/dev/null || echo ''")
+        let domain = domainOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Check if ypbind (client) is running
+        let ypbindCheck = try await executeCommand("ps aux | grep -v grep | grep ypbind | wc -l")
+        let isClientEnabled = (Int(ypbindCheck.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) > 0
+
+        // Check if ypserv (server) is running
+        let ypservCheck = try await executeCommand("ps aux | grep -v grep | grep ypserv | wc -l")
+        let isServerEnabled = (Int(ypservCheck.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) > 0
+
+        // Try to get bound server if client is running
+        var boundServer: String?
+        if isClientEnabled {
+            do {
+                let serverOutput = try await executeCommand("ypwhich 2>/dev/null || echo ''")
+                let server = serverOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !server.isEmpty && server != "ypwhich: not running ypbind" {
+                    boundServer = server
+                }
+            } catch {
+                // Ignore errors for ypwhich
+            }
+        }
+
+        // Determine server type if server is running
+        var serverType: NISStatus.ServerType?
+        if isServerEnabled {
+            // Check if this is a master or slave by looking for ypxfrd (typically only on master)
+            let ypxfrdCheck = try await executeCommand("ps aux | grep -v grep | grep ypxfrd | wc -l")
+            let hasYpxfrd = (Int(ypxfrdCheck.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) > 0
+
+            // Also check for /var/yp/Makefile which is typically only on master
+            let makefileCheck = try await executeCommand("test -f /var/yp/Makefile && echo 'yes' || echo 'no'")
+            let hasMakefile = makefileCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "yes"
+
+            serverType = (hasYpxfrd || hasMakefile) ? .master : .slave
+        }
+
+        return NISStatus(
+            isClientEnabled: isClientEnabled,
+            isServerEnabled: isServerEnabled,
+            domain: domain,
+            boundServer: boundServer,
+            serverType: serverType
+        )
+    }
+
+    /// Set NIS domain
+    func setNISDomain(_ domain: String) async throws {
+        // Set domain for current session
+        _ = try await executeCommand("domainname \(domain)")
+
+        // Enable in rc.conf for persistence
+        _ = try await executeCommand("sysrc nisdomainname='\(domain)'")
+    }
+
+    /// Start NIS client
+    func startNISClient() async throws {
+        // Enable in rc.conf
+        _ = try await executeCommand("sysrc nis_client_enable='YES'")
+
+        // Start ypbind
+        _ = try await executeCommand("service ypbind start")
+    }
+
+    /// Stop NIS client
+    func stopNISClient() async throws {
+        // Stop ypbind
+        _ = try await executeCommand("service ypbind stop")
+
+        // Disable in rc.conf
+        _ = try await executeCommand("sysrc nis_client_enable='NO'")
+    }
+
+    /// Restart NIS client
+    func restartNISClient() async throws {
+        _ = try await executeCommand("service ypbind restart")
+    }
+
+    /// List available NIS maps
+    func listNISMaps() async throws -> [NISMap] {
+        // Get list of maps with their nicknames
+        let output = try await executeCommand("ypcat -x 2>/dev/null || echo ''")
+
+        var maps: [NISMap] = []
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: "\"").map { String($0).trimmingCharacters(in: .whitespaces) }
+            if parts.count >= 2 {
+                let nickname = parts[0]
+                let mapName = parts[1]
+
+                // Try to get entry count
+                var entries = 0
+                do {
+                    let countOutput = try await executeCommand("ypcat \(mapName) 2>/dev/null | wc -l")
+                    entries = Int(countOutput.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+                } catch {
+                    // If ypcat fails, continue with 0 entries
+                }
+
+                let map = NISMap(
+                    name: mapName,
+                    nickname: nickname,
+                    entries: entries,
+                    lastModified: nil
+                )
+                maps.append(map)
+            }
+        }
+
+        return maps
+    }
+
+    /// Get entries from a specific NIS map
+    func getNISMapEntries(mapName: String) async throws -> [NISMapEntry] {
+        let output = try await executeCommand("ypcat \(mapName) 2>/dev/null || echo ''")
+
+        var entries: [NISMapEntry] = []
+        for line in output.split(separator: "\n") {
+            let line = String(line)
+            if let colonIndex = line.firstIndex(of: ":") ?? line.firstIndex(of: " ") {
+                let key = String(line[..<colonIndex])
+                let value = String(line[line.index(after: colonIndex)...])
+
+                entries.append(NISMapEntry(
+                    key: key.trimmingCharacters(in: .whitespaces),
+                    value: value.trimmingCharacters(in: .whitespaces)
+                ))
+            }
+        }
+
+        return entries
+    }
+
+    /// Initialize NIS server
+    func initializeNISServer(isMaster: Bool, masterServer: String?) async throws {
+        if isMaster {
+            // Initialize as master
+            _ = try await executeCommand("cd /var/yp && ypinit -m <<EOF\n\nEOF")
+        } else {
+            // Initialize as slave
+            guard let master = masterServer else {
+                throw NSError(domain: "NIS", code: -1, userInfo: [NSLocalizedDescriptionKey: "Master server required for slave initialization"])
+            }
+            _ = try await executeCommand("ypinit -s \(master)")
+        }
+
+        // Enable services in rc.conf
+        _ = try await executeCommand("sysrc nis_server_enable='YES'")
+        if isMaster {
+            _ = try await executeCommand("sysrc nis_yppasswdd_enable='YES'")
+            _ = try await executeCommand("sysrc nis_ypxfrd_enable='YES'")
+        }
+    }
+
+    /// Start NIS server
+    func startNISServer() async throws {
+        // Start ypserv
+        _ = try await executeCommand("service ypserv start")
+
+        // Start yppasswdd if master
+        _ = try await executeCommand("service yppasswdd start 2>/dev/null || true")
+
+        // Start ypxfrd if master
+        _ = try await executeCommand("service ypxfrd start 2>/dev/null || true")
+    }
+
+    /// Stop NIS server
+    func stopNISServer() async throws {
+        _ = try await executeCommand("service ypserv stop")
+        _ = try await executeCommand("service yppasswdd stop 2>/dev/null || true")
+        _ = try await executeCommand("service ypxfrd stop 2>/dev/null || true")
+    }
+
+    /// Restart NIS server
+    func restartNISServer() async throws {
+        _ = try await executeCommand("service ypserv restart")
+        _ = try await executeCommand("service yppasswdd restart 2>/dev/null || true")
+        _ = try await executeCommand("service ypxfrd restart 2>/dev/null || true")
+    }
+
+    /// Rebuild NIS maps
+    func rebuildNISMaps() async throws {
+        _ = try await executeCommand("cd /var/yp && make")
+    }
+
+    /// Push NIS maps to slave servers
+    func pushNISMaps() async throws {
+        _ = try await executeCommand("cd /var/yp && yppush -d $(domainname) passwd.byname")
+        _ = try await executeCommand("cd /var/yp && yppush -d $(domainname) group.byname")
+        _ = try await executeCommand("cd /var/yp && yppush -d $(domainname) hosts.byname")
+    }
+
+    /// List NIS server maps (from /var/yp/<domain>)
+    func listNISServerMaps() async throws -> [NISMap] {
+        let domain = try await executeCommand("domainname")
+        let domainName = domain.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !domainName.isEmpty else {
+            return []
+        }
+
+        let output = try await executeCommand("ls -la /var/yp/\(domainName)/*.db 2>/dev/null || echo ''")
+
+        var maps: [NISMap] = []
+        for line in output.split(separator: "\n") {
+            let components = line.split(separator: " ").map { String($0) }
+            if components.count >= 9 {
+                // Extract filename from path
+                let fullPath = components[8]
+                if let filename = fullPath.split(separator: "/").last {
+                    let mapName = String(filename).replacingOccurrences(of: ".db", with: "")
+
+                    // Get size
+                    let size = components[4]
+
+                    // Get modification date
+                    let dateStr = "\(components[5]) \(components[6]) \(components[7])"
+
+                    maps.append(NISMap(
+                        name: mapName,
+                        nickname: "",
+                        entries: 0,  // Would need to parse the db file
+                        lastModified: dateStr
+                    ))
+                }
+            }
+        }
+
+        return maps
+    }
+
+    /// List NIS slave servers
+    func listNISSlaveServers() async throws -> [NISSlaveServer] {
+        let domain = try await executeCommand("domainname")
+        let domainName = domain.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !domainName.isEmpty else {
+            return []
+        }
+
+        // Read ypservers map
+        let output = try await executeCommand("cat /var/yp/\(domainName)/ypservers 2>/dev/null || echo ''")
+
+        var slaves: [NISSlaveServer] = []
+        for line in output.split(separator: "\n") {
+            let hostname = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !hostname.isEmpty {
+                // Try to ping the server to check status
+                let pingOutput = try await executeCommand("ping -c 1 -t 1 \(hostname) >/dev/null 2>&1 && echo 'active' || echo 'inactive'")
+                let status = pingOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                slaves.append(NISSlaveServer(
+                    hostname: hostname,
+                    status: status
+                ))
+            }
+        }
+
+        return slaves
+    }
 }
