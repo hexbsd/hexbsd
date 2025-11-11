@@ -147,6 +147,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"
     case files = "Files"
     case logs = "Logs"
+    case ports = "Ports"
     case poudriere = "Poudriere"
     case sessions = "Sessions"
     case sockstat = "Sockstat"
@@ -160,6 +161,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .dashboard: return "chart.bar"
         case .files: return "folder"
         case .logs: return "doc.text"
+        case .ports: return "app.connected.to.app.below.fill"
         case .poudriere: return "shippingbox"
         case .sessions: return "person.2"
         case .sockstat: return "network"
@@ -477,6 +479,9 @@ struct DetailView: View {
             } else if section == .sessions {
                 // User sessions viewer
                 SessionsContentView()
+            } else if section == .ports {
+                // Ports tree browser
+                PortsContentView()
             } else if section == .poudriere {
                 // Poudriere build status viewer
                 PoudriereContentView()
