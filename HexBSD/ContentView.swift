@@ -596,19 +596,15 @@ struct SavedServer: Identifiable, Codable {
 enum SidebarSection: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"
     case files = "Files"
-    case firewall = "Firewall"
     case jails = "Jails"
     case logs = "Logs"
-    case nfs = "NFS"
-    case nis = "NIS"
     case ports = "Ports"
     case poudriere = "Poudriere"
     case security = "Security"
     case sessions = "Sessions"
-    case sockstat = "Sockstat"
-    case sysctl = "Sysctl"
+    case sockstat = "Sockets"
+    case tasks = "Tasks"
     case terminal = "Terminal"
-    case bhyve = "Virtual Machines"
     case zfs = "ZFS"
 
     var id: String { rawValue }
@@ -617,19 +613,15 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         switch self {
         case .dashboard: return "chart.bar"
         case .files: return "folder"
-        case .firewall: return "shield.lefthalf.filled"
         case .jails: return "building.2"
         case .logs: return "doc.text"
-        case .nfs: return "dot.radiowaves.left.and.right"
-        case .nis: return "dot.radiowaves.left.and.right"
         case .ports: return "app.connected.to.app.below.fill"
         case .poudriere: return "shippingbox"
         case .security: return "shield.lefthalf.filled"
         case .sessions: return "person.2"
         case .sockstat: return "network"
-        case .sysctl: return "slider.horizontal.3"
+        case .tasks: return "clock"
         case .terminal: return "terminal"
-        case .bhyve: return "cpu"
         case .zfs: return "cylinder.split.1x2"
         }
     }
@@ -962,24 +954,15 @@ struct DetailView: View {
                     .padding()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if section == .bhyve {
-                // Bhyve virtual machine management
-                BhyveContentView()
             } else if section == .files {
                 // Files browser view
                 FilesContentView()
-            } else if section == .firewall {
-                // Firewall management (ipfw and pf)
-                FirewallContentView()
             } else if section == .jails {
                 // Jails management
                 JailsContentView()
             } else if section == .logs {
                 // Logs viewer
                 LogsContentView()
-            } else if section == .sysctl {
-                // Sysctl browser
-                SysctlContentView()
             } else if section == .sockstat {
                 // Network connections viewer
                 NetworkContentView()
@@ -995,18 +978,15 @@ struct DetailView: View {
             } else if section == .security {
                 // Security vulnerability scanner
                 SecurityContentView()
+            } else if section == .tasks {
+                // Cron task scheduler and viewer
+                TasksContentView()
             } else if section == .terminal {
                 // Terminal view handled separately with its own coordinator
                 TerminalContentView()
             } else if section == .zfs {
                 // ZFS pool and dataset management
                 ZFSContentView()
-            } else if section == .nfs {
-                // NFS (Network File System) management
-                NFSContentView()
-            } else if section == .nis {
-                // NIS (Network Information Service) management
-                NISContentView()
             } else {
                 Text(section.rawValue)
                     .font(.largeTitle)
