@@ -39,9 +39,8 @@ class SSHConnectionManager {
     // SSH client
     private var client: SSHClient?
 
-    // Network rate tracking
-    private var lastNetworkIn: UInt64 = 0
-    private var lastNetworkOut: UInt64 = 0
+    // Network rate tracking per interface
+    private var lastInterfaceStats: [String: (inBytes: UInt64, outBytes: UInt64)] = [:]
     private var lastNetworkTime: Date?
 
     // CPU tracking for per-core usage
@@ -1654,9 +1653,9 @@ extension SSHConnectionManager {
         let uptimeOutput = try await executeCommand("uptime")
         let uptime = parseUptime(uptimeOutput)
 
-        // Get load average
-        let loadAvg = try await executeCommand("sysctl -n vm.loadavg")
-        let loads = parseLoadAverage(loadAvg)
+        // Get active network connections count
+        let connectionsOutput = try await executeCommand("netstat -an | grep ESTABLISHED | wc -l")
+        let connectionCount = connectionsOutput.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Get memory usage
         let memInfo = try await executeCommand("sysctl -n hw.physmem hw.usermem")
@@ -1685,39 +1684,57 @@ extension SSHConnectionManager {
         let dfOutput = try await executeCommand("df -h /")
         let (storageUsed, storageTotal) = parseStorageUsage(dfOutput)
 
-        // Get network statistics and calculate rates
-        var networkIn = "0 KB/s"
-        var networkOut = "0 KB/s"
+        // Get per-interface network statistics
+        var networkInterfaces: [NetworkInterface] = []
 
         do {
-            // Get raw netstat output
-            let netstatOutput = try await executeCommand("netstat -ib | grep -v lo0")
-            let (currentIn, currentOut) = parseNetstatBytes(netstatOutput)
+            // Get raw netstat output per interface
+            let netstatOutput = try await executeCommand("netstat -ibn | grep -v lo0 | grep Link")
+            let currentInterfaceStats = parseNetstatByInterface(netstatOutput)
 
-            print("DEBUG: Current bytes - In: \(currentIn), Out: \(currentOut)")
+            print("DEBUG: Current interface stats: \(currentInterfaceStats)")
 
-            // Calculate rate if we have a previous measurement
+            // Calculate rates if we have a previous measurement
             let now = Date()
-            if let lastTime = lastNetworkTime {
+            if let lastTime = lastNetworkTime, !lastInterfaceStats.isEmpty {
                 let timeInterval = now.timeIntervalSince(lastTime)
                 if timeInterval > 0 {
-                    let inRate = Double(currentIn - lastNetworkIn) / timeInterval
-                    let outRate = Double(currentOut - lastNetworkOut) / timeInterval
+                    for (interface, currentStats) in currentInterfaceStats.sorted(by: { $0.key < $1.key }) {
+                        if let lastStats = lastInterfaceStats[interface] {
+                            let inDelta = currentStats.inBytes > lastStats.inBytes ? currentStats.inBytes - lastStats.inBytes : 0
+                            let outDelta = currentStats.outBytes > lastStats.outBytes ? currentStats.outBytes - lastStats.outBytes : 0
 
-                    networkIn = formatBytesPerSecond(inRate)
-                    networkOut = formatBytesPerSecond(outRate)
+                            let inRate = Double(inDelta) / timeInterval
+                            let outRate = Double(outDelta) / timeInterval
 
-                    print("DEBUG: Network rates - In: \(networkIn), Out: \(networkOut) (over \(String(format: "%.1f", timeInterval))s)")
+                            networkInterfaces.append(NetworkInterface(
+                                name: interface,
+                                inRate: formatBytesPerSecond(inRate),
+                                outRate: formatBytesPerSecond(outRate)
+                            ))
+
+                            print("DEBUG: \(interface) - In: \(formatBytesPerSecond(inRate)), Out: \(formatBytesPerSecond(outRate))")
+                        }
+                    }
+                }
+            } else {
+                // First call - return interfaces with 0 rates so they appear immediately
+                print("DEBUG: First network stats call, returning interfaces with 0 rates")
+                for interface in currentInterfaceStats.keys.sorted() {
+                    networkInterfaces.append(NetworkInterface(
+                        name: interface,
+                        inRate: "0 B/s",
+                        outRate: "0 B/s"
+                    ))
                 }
             }
 
             // Store current values for next calculation
-            lastNetworkIn = currentIn
-            lastNetworkOut = currentOut
+            lastInterfaceStats = currentInterfaceStats
             lastNetworkTime = now
         } catch {
             print("DEBUG: Network stats error: \(error)")
-            // Continue with defaults
+            // Continue with empty interfaces
         }
 
         return SystemStatus(
@@ -1727,9 +1744,8 @@ extension SSHConnectionManager {
             zfsArcUsage: String(format: "%.1f GB / %.1f GB", arcUsed, arcMax),
             storageUsage: String(format: "%.1f GB / %.1f GB", storageUsed, storageTotal),
             uptime: uptime,
-            loadAverage: String(format: "%.2f, %.2f, %.2f", loads.0, loads.1, loads.2),
-            networkIn: networkIn,
-            networkOut: networkOut
+            networkConnections: connectionCount,
+            networkInterfaces: networkInterfaces
         )
     }
 
@@ -2014,6 +2030,37 @@ extension SSHConnectionManager {
             inbound: formatBytesPerSecond(totalInKB * 1024),
             outbound: formatBytesPerSecond(totalOutKB * 1024)
         )
+    }
+
+    private func parseNetstatByInterface(_ output: String) -> [String: (inBytes: UInt64, outBytes: UInt64)] {
+        // Parse netstat -ibn for per-interface cumulative bytes
+        let lines = output.components(separatedBy: .newlines).filter { !$0.isEmpty }
+        var interfaceStats: [String: (inBytes: UInt64, outBytes: UInt64)] = [:]
+
+        for line in lines {
+            let components = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+
+            // FreeBSD netstat -ibn format with Link:
+            // Name Mtu Network Address Ibytes Ierrs Idrop Obytes Oerrs Ocoll
+            // em0  1500 <Link#1> 12:34:56:78:9a:bc 12345678 0 0 87654321 0 0
+
+            guard components.count >= 8 else { continue }
+
+            let interfaceName = components[0]
+
+            // Skip if it contains angle brackets (Link addresses)
+            if interfaceName.contains("<") || interfaceName.contains(">") {
+                continue
+            }
+
+            // Ibytes is typically at index 4, Obytes at index 7
+            if let inBytes = UInt64(components[4]),
+               let outBytes = UInt64(components[7]) {
+                interfaceStats[interfaceName] = (inBytes: inBytes, outBytes: outBytes)
+            }
+        }
+
+        return interfaceStats
     }
 
     private func parseNetstatBytes(_ output: String) -> (inbound: UInt64, outbound: UInt64) {

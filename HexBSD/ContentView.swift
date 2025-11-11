@@ -12,6 +12,12 @@ import Combine
 import AppKit
 #endif
 
+struct NetworkInterface {
+    let name: String
+    let inRate: String
+    let outRate: String
+}
+
 struct SystemStatus {
     let cpuUsage: String
     let cpuCores: [Double]  // Per-core CPU usage percentages
@@ -19,9 +25,8 @@ struct SystemStatus {
     let zfsArcUsage: String
     let storageUsage: String
     let uptime: String
-    let loadAverage: String
-    let networkIn: String
-    let networkOut: String
+    let networkConnections: String
+    let networkInterfaces: [NetworkInterface]
 
     // Helper to extract percentage from cpuUsage string
     var cpuPercentage: Double {
@@ -119,6 +124,66 @@ struct MetricCard: View {
                     .foregroundColor(.primary)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 20)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
+        )
+    }
+}
+
+struct NetworkInterfaceCard: View {
+    let title: String
+    let interfaces: [NetworkInterface]
+    let color: Color
+    let systemImage: String
+    let direction: String // "in" or "out"
+
+    var body: some View {
+        VStack(spacing: 15) {
+            HStack {
+                Image(systemName: systemImage)
+                    .font(.title2)
+                    .foregroundColor(color)
+                Text(title)
+                    .font(.headline)
+                    .foregroundColor(.primary)
+                Spacer()
+            }
+
+            if interfaces.isEmpty {
+                Text("No interfaces")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(height: 120)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(interfaces, id: \.name) { interface in
+                        HStack {
+                            Text(interface.name)
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundColor(.primary)
+                                .frame(width: 80, alignment: .leading)
+
+                            Spacer()
+
+                            Text(direction == "in" ? interface.inRate : interface.outRate)
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(color)
+                        }
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(color.opacity(0.1))
+                        )
+                    }
+                }
+                .frame(maxWidth: .infinity)
             }
         }
         .padding(20)
@@ -559,29 +624,29 @@ struct DetailView: View {
                                 )
                             }
 
-                            // Row 3: Network Traffic (Real-time)
+                            // Row 3: Network Traffic by Interface
                             LazyVGrid(columns: [
                                 GridItem(.flexible(), spacing: 20),
                                 GridItem(.flexible(), spacing: 20)
                             ], spacing: 20) {
-                                MetricCard(
+                                NetworkInterfaceCard(
                                     title: "Network In",
-                                    value: systemStatus.networkIn,
-                                    progress: nil,
+                                    interfaces: systemStatus.networkInterfaces,
                                     color: .teal,
-                                    systemImage: "arrow.down.circle"
+                                    systemImage: "arrow.down.circle",
+                                    direction: "in"
                                 )
 
-                                MetricCard(
+                                NetworkInterfaceCard(
                                     title: "Network Out",
-                                    value: systemStatus.networkOut,
-                                    progress: nil,
+                                    interfaces: systemStatus.networkInterfaces,
                                     color: .indigo,
-                                    systemImage: "arrow.up.circle"
+                                    systemImage: "arrow.up.circle",
+                                    direction: "out"
                                 )
                             }
 
-                            // Row 4: System Uptime and Load Average
+                            // Row 4: System Uptime and Network Connections
                             LazyVGrid(columns: [
                                 GridItem(.flexible(), spacing: 20),
                                 GridItem(.flexible(), spacing: 20)
@@ -595,11 +660,11 @@ struct DetailView: View {
                                 )
 
                                 MetricCard(
-                                    title: "Load Average",
-                                    value: systemStatus.loadAverage,
+                                    title: "Network Connections",
+                                    value: systemStatus.networkConnections,
                                     progress: nil,
                                     color: .pink,
-                                    systemImage: "chart.line.uptrend.xyaxis"
+                                    systemImage: "network"
                                 )
                             }
                         } else {
