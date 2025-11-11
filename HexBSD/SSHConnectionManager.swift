@@ -47,8 +47,8 @@ class SSHConnectionManager {
     private var lastCPUSnapshot: [UInt64] = []
     private var lastCPUTime: Date?
 
-    // Private initializer to enforce singleton
-    private init() {}
+    // Initializer - can create multiple instances for replication
+    init() {}
 
     /// Validate that the connected server is running FreeBSD
     func validateFreeBSD() async throws {
@@ -2507,5 +2507,59 @@ extension SSHConnectionManager {
     /// Stop a scrub on a ZFS pool
     func stopZFSScrub(pool: String) async throws {
         _ = try await executeCommand("zpool scrub -s \(pool)")
+    }
+
+    /// Replicate a ZFS dataset/snapshot to another server using ZFS send/receive
+    func replicateDataset(dataset: String, targetHost: String, targetManager: SSHConnectionManager) async throws {
+        // If it's a snapshot, replicate it directly
+        // If it's a dataset, create a snapshot first, then replicate
+        let snapshotToSend: String
+
+        if dataset.contains("@") {
+            // It's already a snapshot
+            snapshotToSend = dataset
+        } else {
+            // Create a temporary snapshot for replication
+            let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+            let snapshotName = "replication-\(timestamp)"
+            try await createZFSSnapshot(dataset: dataset, snapshotName: snapshotName)
+            snapshotToSend = "\(dataset)@\(snapshotName)"
+        }
+
+        // Use zfs send | zfs receive pattern
+        // Note: This is a simplified version. In production, you'd want to:
+        // 1. Check if the dataset exists on target
+        // 2. Use incremental send if possible
+        // 3. Handle resumable send/receive
+        // 4. Show progress
+
+        // For now, we'll execute the send on source and pipe to receive on target
+        // This requires SSH access from source to target or using an intermediate method
+
+        // Create the receive command on target
+        let receiveCommand = "zfs receive -F \(snapshotToSend.split(separator: "@")[0])"
+
+        // Execute send on source and capture output
+        let sendCommand = "zfs send \(snapshotToSend)"
+
+        // For now, we'll use a temporary file approach
+        let tempFile = "/tmp/zfs-replication-\(UUID().uuidString).zfs"
+
+        // Save send output to temp file on source
+        _ = try await executeCommand("zfs send \(snapshotToSend) > \(tempFile)")
+
+        // Copy to target using SCP-like functionality (through SSH)
+        // Get the data
+        let data = try await executeCommand("cat \(tempFile)")
+
+        // Write to target
+        _ = try await targetManager.executeCommand("cat > \(tempFile) << 'ZFSDATA'\n\(data)\nZFSDATA")
+
+        // Execute receive on target
+        _ = try await targetManager.executeCommand("cat \(tempFile) | \(receiveCommand)")
+
+        // Cleanup
+        _ = try await executeCommand("rm -f \(tempFile)")
+        _ = try await targetManager.executeCommand("rm -f \(tempFile)")
     }
 }

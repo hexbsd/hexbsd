@@ -127,8 +127,7 @@ struct ZFSContentView: View {
     enum ZFSViewType: String, CaseIterable {
         case pools = "Pools"
         case datasets = "Datasets"
-        case snapshots = "Snapshots"
-        case scrub = "Scrub"
+        case replication = "Replication"
     }
 
     var body: some View {
@@ -151,10 +150,8 @@ struct ZFSContentView: View {
                     PoolsView(viewModel: viewModel)
                 case .datasets:
                     DatasetsView(viewModel: viewModel)
-                case .snapshots:
-                    SnapshotsView(viewModel: viewModel)
-                case .scrub:
-                    ScrubView(viewModel: viewModel)
+                case .replication:
+                    ReplicationView(viewModel: viewModel)
                 }
             }
         }
@@ -182,6 +179,7 @@ struct ZFSContentView: View {
 
 struct PoolsView: View {
     @ObservedObject var viewModel: ZFSViewModel
+    @State private var expandedPools: Set<String> = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -206,7 +204,7 @@ struct PoolsView: View {
 
             Divider()
 
-            // Pools table
+            // Pools list
             if viewModel.isLoadingPools {
                 VStack(spacing: 20) {
                     ProgressView()
@@ -227,50 +225,225 @@ struct PoolsView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                Table(viewModel.pools) {
-                    TableColumn("Name") { pool in
-                        HStack(spacing: 8) {
-                            Image(systemName: "cylinder.fill")
-                                .foregroundColor(.blue)
-                            Text(pool.name)
-                                .fontWeight(.medium)
+                ScrollView {
+                    VStack(spacing: 12) {
+                        ForEach(viewModel.pools, id: \.name) { pool in
+                            PoolCard(
+                                pool: pool,
+                                scrubStatus: viewModel.scrubStatuses.first(where: { $0.poolName == pool.name }),
+                                isExpanded: expandedPools.contains(pool.name),
+                                onToggle: {
+                                    if expandedPools.contains(pool.name) {
+                                        expandedPools.remove(pool.name)
+                                    } else {
+                                        expandedPools.insert(pool.name)
+                                    }
+                                },
+                                viewModel: viewModel
+                            )
                         }
                     }
+                    .padding()
+                }
+            }
+        }
+    }
+}
 
-                    TableColumn("Health") { pool in
+struct PoolCard: View {
+    let pool: ZFSPool
+    let scrubStatus: ZFSScrubStatus?
+    let isExpanded: Bool
+    let onToggle: () -> Void
+    @ObservedObject var viewModel: ZFSViewModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header - Always visible
+            Button(action: onToggle) {
+                HStack(spacing: 12) {
+                    Image(systemName: "cylinder.fill")
+                        .font(.title2)
+                        .foregroundColor(.blue)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(pool.name)
+                            .font(.title3)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.primary)
+
                         HStack(spacing: 4) {
                             Circle()
                                 .fill(pool.healthColor)
                                 .frame(width: 8, height: 8)
                             Text(pool.health)
+                                .font(.caption)
                                 .foregroundColor(pool.healthColor)
                         }
                     }
-                    .width(min: 80, ideal: 100)
 
-                    TableColumn("Size", value: \.size)
-                        .width(min: 80, ideal: 100)
+                    Spacer()
 
-                    TableColumn("Allocated", value: \.allocated)
-                        .width(min: 80, ideal: 100)
+                    // Capacity indicator
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text(pool.capacity)
+                            .font(.headline)
+                        Text("used")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
 
-                    TableColumn("Free", value: \.free)
-                        .width(min: 80, ideal: 100)
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .foregroundColor(.secondary)
+                }
+                .padding()
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
 
-                    TableColumn("Capacity") { pool in
-                        HStack(spacing: 8) {
-                            ProgressView(value: pool.capacityPercentage, total: 100)
-                                .frame(width: 60)
-                            Text(pool.capacity)
+            // Expanded details
+            if isExpanded {
+                Divider()
+
+                VStack(spacing: 16) {
+                    // Pool stats
+                    LazyVGrid(columns: [
+                        GridItem(.flexible()),
+                        GridItem(.flexible()),
+                        GridItem(.flexible())
+                    ], spacing: 16) {
+                        StatItem(label: "Size", value: pool.size)
+                        StatItem(label: "Allocated", value: pool.allocated)
+                        StatItem(label: "Free", value: pool.free)
+                        StatItem(label: "Fragmentation", value: pool.fragmentation)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Capacity")
                                 .font(.caption)
+                                .foregroundColor(.secondary)
+                            ProgressView(value: pool.capacityPercentage, total: 100)
+                                .frame(height: 8)
                         }
                     }
-                    .width(min: 100, ideal: 120)
 
-                    TableColumn("Fragmentation", value: \.fragmentation)
-                        .width(min: 80, ideal: 100)
+                    Divider()
+
+                    // Scrub status and controls
+                    if let scrub = scrubStatus {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                Image(systemName: "waveform.path.ecg")
+                                    .foregroundColor(.blue)
+                                Text("Scrub Status")
+                                    .font(.headline)
+
+                                Spacer()
+
+                                HStack(spacing: 4) {
+                                    Circle()
+                                        .fill(scrub.statusColor)
+                                        .frame(width: 8, height: 8)
+                                    Text(scrub.state)
+                                        .font(.caption)
+                                        .foregroundColor(scrub.statusColor)
+                                }
+                            }
+
+                            // Progress bar if in progress
+                            if scrub.isInProgress, let progress = scrub.progress {
+                                VStack(spacing: 4) {
+                                    ProgressView(value: progress, total: 100)
+                                    HStack {
+                                        Text(String(format: "%.1f%%", progress))
+                                            .font(.caption)
+                                        Spacer()
+                                        if let scanned = scrub.scanned {
+                                            Text("Scanned: \(scanned)")
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Details
+                            if let duration = scrub.duration {
+                                HStack {
+                                    Text("Duration:")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                    Spacer()
+                                    Text(duration)
+                                        .font(.caption)
+                                }
+                            }
+
+                            HStack {
+                                Text("Errors:")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                Text("\(scrub.errors)")
+                                    .font(.caption)
+                                    .foregroundColor(scrub.errors > 0 ? .red : .primary)
+                            }
+
+                            // Actions
+                            HStack {
+                                if scrub.isInProgress {
+                                    Button(action: {
+                                        Task {
+                                            await viewModel.stopScrub(pool: pool.name)
+                                        }
+                                    }) {
+                                        Label("Stop Scrub", systemImage: "stop.fill")
+                                    }
+                                    .buttonStyle(.bordered)
+                                } else {
+                                    Button(action: {
+                                        Task {
+                                            await viewModel.startScrub(pool: pool.name)
+                                        }
+                                    }) {
+                                        Label("Start Scrub", systemImage: "play.fill")
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                }
+                            }
+                        }
+                    } else {
+                        HStack {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                            Text("Loading scrub status...")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
                 }
+                .padding()
             }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .shadow(color: .black.opacity(0.1), radius: 3, x: 0, y: 1)
+        )
+    }
+}
+
+struct StatItem: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Text(value)
+                .font(.body)
+                .fontWeight(.medium)
         }
     }
 }
@@ -290,34 +463,70 @@ struct DatasetsView: View {
         return viewModel.datasets.first(where: { $0.id == id })
     }
 
+    private var datasetsCount: Int {
+        viewModel.datasets.filter { !$0.isSnapshot }.count
+    }
+
+    private var snapshotsCount: Int {
+        viewModel.datasets.filter { $0.isSnapshot }.count
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Toolbar
             HStack {
-                Text("\(viewModel.datasets.count) dataset(s)")
+                Text("\(datasetsCount) dataset(s), \(snapshotsCount) snapshot(s)")
                     .font(.headline)
                     .foregroundColor(.secondary)
 
                 Spacer()
 
                 if let dataset = selectedDataset {
-                    Button(action: {
-                        snapshotName = ""
-                        showCreateSnapshot = true
-                    }) {
-                        Label("Snapshot", systemImage: "camera")
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(dataset.isSnapshot)
+                    if dataset.isSnapshot {
+                        // Snapshot actions
+                        Button(action: {
+                            Task {
+                                await viewModel.rollbackSnapshot(snapshot: dataset.name)
+                            }
+                        }) {
+                            Label("Rollback", systemImage: "arrow.counterclockwise")
+                        }
+                        .buttonStyle(.bordered)
 
-                    Button(action: {
-                        cloneDestination = ""
-                        showCloneDataset = true
-                    }) {
-                        Label("Clone", systemImage: "doc.on.doc")
+                        Button(action: {
+                            cloneDestination = ""
+                            showCloneDataset = true
+                        }) {
+                            Label("Clone", systemImage: "doc.on.doc")
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button(action: {
+                            Task {
+                                await viewModel.deleteSnapshot(snapshot: dataset.name)
+                            }
+                        }) {
+                            Label("Delete", systemImage: "trash")
+                        }
+                        .buttonStyle(.bordered)
+                    } else {
+                        // Dataset actions
+                        Button(action: {
+                            snapshotName = ""
+                            showCreateSnapshot = true
+                        }) {
+                            Label("Create Snapshot", systemImage: "camera")
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button(action: {
+                            cloneDestination = ""
+                            showCloneDataset = true
+                        }) {
+                            Label("Clone", systemImage: "doc.on.doc")
+                        }
+                        .buttonStyle(.bordered)
                     }
-                    .buttonStyle(.bordered)
-                    .disabled(!dataset.isSnapshot)
                 }
 
                 Button(action: {
@@ -348,8 +557,11 @@ struct DatasetsView: View {
                     Image(systemName: "folder")
                         .font(.system(size: 72))
                         .foregroundColor(.secondary)
-                    Text("No Datasets")
+                    Text("No Datasets or Snapshots")
                         .font(.title2)
+                        .foregroundColor(.secondary)
+                    Text("Datasets and snapshots will appear here")
+                        .font(.caption)
                         .foregroundColor(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -415,11 +627,12 @@ struct DatasetsView: View {
         .sheet(isPresented: $showCloneDataset) {
             if let dataset = selectedDataset {
                 CloneDatasetSheet(
-                    snapshotName: dataset.name,
+                    sourceName: dataset.name,
+                    isSnapshot: dataset.isSnapshot,
                     destination: $cloneDestination,
                     onClone: {
                         Task {
-                            await viewModel.cloneDataset(snapshot: dataset.name, destination: cloneDestination)
+                            await viewModel.cloneDataset(source: dataset.name, isSnapshot: dataset.isSnapshot, destination: cloneDestination)
                             showCloneDataset = false
                         }
                     },
@@ -432,54 +645,59 @@ struct DatasetsView: View {
     }
 }
 
-// MARK: - Snapshots View
+// MARK: - Replication View
 
-struct SnapshotsView: View {
+struct ReplicationView: View {
     @ObservedObject var viewModel: ZFSViewModel
-    @State private var selectedSnapshots: Set<ZFSDataset.ID> = []
-
-    var snapshots: [ZFSDataset] {
-        viewModel.datasets.filter { $0.isSnapshot }
-    }
-
-    private var selectedSnapshot: ZFSDataset? {
-        guard let id = selectedSnapshots.first else { return nil }
-        return snapshots.first(where: { $0.id == id })
-    }
+    @State private var selectedTargetServer: SavedServer?
+    @State private var savedServers: [SavedServer] = []
+    @State private var targetManager: SSHConnectionManager?
+    @State private var targetDatasets: [ZFSDataset] = []
+    @State private var isConnectingToTarget = false
+    @State private var isLoadingTargetData = false
+    @State private var draggedDataset: ZFSDataset?
 
     var body: some View {
         VStack(spacing: 0) {
             // Toolbar
             HStack {
-                Text("\(snapshots.count) snapshot(s)")
+                Text("ZFS Replication")
                     .font(.headline)
                     .foregroundColor(.secondary)
 
                 Spacer()
 
-                if let snapshot = selectedSnapshot {
-                    Button(action: {
-                        Task {
-                            await viewModel.rollbackSnapshot(snapshot: snapshot.name)
+                // Target server selector
+                if !savedServers.isEmpty {
+                    Menu {
+                        ForEach(savedServers) { server in
+                            Button(action: {
+                                connectToTargetServer(server)
+                            }) {
+                                HStack {
+                                    Text(server.name)
+                                    Text("(\(server.host))")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
                         }
-                    }) {
-                        Label("Rollback", systemImage: "arrow.counterclockwise")
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button(action: {
-                        Task {
-                            await viewModel.deleteSnapshot(snapshot: snapshot.name)
+                    } label: {
+                        HStack {
+                            Image(systemName: "server.rack")
+                            if let target = selectedTargetServer {
+                                Text(target.name)
+                            } else {
+                                Text("Select Target Server")
+                            }
                         }
-                    }) {
-                        Label("Delete", systemImage: "trash")
                     }
-                    .buttonStyle(.bordered)
+                    .disabled(isConnectingToTarget)
                 }
 
                 Button(action: {
                     Task {
-                        await viewModel.refreshDatasets()
+                        await refreshData()
                     }
                 }) {
                     Label("Refresh", systemImage: "arrow.clockwise")
@@ -490,208 +708,300 @@ struct SnapshotsView: View {
 
             Divider()
 
-            // Snapshots table
-            if viewModel.isLoadingDatasets {
+            // Split-screen replication view
+            if selectedTargetServer == nil {
+                VStack(spacing: 20) {
+                    Image(systemName: "arrow.left.arrow.right")
+                        .font(.system(size: 72))
+                        .foregroundColor(.secondary)
+                    Text("Select Target Server")
+                        .font(.title2)
+                        .foregroundColor(.secondary)
+                    Text("Choose a server from the dropdown to begin replication")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if isConnectingToTarget {
                 VStack(spacing: 20) {
                     ProgressView()
                         .scaleEffect(1.5)
-                    Text("Loading snapshots...")
+                    Text("Connecting to target server...")
                         .font(.headline)
                         .foregroundColor(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if snapshots.isEmpty {
-                VStack(spacing: 20) {
-                    Image(systemName: "camera")
-                        .font(.system(size: 72))
-                        .foregroundColor(.secondary)
-                    Text("No Snapshots")
-                        .font(.title2)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                Table(snapshots, selection: $selectedSnapshots) {
-                    TableColumn("Snapshot") { snapshot in
-                        HStack(spacing: 8) {
-                            Image(systemName: "camera")
-                                .foregroundColor(.orange)
-                            Text(snapshot.name)
+                HSplitView {
+                    // Local (source) datasets
+                    ReplicationPaneView(
+                        title: "Local (Source)",
+                        subtitle: SSHConnectionManager.shared.serverAddress,
+                        datasets: viewModel.datasets,
+                        isLoading: viewModel.isLoadingDatasets,
+                        isSource: true,
+                        onDrop: { _ in false },
+                        onDrag: { dataset in
+                            draggedDataset = dataset
+                        },
+                        onReplicate: { dataset in
+                            Task {
+                                await replicateToTarget(dataset)
+                            }
                         }
-                    }
-                    .width(min: 200, ideal: 350)
+                    )
 
-                    TableColumn("Used", value: \.used)
-                        .width(min: 80, ideal: 100)
-
-                    TableColumn("Referenced", value: \.referenced)
-                        .width(min: 80, ideal: 100)
+                    // Remote (target) datasets
+                    ReplicationPaneView(
+                        title: "Remote (Target)",
+                        subtitle: selectedTargetServer?.host ?? "",
+                        datasets: targetDatasets,
+                        isLoading: isLoadingTargetData,
+                        isSource: false,
+                        onDrop: { dataset in
+                            Task {
+                                await replicateToTarget(dataset)
+                            }
+                            return true
+                        },
+                        onDrag: { dataset in
+                            draggedDataset = dataset
+                        },
+                        onReplicate: { dataset in
+                            Task {
+                                await replicateFromTarget(dataset)
+                            }
+                        }
+                    )
                 }
+            }
+        }
+        .onAppear {
+            loadSavedServers()
+        }
+    }
+
+    private func loadSavedServers() {
+        if let data = UserDefaults.standard.data(forKey: "savedServers"),
+           let servers = try? JSONDecoder().decode([SavedServer].self, from: data) {
+            // Exclude the current connected server
+            savedServers = servers.filter { $0.host != SSHConnectionManager.shared.serverAddress }
+        }
+    }
+
+    private func connectToTargetServer(_ server: SavedServer) {
+        selectedTargetServer = server
+        isConnectingToTarget = true
+
+        Task {
+            do {
+                // Create a new SSH manager for the target
+                let manager = SSHConnectionManager()
+                let keyURL = URL(fileURLWithPath: server.keyPath)
+                let authMethod = SSHAuthMethod(username: server.username, privateKeyURL: keyURL)
+
+                try await manager.connect(host: server.host, port: server.port, authMethod: authMethod)
+                try await manager.validateFreeBSD()
+
+                await MainActor.run {
+                    targetManager = manager
+                    isConnectingToTarget = false
+                }
+
+                // Load target datasets
+                await loadTargetDatasets()
+            } catch {
+                await MainActor.run {
+                    viewModel.error = "Failed to connect to target: \(error.localizedDescription)"
+                    isConnectingToTarget = false
+                    selectedTargetServer = nil
+                }
+            }
+        }
+    }
+
+    private func loadTargetDatasets() async {
+        guard let manager = targetManager else { return }
+
+        await MainActor.run {
+            isLoadingTargetData = true
+        }
+
+        do {
+            let datasets = try await manager.listZFSDatasets()
+            await MainActor.run {
+                targetDatasets = datasets
+                isLoadingTargetData = false
+            }
+        } catch {
+            await MainActor.run {
+                viewModel.error = "Failed to load target datasets: \(error.localizedDescription)"
+                isLoadingTargetData = false
+            }
+        }
+    }
+
+    private func refreshData() async {
+        await viewModel.refreshDatasets()
+        if targetManager != nil {
+            await loadTargetDatasets()
+        }
+    }
+
+    private func replicateToTarget(_ dataset: ZFSDataset) async {
+        guard let manager = targetManager, let target = selectedTargetServer else { return }
+
+        do {
+            try await SSHConnectionManager.shared.replicateDataset(
+                dataset: dataset.name,
+                targetHost: target.host,
+                targetManager: manager
+            )
+            await MainActor.run {
+                viewModel.error = nil
+            }
+            await loadTargetDatasets()
+        } catch {
+            await MainActor.run {
+                viewModel.error = "Replication failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func replicateFromTarget(_ dataset: ZFSDataset) async {
+        guard let manager = targetManager else { return }
+
+        do {
+            try await manager.replicateDataset(
+                dataset: dataset.name,
+                targetHost: SSHConnectionManager.shared.serverAddress,
+                targetManager: SSHConnectionManager.shared
+            )
+            await MainActor.run {
+                viewModel.error = nil
+            }
+            await viewModel.refreshDatasets()
+        } catch {
+            await MainActor.run {
+                viewModel.error = "Replication failed: \(error.localizedDescription)"
             }
         }
     }
 }
 
-// MARK: - Scrub View
-
-struct ScrubView: View {
-    @ObservedObject var viewModel: ZFSViewModel
+struct ReplicationPaneView: View {
+    let title: String
+    let subtitle: String
+    let datasets: [ZFSDataset]
+    let isLoading: Bool
+    let isSource: Bool
+    let onDrop: (ZFSDataset) -> Bool
+    let onDrag: (ZFSDataset) -> Void
+    let onReplicate: (ZFSDataset) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
-            // Toolbar
-            HStack {
-                Text("Pool Scrub Status")
-                    .font(.headline)
-                    .foregroundColor(.secondary)
-
-                Spacer()
-
-                Button(action: {
-                    Task {
-                        await viewModel.refreshScrubStatus()
-                    }
-                }) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
-            }
-            .padding()
-
-            Divider()
-
-            // Scrub status
-            if viewModel.isLoadingScrub {
-                VStack(spacing: 20) {
-                    ProgressView()
-                        .scaleEffect(1.5)
-                    Text("Loading scrub status...")
-                        .font(.headline)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if viewModel.scrubStatuses.isEmpty {
-                VStack(spacing: 20) {
-                    Image(systemName: "waveform.path.ecg")
-                        .font(.system(size: 72))
-                        .foregroundColor(.secondary)
-                    Text("No Scrub Information")
-                        .font(.title2)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    VStack(spacing: 16) {
-                        ForEach(viewModel.scrubStatuses) { status in
-                            ScrubStatusCard(status: status, viewModel: viewModel)
-                        }
-                    }
-                    .padding()
-                }
-            }
-        }
-    }
-}
-
-struct ScrubStatusCard: View {
-    let status: ZFSScrubStatus
-    @ObservedObject var viewModel: ZFSViewModel
-
-    var body: some View {
-        VStack(spacing: 16) {
             // Header
-            HStack {
-                HStack(spacing: 8) {
-                    Image(systemName: "cylinder.fill")
-                        .foregroundColor(.blue)
-                    Text(status.poolName)
-                        .font(.title3)
-                        .fontWeight(.semibold)
-                }
-
-                Spacer()
-
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(status.statusColor)
-                        .frame(width: 8, height: 8)
-                    Text(status.state)
-                        .font(.caption)
-                        .foregroundColor(status.statusColor)
-                }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.headline)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            .background(Color(nsColor: .controlBackgroundColor))
 
-            // Progress bar if in progress
-            if status.isInProgress, let progress = status.progress {
-                VStack(spacing: 4) {
-                    ProgressView(value: progress, total: 100)
-                    HStack {
-                        Text(String(format: "%.1f%%", progress))
-                            .font(.caption)
-                        Spacer()
-                        if let scanned = status.scanned {
-                            Text("Scanned: \(scanned)")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-            }
+            Divider()
 
-            // Details
-            VStack(spacing: 8) {
-                if let duration = status.duration {
-                    HStack {
-                        Text("Duration:")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Spacer()
-                        Text(duration)
-                            .font(.caption)
-                    }
-                }
-
-                HStack {
-                    Text("Errors:")
-                        .font(.caption)
+            // Datasets list
+            if isLoading {
+                VStack(spacing: 20) {
+                    ProgressView()
+                        .scaleEffect(1.5)
+                    Text("Loading datasets...")
+                        .font(.headline)
                         .foregroundColor(.secondary)
-                    Spacer()
-                    Text("\(status.errors)")
-                        .font(.caption)
-                        .foregroundColor(status.errors > 0 ? .red : .primary)
                 }
-            }
-
-            // Actions
-            HStack {
-                if status.isInProgress {
-                    Button(action: {
-                        Task {
-                            await viewModel.stopScrub(pool: status.poolName)
-                        }
-                    }) {
-                        Label("Stop Scrub", systemImage: "stop.fill")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if datasets.isEmpty {
+                VStack(spacing: 20) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 72))
+                        .foregroundColor(.secondary)
+                    Text("No Datasets")
+                        .font(.title2)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(datasets) { dataset in
+                    ReplicationDatasetRow(
+                        dataset: dataset,
+                        isSource: isSource,
+                        onDrag: { onDrag(dataset) },
+                        onReplicate: { onReplicate(dataset) }
+                    )
+                    .onDrop(of: [.text], isTargeted: nil) { providers in
+                        // Handle drop on specific dataset (for targeting specific destination)
+                        return onDrop(dataset)
                     }
-                    .buttonStyle(.bordered)
-                } else {
-                    Button(action: {
-                        Task {
-                            await viewModel.startScrub(pool: status.poolName)
-                        }
-                    }) {
-                        Label("Start Scrub", systemImage: "play.fill")
-                    }
-                    .buttonStyle(.borderedProminent)
+                }
+                .onDrop(of: [.text], isTargeted: nil) { providers in
+                    // Handle drop on pane (for general replication)
+                    return false
                 }
             }
         }
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .shadow(color: .black.opacity(0.1), radius: 3, x: 0, y: 1)
-        )
+    }
+}
+
+struct ReplicationDatasetRow: View {
+    let dataset: ZFSDataset
+    let isSource: Bool
+    let onDrag: () -> Void
+    let onReplicate: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: dataset.icon)
+                .foregroundColor(dataset.isSnapshot ? .orange : .blue)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(dataset.name)
+                    .font(.body)
+                HStack(spacing: 8) {
+                    Text(dataset.used)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    if dataset.isSnapshot {
+                        Text("snapshot")
+                            .font(.caption2)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.orange.opacity(0.2))
+                            .cornerRadius(3)
+                    }
+                }
+            }
+
+            Spacer()
+
+            // Replicate button
+            Button(action: onReplicate) {
+                Image(systemName: isSource ? "arrow.right.circle" : "arrow.left.circle")
+                    .foregroundColor(.blue)
+            }
+            .buttonStyle(.plain)
+            .help(isSource ? "Replicate to target" : "Replicate to local")
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onDrag {
+            onDrag()
+            return NSItemProvider(object: dataset.name as NSString)
+        }
     }
 }
 
@@ -751,7 +1061,8 @@ struct CreateSnapshotSheet: View {
 // MARK: - Clone Dataset Sheet
 
 struct CloneDatasetSheet: View {
-    let snapshotName: String
+    let sourceName: String
+    let isSnapshot: Bool
     @Binding var destination: String
     let onClone: () -> Void
     let onCancel: () -> Void
@@ -763,21 +1074,29 @@ struct CloneDatasetSheet: View {
                 .bold()
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("Source Snapshot")
+                Text(isSnapshot ? "Source Snapshot" : "Source Dataset")
                     .font(.caption)
-                Text(snapshotName)
+                Text(sourceName)
                     .font(.body)
                     .padding(8)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.secondary.opacity(0.1))
                     .cornerRadius(6)
 
+                if !isSnapshot {
+                    Text("A snapshot will be created automatically for cloning")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                        .padding(.top, 2)
+                }
+
                 Text("Destination Dataset")
                     .font(.caption)
+                    .padding(.top, 8)
                 TextField("e.g., pool/cloned-dataset", text: $destination)
                     .textFieldStyle(.roundedBorder)
 
-                Text("This will create a new dataset from the snapshot")
+                Text(isSnapshot ? "This will create a new dataset from the snapshot" : "This will create a snapshot, then clone it to a new dataset")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -797,7 +1116,7 @@ struct CloneDatasetSheet: View {
             }
         }
         .padding()
-        .frame(width: 450)
+        .frame(width: 500)
     }
 }
 
@@ -922,11 +1241,24 @@ class ZFSViewModel: ObservableObject {
         }
     }
 
-    func cloneDataset(snapshot: String, destination: String) async {
+    func cloneDataset(source: String, isSnapshot: Bool, destination: String) async {
         error = nil
 
         do {
-            try await sshManager.cloneZFSDataset(snapshot: snapshot, destination: destination)
+            let snapshotToClone: String
+
+            if isSnapshot {
+                // Already a snapshot, use it directly
+                snapshotToClone = source
+            } else {
+                // It's a dataset, create a snapshot first
+                let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+                let snapshotName = "clone-\(timestamp)"
+                try await sshManager.createZFSSnapshot(dataset: source, snapshotName: snapshotName)
+                snapshotToClone = "\(source)@\(snapshotName)"
+            }
+
+            try await sshManager.cloneZFSDataset(snapshot: snapshotToClone, destination: destination)
             await refreshDatasets()
         } catch {
             self.error = "Failed to clone dataset: \(error.localizedDescription)"
