@@ -2562,4 +2562,82 @@ extension SSHConnectionManager {
         _ = try await executeCommand("rm -f \(tempFile)")
         _ = try await targetManager.executeCommand("rm -f \(tempFile)")
     }
+
+    // MARK: - Boot Environment Management
+
+    /// List all boot environments using bectl
+    func listBootEnvironments() async throws -> [BootEnvironment] {
+        // Execute bectl list to get boot environment information
+        let output = try await executeCommand("bectl list -H")
+
+        var bootEnvironments: [BootEnvironment] = []
+
+        for line in output.split(separator: "\n") {
+            let components = line.split(separator: "\t").map { String($0) }
+            guard components.count >= 5 else { continue }
+
+            // Parse bectl list output format:
+            // name active mountpoint space created
+            let name = components[0]
+            let activeFlags = components[1]  // Can be N, NR, R, or -
+            let mountpoint = components[2]
+            let space = components[3]
+            let created = components[4]
+
+            // Parse active flags
+            // N = active now
+            // R = active on reboot
+            // NR = active now and on reboot
+            let active = activeFlags.contains("N")
+            let activeOnReboot = activeFlags.contains("R")
+
+            let be = BootEnvironment(
+                name: name,
+                active: active,
+                mountpoint: mountpoint,
+                space: space,
+                created: created,
+                activeOnReboot: activeOnReboot
+            )
+            bootEnvironments.append(be)
+        }
+
+        return bootEnvironments
+    }
+
+    /// Create a new boot environment
+    func createBootEnvironment(name: String, source: String?) async throws {
+        if let source = source {
+            // Clone from existing BE
+            _ = try await executeCommand("bectl create -e \(source) \(name)")
+        } else {
+            // Create from current
+            _ = try await executeCommand("bectl create \(name)")
+        }
+    }
+
+    /// Activate a boot environment (set for next boot)
+    func activateBootEnvironment(name: String) async throws {
+        _ = try await executeCommand("bectl activate \(name)")
+    }
+
+    /// Delete a boot environment
+    func deleteBootEnvironment(name: String) async throws {
+        _ = try await executeCommand("bectl destroy -F \(name)")
+    }
+
+    /// Rename a boot environment
+    func renameBootEnvironment(oldName: String, newName: String) async throws {
+        _ = try await executeCommand("bectl rename \(oldName) \(newName)")
+    }
+
+    /// Mount a boot environment
+    func mountBootEnvironment(name: String) async throws {
+        _ = try await executeCommand("bectl mount \(name)")
+    }
+
+    /// Unmount a boot environment
+    func unmountBootEnvironment(name: String) async throws {
+        _ = try await executeCommand("bectl unmount \(name)")
+    }
 }

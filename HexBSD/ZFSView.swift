@@ -127,6 +127,7 @@ struct ZFSContentView: View {
     enum ZFSViewType: String, CaseIterable {
         case pools = "Pools"
         case datasets = "Datasets"
+        case bootEnvironments = "Boot Environments"
         case replication = "Replication"
     }
 
@@ -150,6 +151,8 @@ struct ZFSContentView: View {
                     PoolsView(viewModel: viewModel)
                 case .datasets:
                     DatasetsView(viewModel: viewModel)
+                case .bootEnvironments:
+                    BootEnvironmentsContentView()
                 case .replication:
                     ReplicationView(viewModel: viewModel)
                 }
