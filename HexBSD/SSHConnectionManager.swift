@@ -325,9 +325,13 @@ class SSHConnectionManager {
         var files: [RemoteFile] = []
         let lines = output.components(separatedBy: .newlines)
 
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "MMM d HH:mm"
-        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        let timeFormatter = DateFormatter()
+        timeFormatter.dateFormat = "MMM d HH:mm"
+        timeFormatter.locale = Locale(identifier: "en_US_POSIX")
+
+        let yearFormatter = DateFormatter()
+        yearFormatter.dateFormat = "MMM d yyyy"
+        yearFormatter.locale = Locale(identifier: "en_US_POSIX")
 
         for line in lines {
             // Skip empty lines and total line
@@ -337,8 +341,9 @@ class SSHConnectionManager {
 
             let components = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
 
-            // Format: permissions links owner group size month day time name
+            // Format: permissions links owner group size month day time/year name
             // Example: drwxr-xr-x 2 root wheel 512 Jan 10 15:30 Documents
+            // Or:      -rw-r--r-- 1 root wheel 512 Jan 10  2023 oldfile.txt
             guard components.count >= 9 else { continue }
 
             let permissions = components[0]
@@ -357,9 +362,25 @@ class SSHConnectionManager {
             // Parse size
             let size = Int64(sizeStr) ?? 0
 
-            // Parse date
-            let dateStr = "\(month) \(day) \(timeOrYear)"
-            let date = dateFormatter.date(from: dateStr)
+            // Parse date - check if timeOrYear is a time (contains :) or year (4 digits)
+            var date: Date?
+            if timeOrYear.contains(":") {
+                // It's a time - file modified this year
+                let dateStr = "\(month) \(day) \(timeOrYear)"
+                if let parsedDate = timeFormatter.date(from: dateStr) {
+                    // Set to current year
+                    var calendar = Calendar.current
+                    calendar.timeZone = TimeZone.current
+                    let currentYear = calendar.component(.year, from: Date())
+                    var components = calendar.dateComponents([.month, .day, .hour, .minute], from: parsedDate)
+                    components.year = currentYear
+                    date = calendar.date(from: components)
+                }
+            } else {
+                // It's a year - file modified in previous year
+                let dateStr = "\(month) \(day) \(timeOrYear)"
+                date = yearFormatter.date(from: dateStr)
+            }
 
             // Build full path
             let fullPath: String
