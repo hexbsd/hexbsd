@@ -23,6 +23,7 @@ struct SystemStatus {
     let cpuCores: [Double]  // Per-core CPU usage percentages
     let memoryUsage: String
     let zfsArcUsage: String
+    let swapUsage: String
     let storageUsage: String
     let uptime: String
     let networkConnections: String
@@ -57,6 +58,16 @@ struct SystemStatus {
     // Helper to extract ZFS ARC usage percentage
     var arcPercentage: Double {
         let parts = zfsArcUsage.split(separator: "/")
+        guard parts.count == 2,
+              let used = Double(parts[0].trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " GB", with: "")),
+              let total = Double(parts[1].trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " GB", with: ""))
+        else { return 0 }
+        return total > 0 ? (used / total) * 100 : 0
+    }
+
+    // Helper to extract swap usage percentage
+    var swapPercentage: Double {
+        let parts = swapUsage.split(separator: "/")
         guard parts.count == 2,
               let used = Double(parts[0].trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " GB", with: "")),
               let total = Double(parts[1].trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " GB", with: ""))
@@ -124,6 +135,105 @@ struct MetricCard: View {
                     .foregroundColor(.primary)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 20)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
+        )
+    }
+}
+
+struct MemoryARCCard: View {
+    let memoryUsage: String
+    let memoryPercentage: Double
+    let arcUsage: String
+    let arcPercentage: Double
+    let color: Color
+
+    // Calculate ARC as percentage of total system memory
+    private var arcPercentageOfTotal: Double {
+        // Parse the usage strings to get values
+        let memParts = memoryUsage.split(separator: "/")
+        let arcParts = arcUsage.split(separator: "/")
+
+        guard memParts.count == 2, arcParts.count == 2,
+              let memTotal = Double(memParts[1].trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " GB", with: "")),
+              let arcUsed = Double(arcParts[0].trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " GB", with: ""))
+        else {
+            print("DEBUG: Failed to parse memory/ARC strings")
+            print("DEBUG: memoryUsage = '\(memoryUsage)'")
+            print("DEBUG: arcUsage = '\(arcUsage)'")
+            return 0
+        }
+
+        let arcPct = memTotal > 0 ? (arcUsed / memTotal) * 100 : 0
+        print("DEBUG: memTotal=\(memTotal) GB, arcUsed=\(arcUsed) GB, arcPct=\(arcPct)%")
+        return arcPct
+    }
+
+    // Non-ARC memory is the total memory percentage minus ARC portion
+    private var memoryOnlyPercentage: Double {
+        let result = max(0, memoryPercentage - arcPercentageOfTotal)
+        print("DEBUG: memoryPercentage=\(memoryPercentage)%, arcPercentageOfTotal=\(arcPercentageOfTotal)%, memoryOnly=\(result)%")
+        return result
+    }
+
+    var body: some View {
+        VStack(spacing: 15) {
+            HStack {
+                Image(systemName: "memorychip")
+                    .font(.title2)
+                    .foregroundColor(color)
+                Text("Memory")
+                    .font(.headline)
+                    .foregroundColor(.primary)
+                Spacer()
+            }
+
+            // Single circle showing stacked memory usage
+            ZStack {
+                // Background circle
+                Circle()
+                    .stroke(Color.gray.opacity(0.2), lineWidth: 12)
+
+                // Non-ARC memory (green) - starts at 0
+                Circle()
+                    .trim(from: 0, to: min(memoryOnlyPercentage / 100, 1.0))
+                    .stroke(color, style: StrokeStyle(lineWidth: 12, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(.easeInOut(duration: 0.5), value: memoryOnlyPercentage)
+
+                // ARC memory (purple) - stacks on top of green
+                Circle()
+                    .trim(from: memoryOnlyPercentage / 100, to: min((memoryOnlyPercentage + arcPercentageOfTotal) / 100, 1.0))
+                    .stroke(Color.purple, style: StrokeStyle(lineWidth: 12, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(.easeInOut(duration: 0.5), value: arcPercentageOfTotal)
+
+                // Center text showing total percentage
+                VStack(spacing: 2) {
+                    Text(String(format: "%.0f%%", memoryPercentage))
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundColor(.primary)
+                    Text("used")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .frame(width: 120, height: 120)
+
+            // ARC usage label
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(Color.purple)
+                    .frame(width: 8, height: 8)
+                Text("ARC: \(arcUsage)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
         }
         .padding(20)
@@ -582,7 +692,7 @@ struct DetailView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
                         if let systemStatus = systemStatus {
-                            // Row 1: CPU and Memory
+                            // Row 1: CPU and Memory/ARC
                             LazyVGrid(columns: [
                                 GridItem(.flexible(), spacing: 20),
                                 GridItem(.flexible(), spacing: 20)
@@ -593,16 +703,16 @@ struct DetailView: View {
                                     color: .blue
                                 )
 
-                                MetricCard(
-                                    title: "Memory",
-                                    value: systemStatus.memoryUsage,
-                                    progress: systemStatus.memoryPercentage,
-                                    color: .green,
-                                    systemImage: "memorychip"
+                                MemoryARCCard(
+                                    memoryUsage: systemStatus.memoryUsage,
+                                    memoryPercentage: systemStatus.memoryPercentage,
+                                    arcUsage: systemStatus.zfsArcUsage,
+                                    arcPercentage: systemStatus.arcPercentage,
+                                    color: .green
                                 )
                             }
 
-                            // Row 2: Storage and ZFS ARC
+                            // Row 2: Storage and Swap
                             LazyVGrid(columns: [
                                 GridItem(.flexible(), spacing: 20),
                                 GridItem(.flexible(), spacing: 20)
@@ -616,11 +726,11 @@ struct DetailView: View {
                                 )
 
                                 MetricCard(
-                                    title: "ZFS ARC",
-                                    value: systemStatus.zfsArcUsage,
-                                    progress: systemStatus.arcPercentage,
-                                    color: .purple,
-                                    systemImage: "memorychip.fill"
+                                    title: "Swap",
+                                    value: systemStatus.swapUsage,
+                                    progress: systemStatus.swapPercentage,
+                                    color: .red,
+                                    systemImage: "arrow.left.arrow.right"
                                 )
                             }
 

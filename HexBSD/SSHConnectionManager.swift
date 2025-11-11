@@ -1657,8 +1657,8 @@ extension SSHConnectionManager {
         let connectionsOutput = try await executeCommand("netstat -an | grep ESTABLISHED | wc -l")
         let connectionCount = connectionsOutput.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Get memory usage
-        let memInfo = try await executeCommand("sysctl -n hw.physmem hw.usermem")
+        // Get memory usage - use vm.stats.vm for accurate memory reporting
+        let memInfo = try await executeCommand("sysctl -n hw.physmem vm.stats.vm.v_page_count vm.stats.vm.v_free_count vm.stats.vm.v_inactive_count hw.pagesize")
         let (totalMem, usedMem) = parseMemory(memInfo)
 
         // Get CPU usage (via top for overall)
@@ -1679,6 +1679,10 @@ extension SSHConnectionManager {
         // Get ZFS ARC stats
         let arcStats = try await executeCommand("sysctl -n kstat.zfs.misc.arcstats.size kstat.zfs.misc.arcstats.c_max")
         let (arcUsed, arcMax) = parseARCStats(arcStats)
+
+        // Get swap usage
+        let swapOutput = try await executeCommand("swapinfo -k | tail -1")
+        let (swapUsed, swapTotal) = parseSwapUsage(swapOutput)
 
         // Get storage usage
         let dfOutput = try await executeCommand("df -h /")
@@ -1742,6 +1746,7 @@ extension SSHConnectionManager {
             cpuCores: cpuCores,
             memoryUsage: String(format: "%.1f GB / %.1f GB", usedMem, totalMem),
             zfsArcUsage: String(format: "%.1f GB / %.1f GB", arcUsed, arcMax),
+            swapUsage: String(format: "%.1f GB / %.1f GB", swapUsed, swapTotal),
             storageUsage: String(format: "%.1f GB / %.1f GB", storageUsed, storageTotal),
             uptime: uptime,
             networkConnections: connectionCount,
@@ -1781,13 +1786,32 @@ extension SSHConnectionManager {
 
     private func parseMemory(_ output: String) -> (total: Double, used: Double) {
         // Parse memory info from sysctl
+        // Expected: hw.physmem, v_page_count, v_free_count, v_inactive_count, hw.pagesize
         let lines = output.components(separatedBy: .newlines).filter { !$0.isEmpty }
-        if lines.count >= 2 {
+
+        if lines.count >= 5 {
             let physmem = Double(lines[0]) ?? 0
-            let usermem = Double(lines[1]) ?? 0
-            let used = physmem - usermem
-            return (total: physmem / 1_073_741_824, used: used / 1_073_741_824) // Convert to GB
+            let pageCount = Double(lines[1]) ?? 0
+            let freeCount = Double(lines[2]) ?? 0
+            let inactiveCount = Double(lines[3]) ?? 0
+            let pageSize = Double(lines[4]) ?? 0
+
+            // Calculate memory in bytes
+            // Total memory from physmem
+            let totalBytes = physmem
+
+            // Used memory = total pages - (free + inactive) pages
+            // Free and inactive pages are available for use
+            let availablePages = freeCount + inactiveCount
+            let usedPages = pageCount - availablePages
+            let usedBytes = usedPages * pageSize
+
+            print("DEBUG: Memory calc - totalBytes=\(totalBytes), pageCount=\(pageCount), freeCount=\(freeCount), inactiveCount=\(inactiveCount), pageSize=\(pageSize)")
+            print("DEBUG: Memory calc - usedPages=\(usedPages), usedBytes=\(usedBytes)")
+
+            return (total: totalBytes / 1_073_741_824, used: usedBytes / 1_073_741_824) // Convert to GB
         }
+
         return (total: 0, used: 0)
     }
 
@@ -1969,6 +1993,23 @@ extension SSHConnectionManager {
             return (used: used / 1_073_741_824, max: max / 1_073_741_824) // Convert to GB
         }
         return (used: 0, max: 0)
+    }
+
+    private func parseSwapUsage(_ output: String) -> (used: Double, total: Double) {
+        // Parse swapinfo output
+        // Format: Device 1K-blocks Used Avail Capacity
+        // Example: /dev/ada0p3 4194304 0 4194304 0%
+        let components = output.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+
+        if components.count >= 3 {
+            let totalKB = Double(components[1]) ?? 0
+            let usedKB = Double(components[2]) ?? 0
+
+            // Convert from KB to GB
+            return (used: usedKB / 1_048_576, total: totalKB / 1_048_576)
+        }
+
+        return (used: 0, total: 0)
     }
 
     private func parseStorageUsage(_ output: String) -> (used: Double, total: Double) {
