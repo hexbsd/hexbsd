@@ -605,6 +605,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case sockstat = "Sockstat"
     case sysctl = "Sysctl"
     case terminal = "Terminal"
+    case zfs = "ZFS"
 
     var id: String { rawValue }
 
@@ -621,6 +622,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .sockstat: return "network"
         case .sysctl: return "slider.horizontal.3"
         case .terminal: return "terminal"
+        case .zfs: return "cylinder.split.1x2"
         }
     }
 }
@@ -982,6 +984,9 @@ struct DetailView: View {
             } else if section == .terminal {
                 // Terminal view handled separately with its own coordinator
                 TerminalContentView()
+            } else if section == .zfs {
+                // ZFS pool and dataset management
+                ZFSContentView()
             } else {
                 Text(section.rawValue)
                     .font(.largeTitle)

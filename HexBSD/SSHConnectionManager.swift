@@ -2340,4 +2340,172 @@ extension SSHConnectionManager {
             return "\(bytes) B"
         }
     }
+
+    // MARK: - ZFS Management
+
+    /// List all ZFS pools with their properties
+    func listZFSPools() async throws -> [ZFSPool] {
+        // Execute zpool list to get pool information
+        let output = try await executeCommand("zpool list -H -o name,size,alloc,free,frag,cap,health,altroot")
+
+        var pools: [ZFSPool] = []
+
+        for line in output.split(separator: "\n") {
+            let components = line.split(separator: "\t").map { String($0) }
+            guard components.count >= 8 else { continue }
+
+            let pool = ZFSPool(
+                name: components[0],
+                size: components[1],
+                allocated: components[2],
+                free: components[3],
+                fragmentation: components[4],
+                capacity: components[5],
+                health: components[6],
+                altroot: components[7]
+            )
+            pools.append(pool)
+        }
+
+        return pools
+    }
+
+    /// List all ZFS datasets with their properties
+    func listZFSDatasets() async throws -> [ZFSDataset] {
+        // Execute zfs list to get dataset information with all properties we need
+        let output = try await executeCommand("zfs list -H -o name,used,avail,refer,mountpoint,compression,compressratio,quota,reservation,type")
+
+        var datasets: [ZFSDataset] = []
+
+        for line in output.split(separator: "\n") {
+            let components = line.split(separator: "\t").map { String($0) }
+            guard components.count >= 10 else { continue }
+
+            let dataset = ZFSDataset(
+                name: components[0],
+                used: components[1],
+                available: components[2],
+                referenced: components[3],
+                mountpoint: components[4],
+                compression: components[5],
+                compressRatio: components[6],
+                quota: components[7],
+                reservation: components[8],
+                type: components[9]
+            )
+            datasets.append(dataset)
+        }
+
+        return datasets
+    }
+
+    /// Create a ZFS snapshot
+    func createZFSSnapshot(dataset: String, snapshotName: String) async throws {
+        let fullName = "\(dataset)@\(snapshotName)"
+        _ = try await executeCommand("zfs snapshot \(fullName)")
+    }
+
+    /// Delete a ZFS snapshot
+    func deleteZFSSnapshot(snapshot: String) async throws {
+        _ = try await executeCommand("zfs destroy \(snapshot)")
+    }
+
+    /// Rollback a ZFS dataset to a snapshot
+    func rollbackZFSSnapshot(snapshot: String) async throws {
+        _ = try await executeCommand("zfs rollback -r \(snapshot)")
+    }
+
+    /// Clone a ZFS dataset from a snapshot
+    func cloneZFSDataset(snapshot: String, destination: String) async throws {
+        _ = try await executeCommand("zfs clone \(snapshot) \(destination)")
+    }
+
+    /// Get ZFS scrub status for all pools
+    func getZFSScrubStatus() async throws -> [ZFSScrubStatus] {
+        // Get list of all pools first
+        let poolsOutput = try await executeCommand("zpool list -H -o name")
+        let poolNames = poolsOutput.split(separator: "\n").map { String($0) }
+
+        var statuses: [ZFSScrubStatus] = []
+
+        for poolName in poolNames {
+            // Get detailed status for each pool
+            let statusOutput = try await executeCommand("zpool status \(poolName)")
+
+            // Parse the scrub status from the output
+            var state = "none"
+            var progress: Double?
+            var scanned: String?
+            var issued: String?
+            var duration: String?
+            var errors = 0
+
+            // Look for scrub information in the output
+            let lines = statusOutput.split(separator: "\n")
+            for (index, line) in lines.enumerated() {
+                let trimmedLine = line.trimmingCharacters(in: .whitespaces)
+
+                // Look for scrub status line
+                if trimmedLine.hasPrefix("scan:") || trimmedLine.hasPrefix("scrub:") {
+                    if trimmedLine.contains("in progress") || trimmedLine.contains("scrub in progress") {
+                        state = "in progress"
+
+                        // Try to extract progress percentage
+                        if let percentRange = trimmedLine.range(of: #"(\d+\.?\d*)%"#, options: .regularExpression) {
+                            let percentStr = String(trimmedLine[percentRange]).replacingOccurrences(of: "%", with: "")
+                            progress = Double(percentStr)
+                        }
+
+                        // Extract scanned amount
+                        if let scannedRange = trimmedLine.range(of: #"(\d+\.?\d*[KMGT]?) scanned"#, options: .regularExpression) {
+                            scanned = String(trimmedLine[scannedRange]).replacingOccurrences(of: " scanned", with: "")
+                        }
+                    } else if trimmedLine.contains("completed") {
+                        state = "completed"
+
+                        // Extract completion time
+                        if let dateRange = trimmedLine.range(of: #"on \w+ \w+ +\d+ \d+:\d+:\d+ \d+"#, options: .regularExpression) {
+                            duration = String(trimmedLine[dateRange]).replacingOccurrences(of: "on ", with: "")
+                        }
+                    } else if trimmedLine.contains("none requested") {
+                        state = "none requested"
+                    }
+                }
+
+                // Look for errors
+                if trimmedLine.hasPrefix("errors:") {
+                    let errorStr = trimmedLine.replacingOccurrences(of: "errors:", with: "").trimmingCharacters(in: .whitespaces)
+                    if errorStr.lowercased() != "no known data errors" {
+                        // Try to extract error count
+                        if let count = Int(errorStr) {
+                            errors = count
+                        }
+                    }
+                }
+            }
+
+            let status = ZFSScrubStatus(
+                poolName: poolName,
+                state: state,
+                progress: progress,
+                scanned: scanned,
+                issued: issued,
+                duration: duration,
+                errors: errors
+            )
+            statuses.append(status)
+        }
+
+        return statuses
+    }
+
+    /// Start a scrub on a ZFS pool
+    func startZFSScrub(pool: String) async throws {
+        _ = try await executeCommand("zpool scrub \(pool)")
+    }
+
+    /// Stop a scrub on a ZFS pool
+    func stopZFSScrub(pool: String) async throws {
+        _ = try await executeCommand("zpool scrub -s \(pool)")
+    }
 }
