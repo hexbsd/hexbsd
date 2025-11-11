@@ -14,6 +14,7 @@ import AppKit
 
 struct SystemStatus {
     let cpuUsage: String
+    let cpuCores: [Double]  // Per-core CPU usage percentages
     let memoryUsage: String
     let zfsArcUsage: String
     let storageUsage: String
@@ -118,6 +119,126 @@ struct MetricCard: View {
                     .foregroundColor(.primary)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 20)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
+        )
+    }
+}
+
+struct CPUCoresCard: View {
+    let cpuCores: [Double]
+    let color: Color
+
+    // Calculate optimal grid layout to maximize space usage
+    private var gridLayout: (columns: Int, circleSize: CGFloat, spacing: CGFloat) {
+        let coreCount = cpuCores.count
+        let maxHeight: CGFloat = 120 // Fixed height to match memory card
+
+        // Calculate columns and size to maximize space
+        if coreCount <= 9 {
+            // 3x3 grid - large circles
+            let cols = 3
+            let rows = Int(ceil(Double(coreCount) / Double(cols)))
+            let spacing: CGFloat = 6
+            let circleSize = min((maxHeight - CGFloat(rows - 1) * spacing) / CGFloat(rows), 32)
+            return (cols, circleSize, spacing)
+        } else if coreCount <= 16 {
+            // 4x4 grid - medium circles
+            let cols = 4
+            let rows = Int(ceil(Double(coreCount) / Double(cols)))
+            let spacing: CGFloat = 5
+            let circleSize = (maxHeight - CGFloat(rows - 1) * spacing) / CGFloat(rows)
+            return (cols, circleSize, spacing)
+        } else if coreCount <= 30 {
+            // 6 columns - smaller circles
+            let cols = 6
+            let rows = Int(ceil(Double(coreCount) / Double(cols)))
+            let spacing: CGFloat = 4
+            let circleSize = (maxHeight - CGFloat(rows - 1) * spacing) / CGFloat(rows)
+            return (cols, circleSize, spacing)
+        } else if coreCount <= 56 {
+            // 8 columns - tiny circles
+            let cols = 8
+            let rows = Int(ceil(Double(coreCount) / Double(cols)))
+            let spacing: CGFloat = 3
+            let circleSize = (maxHeight - CGFloat(rows - 1) * spacing) / CGFloat(rows)
+            return (cols, circleSize, spacing)
+        } else {
+            // 10 columns - minimum size for 80+ cores
+            let cols = 10
+            let rows = Int(ceil(Double(coreCount) / Double(cols)))
+            let spacing: CGFloat = 2
+            let circleSize = (maxHeight - CGFloat(rows - 1) * spacing) / CGFloat(rows)
+            return (cols, circleSize, spacing)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 15) {
+            HStack {
+                Image(systemName: "cpu")
+                    .font(.title2)
+                    .foregroundColor(color)
+                Text("CPU Usage")
+                    .font(.headline)
+                    .foregroundColor(.primary)
+                Spacer()
+            }
+
+            if cpuCores.isEmpty {
+                // Show loading state - same size as when loaded
+                CircularProgressView(progress: 0, color: color)
+                    .frame(width: 120, height: 120)
+                    .opacity(0.3)
+
+                Text("Loading...")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                // Fixed-size container for cores grid - match CircularProgressView size exactly
+                VStack {
+                    let layout = gridLayout
+                    let columns = Array(repeating: GridItem(.fixed(layout.circleSize), spacing: layout.spacing), count: layout.columns)
+
+                    LazyVGrid(columns: columns, spacing: layout.spacing) {
+                        ForEach(Array(cpuCores.enumerated()), id: \.offset) { index, usage in
+                            ZStack {
+                                // Background circle
+                                Circle()
+                                    .stroke(color.opacity(0.2), lineWidth: max(2, layout.circleSize / 10))
+
+                                // Progress circle
+                                Circle()
+                                    .trim(from: 0, to: min(usage / 100, 1.0))
+                                    .stroke(color, style: StrokeStyle(lineWidth: max(2, layout.circleSize / 10), lineCap: .round))
+                                    .rotationEffect(.degrees(-90))
+                                    .animation(.easeInOut(duration: 0.3), value: usage)
+
+                                // Core number (scale font based on circle size)
+                                if layout.circleSize >= 16 {
+                                    Text("\(index)")
+                                        .font(.system(size: max(6, layout.circleSize / 3.5), weight: .medium))
+                                        .foregroundColor(.primary)
+                                }
+                            }
+                            .frame(width: layout.circleSize, height: layout.circleSize)
+                            .help("Core \(index): \(String(format: "%.1f%%", usage))") // Tooltip on hover
+                        }
+                    }
+                }
+                .frame(width: 120, height: 120) // Match CircularProgressView dimensions exactly
+                .frame(maxWidth: .infinity)
+
+                // Add matching caption space like MetricCard has
+                Text("\(cpuCores.count) cores")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
         }
         .padding(20)
@@ -395,12 +516,10 @@ struct DetailView: View {
                                 GridItem(.flexible(), spacing: 20),
                                 GridItem(.flexible(), spacing: 20)
                             ], spacing: 20) {
-                                MetricCard(
-                                    title: "CPU Usage",
-                                    value: systemStatus.cpuUsage,
-                                    progress: systemStatus.cpuPercentage,
-                                    color: .blue,
-                                    systemImage: "cpu"
+                                // Always use CPUCoresCard for per-core display
+                                CPUCoresCard(
+                                    cpuCores: systemStatus.cpuCores,
+                                    color: .blue
                                 )
 
                                 MetricCard(

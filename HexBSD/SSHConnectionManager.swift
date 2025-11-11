@@ -44,6 +44,10 @@ class SSHConnectionManager {
     private var lastNetworkOut: UInt64 = 0
     private var lastNetworkTime: Date?
 
+    // CPU tracking for per-core usage
+    private var lastCPUSnapshot: [UInt64] = []
+    private var lastCPUTime: Date?
+
     // Private initializer to enforce singleton
     private init() {}
 
@@ -1658,9 +1662,20 @@ extension SSHConnectionManager {
         let memInfo = try await executeCommand("sysctl -n hw.physmem hw.usermem")
         let (totalMem, usedMem) = parseMemory(memInfo)
 
-        // Get CPU usage (via top)
+        // Get CPU usage (via top for overall)
         let topOutput = try await executeCommand("top -b -n 1 | head -3")
         let cpuUsage = parseCPUUsage(topOutput)
+
+        // Get per-core CPU usage
+        print("DEBUG: About to call parsePerCoreCPU()")
+        var cpuCores: [Double] = []
+        do {
+            cpuCores = try await parsePerCoreCPU()
+            print("DEBUG: parsePerCoreCPU returned \(cpuCores.count) cores")
+        } catch {
+            print("DEBUG: ERROR - parsePerCoreCPU failed: \(error)")
+            // Continue with empty array
+        }
 
         // Get ZFS ARC stats
         let arcStats = try await executeCommand("sysctl -n kstat.zfs.misc.arcstats.size kstat.zfs.misc.arcstats.c_max")
@@ -1707,6 +1722,7 @@ extension SSHConnectionManager {
 
         return SystemStatus(
             cpuUsage: String(format: "%.1f%%", cpuUsage),
+            cpuCores: cpuCores,
             memoryUsage: String(format: "%.1f GB / %.1f GB", usedMem, totalMem),
             zfsArcUsage: String(format: "%.1f GB / %.1f GB", arcUsed, arcMax),
             storageUsage: String(format: "%.1f GB / %.1f GB", storageUsed, storageTotal),
@@ -1776,6 +1792,154 @@ extension SSHConnectionManager {
             }
         }
         return 0
+    }
+
+    private func parsePerCoreCPU() async throws -> [Double] {
+        print("DEBUG: Starting parsePerCoreCPU()")
+
+        // Get actual CPU count from system
+        let cpuCountOutput = try await executeCommand("sysctl -n hw.ncpu")
+        let actualCPUCount = Int(cpuCountOutput.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        print("DEBUG: System reports hw.ncpu = \(actualCPUCount) CPUs")
+
+        // Get per-core CPU usage using kern.cp_times
+        // Format: user, nice, system, interrupt, idle (5 values per core, repeated for each core)
+
+        // Get current snapshot
+        print("DEBUG: Getting current CPU snapshot...")
+        let snapshotOutput = try await executeCommand("sysctl -n kern.cp_times")
+        print("DEBUG: Snapshot length: \(snapshotOutput.count), preview: \(snapshotOutput.prefix(200))")
+
+        // Parse the current snapshot - trim to remove trailing newlines
+        let trimmedOutput = snapshotOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let allComponents = trimmedOutput.components(separatedBy: .whitespaces)
+        print("DEBUG: Total components before filtering: \(allComponents.count)")
+
+        let filtered = allComponents.filter { !$0.isEmpty }
+        print("DEBUG: After filtering empty: \(filtered.count) components")
+
+        let currentValues = filtered.compactMap { UInt64($0) }
+
+        print("DEBUG: Parsed current values count: \(currentValues.count)")
+        if currentValues.count != filtered.count {
+            print("DEBUG: WARNING - Some components failed to parse as UInt64!")
+            print("DEBUG: Failed components: \(filtered.enumerated().filter { UInt64($0.element) == nil }.map { "[\($0.offset)]: '\($0.element)'" })")
+        }
+        print("DEBUG: Expected values for \(actualCPUCount) CPUs: \(actualCPUCount * 5)")
+        print("DEBUG: Difference: \(currentValues.count - actualCPUCount * 5)")
+
+        // Check if we have a previous snapshot
+        let now = Date()
+        guard !lastCPUSnapshot.isEmpty,
+              lastCPUSnapshot.count == currentValues.count,
+              let lastTime = lastCPUTime else {
+            // First call - store snapshot and return empty
+            print("DEBUG: First CPU snapshot, storing for next call")
+            lastCPUSnapshot = currentValues
+            lastCPUTime = now
+            return []
+        }
+
+        // Calculate time delta
+        let timeDelta = now.timeIntervalSince(lastTime)
+        print("DEBUG: Time delta: \(String(format: "%.2f", timeDelta)) seconds")
+
+        // Use previous and current snapshots
+        let values1 = lastCPUSnapshot
+        let values2 = currentValues
+
+        // Store current snapshot for next call
+        lastCPUSnapshot = currentValues
+        lastCPUTime = now
+
+        print("DEBUG: Parsed values1 count: \(values1.count), values2 count: \(values2.count)")
+
+        // Ensure we have valid data and same number of values
+        guard !values1.isEmpty, values1.count == values2.count else {
+            print("DEBUG: ERROR - Invalid kern.cp_times data: values1=\(values1.count), values2=\(values2.count)")
+            print("DEBUG: values1 sample: \(values1.prefix(10))")
+            print("DEBUG: values2 sample: \(values2.prefix(10))")
+            // Return empty array to signal failure
+            return []
+        }
+
+        // Use actual CPU count from hw.ncpu if available and reasonable
+        var numCores = actualCPUCount
+
+        // Validate we have enough data for the reported CPU count
+        let expectedValues = actualCPUCount * 5
+        if actualCPUCount > 0 && values1.count >= expectedValues {
+            // We have at least enough data for all CPUs
+            print("DEBUG: Using actual CPU count from hw.ncpu: \(actualCPUCount) cores")
+            numCores = actualCPUCount
+        } else {
+            // Fall back to calculating from data
+            numCores = values1.count / 5
+            print("DEBUG: Falling back to calculated cores from data: \(numCores) cores")
+
+            if values1.count % 5 != 0 {
+                print("DEBUG: WARNING - Extra values detected: \(values1.count % 5) values beyond complete cores")
+            }
+        }
+
+        guard numCores > 0 else {
+            print("DEBUG: ERROR - No cores detected")
+            return []
+        }
+
+        print("DEBUG: Processing \(numCores) CPU cores")
+        var coreUsages: [Double] = []
+
+        for core in 0..<numCores {
+            let baseIdx = core * 5
+
+            // Safety check to ensure we don't go out of bounds
+            guard baseIdx + 4 < values1.count && baseIdx + 4 < values2.count else {
+                print("DEBUG: WARNING - Skipping core \(core) due to insufficient data")
+                continue
+            }
+
+            // Extract values for this core (user, nice, system, interrupt, idle)
+            let user1 = values1[baseIdx]
+            let nice1 = values1[baseIdx + 1]
+            let system1 = values1[baseIdx + 2]
+            let interrupt1 = values1[baseIdx + 3]
+            let idle1 = values1[baseIdx + 4]
+
+            let user2 = values2[baseIdx]
+            let nice2 = values2[baseIdx + 1]
+            let system2 = values2[baseIdx + 2]
+            let interrupt2 = values2[baseIdx + 3]
+            let idle2 = values2[baseIdx + 4]
+
+            // Calculate deltas
+            let userDelta = user2 > user1 ? user2 - user1 : 0
+            let niceDelta = nice2 > nice1 ? nice2 - nice1 : 0
+            let systemDelta = system2 > system1 ? system2 - system1 : 0
+            let interruptDelta = interrupt2 > interrupt1 ? interrupt2 - interrupt1 : 0
+            let idleDelta = idle2 > idle1 ? idle2 - idle1 : 0
+
+            // Total ticks in this period
+            let totalDelta = userDelta + niceDelta + systemDelta + interruptDelta + idleDelta
+
+            // Debug first core to see what's happening
+            if core == 0 {
+                print("DEBUG: Core 0 - user:\(userDelta) nice:\(niceDelta) sys:\(systemDelta) int:\(interruptDelta) idle:\(idleDelta) total:\(totalDelta)")
+            }
+
+            // Calculate CPU usage percentage
+            if totalDelta > 0 {
+                let activeDelta = userDelta + niceDelta + systemDelta + interruptDelta
+                let usage = (Double(activeDelta) / Double(totalDelta)) * 100.0
+                coreUsages.append(usage)
+            } else {
+                // No ticks recorded, assume 0% usage
+                coreUsages.append(0.0)
+            }
+        }
+
+        print("DEBUG: Successfully parsed \(numCores) CPU cores: \(coreUsages.map { String(format: "%.1f%%", $0) }.joined(separator: ", "))")
+        return coreUsages
     }
 
     private func parseARCStats(_ output: String) -> (used: Double, max: Double) {
