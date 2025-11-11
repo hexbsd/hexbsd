@@ -461,6 +461,7 @@ struct DatasetsView: View {
     @State private var targetDatasets: [ZFSDataset] = []
     @State private var isLoadingTarget = false
     @State private var expandedTargetDatasets: Set<String> = []
+    @State private var draggedDataset: ZFSDataset?
 
     private var datasetsCount: Int {
         viewModel.datasets.filter { !$0.isSnapshot }.count
@@ -823,37 +824,41 @@ struct DatasetsView: View {
         HSplitView {
             // Source (local) side
             VStack(spacing: 0) {
-                HStack {
-                    Text("Source (Local)")
-                        .font(.headline)
-                    Spacer()
-                    if selectedDataset != nil {
-                        Button(action: {
-                            // Replicate selected dataset
-                            if let serverId = selectedReplicationServer,
-                               let _ = savedServers.first(where: { $0.id.uuidString == serverId }) {
-                                Task {
-                                    // TODO: Implement replication
-                                }
-                            }
-                        }) {
-                            Label("Replicate", systemImage: "arrow.right.circle.fill")
-                        }
-                        .buttonStyle(.borderedProminent)
+                VStack(spacing: 8) {
+                    HStack {
+                        Text("Source (Local)")
+                            .font(.headline)
+                        Spacer()
+                        Text("Drag to target to replicate")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    HStack {
+                        Image(systemName: "info.circle")
+                            .foregroundColor(.blue)
+                            .font(.caption)
+                        Text("Note: Source server must have SSH key access to target server for replication.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Spacer()
                     }
                 }
                 .padding()
 
                 Divider()
 
-                // Source datasets list
+                // Source datasets list (draggable)
                 List(selection: $selectedDataset) {
                     ForEach(buildHierarchy()) { node in
-                        DatasetNodeView(
+                        DraggableDatasetNodeView(
                             node: node,
                             level: 0,
                             expandedDatasets: $expandedDatasets,
-                            selectedDataset: $selectedDataset
+                            selectedDataset: $selectedDataset,
+                            onDragStarted: { dataset in
+                                draggedDataset = dataset
+                            }
                         )
                     }
                 }
@@ -907,13 +912,29 @@ struct DatasetsView: View {
                 } else {
                     List {
                         ForEach(buildTargetHierarchy()) { node in
-                            DatasetNodeView(
+                            DroppableDatasetNodeView(
                                 node: node,
                                 level: 0,
                                 expandedDatasets: $expandedTargetDatasets,
-                                selectedDataset: .constant(nil)
+                                onDropped: { targetDataset in
+                                    if let sourceDataset = draggedDataset {
+                                        Task {
+                                            await replicateDataset(source: sourceDataset, targetParent: targetDataset)
+                                        }
+                                    }
+                                }
                             )
                         }
+                    }
+                    .onDrop(of: [.text], isTargeted: nil) { providers in
+                        // Drop on empty space - replicate to root
+                        if let sourceDataset = draggedDataset {
+                            Task {
+                                await replicateDataset(source: sourceDataset, targetParent: nil)
+                            }
+                            return true
+                        }
+                        return false
                     }
                 }
             }
@@ -991,6 +1012,69 @@ struct DatasetsView: View {
         if response == .alertFirstButtonReturn {
             Task {
                 await viewModel.destroyDataset(name: dataset.name)
+            }
+        }
+    }
+
+    private func replicateDataset(source: ZFSDataset, targetParent: ZFSDataset?) async {
+        guard let manager = targetManager,
+              let serverId = selectedReplicationServer,
+              let targetServer = savedServers.first(where: { $0.id.uuidString == serverId }) else {
+            viewModel.error = "No target server selected"
+            return
+        }
+
+        do {
+            // Create a snapshot if the source is not already a snapshot
+            let snapshotToReplicate: String
+            if source.isSnapshot {
+                snapshotToReplicate = source.name
+            } else {
+                let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+                let snapshotName = "replication-\(timestamp)"
+                try await SSHConnectionManager.shared.createZFSSnapshot(dataset: source.name, snapshotName: snapshotName)
+                snapshotToReplicate = "\(source.name)@\(snapshotName)"
+            }
+
+            // Determine destination path
+            let destinationPath: String
+            if let parent = targetParent {
+                // Drop on a specific dataset - replicate under that dataset
+                let sourceName = source.name.components(separatedBy: "@")[0]
+                let lastComponent = sourceName.components(separatedBy: "/").last ?? sourceName
+                destinationPath = "\(parent.name)/\(lastComponent)"
+            } else {
+                // Drop on empty space - replicate to root with same name
+                let sourceName = source.name.components(separatedBy: "@")[0]
+                destinationPath = sourceName
+            }
+
+            // Server-to-server replication using zfs send/receive
+            // The source server needs to be able to SSH to the target server
+            let targetHost = targetServer.host
+            let targetUser = targetServer.username
+
+            // Execute replication command on source server
+            // This will send the snapshot from source to target via SSH
+            let replicationCommand = """
+            zfs send \(snapshotToReplicate) | \
+            ssh -o StrictHostKeyChecking=no -o BatchMode=yes \
+            \(targetUser)@\(targetHost) \
+            'zfs receive -F \(destinationPath)'
+            """
+
+            try await SSHConnectionManager.shared.executeCommand(replicationCommand)
+
+            // Refresh target datasets
+            await loadTargetDatasets()
+
+            // Show success message
+            await MainActor.run {
+                viewModel.error = nil
+            }
+        } catch {
+            await MainActor.run {
+                viewModel.error = "Replication failed: \(error.localizedDescription)\n\nNote: The source server must have SSH access to the target server. Ensure SSH keys are configured between the servers."
             }
         }
     }
@@ -1095,6 +1179,254 @@ struct DatasetNodeView: View {
                         level: level + 1,
                         expandedDatasets: $expandedDatasets,
                         selectedDataset: $selectedDataset
+                    )
+                }
+            }
+        }
+    }
+
+    private func lastPathComponent(_ path: String) -> String {
+        // For snapshots, show the snapshot name
+        if path.contains("@") {
+            let parts = path.components(separatedBy: "@")
+            return "@" + (parts.last ?? path)
+        }
+
+        // For datasets, show the last component
+        if let lastSlash = path.lastIndex(of: "/") {
+            return String(path[path.index(after: lastSlash)...])
+        }
+        return path
+    }
+}
+
+// MARK: - Draggable Dataset Node View (for source side)
+
+struct DraggableDatasetNodeView: View {
+    @ObservedObject var node: DatasetNode
+    let level: Int
+    @Binding var expandedDatasets: Set<String>
+    @Binding var selectedDataset: ZFSDataset?
+    let onDragStarted: (ZFSDataset) -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Current dataset row
+            HStack(spacing: 8) {
+                // Indentation
+                if level > 0 {
+                    ForEach(0..<level, id: \.self) { _ in
+                        Rectangle()
+                            .fill(Color.clear)
+                            .frame(width: 20)
+                    }
+                }
+
+                // Expand/collapse chevron
+                if node.hasChildren {
+                    Button(action: {
+                        withAnimation {
+                            if expandedDatasets.contains(node.dataset.name) {
+                                expandedDatasets.remove(node.dataset.name)
+                            } else {
+                                expandedDatasets.insert(node.dataset.name)
+                            }
+                            node.isExpanded.toggle()
+                        }
+                    }) {
+                        Image(systemName: node.isExpanded ? "chevron.down" : "chevron.right")
+                            .foregroundColor(.secondary)
+                            .frame(width: 20)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Rectangle()
+                        .fill(Color.clear)
+                        .frame(width: 20)
+                }
+
+                // Dataset icon
+                Image(systemName: node.dataset.icon)
+                    .foregroundColor(node.dataset.isSnapshot ? .orange : .blue)
+
+                // Dataset name (show only last component)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(lastPathComponent(node.dataset.name))
+                        .font(.body)
+
+                    HStack(spacing: 12) {
+                        Label(node.dataset.used, systemImage: "")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        if node.dataset.compression != "off" && node.dataset.compression != "-" {
+                            Label("\(node.dataset.compression) (\(node.dataset.compressRatio))", systemImage: "")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        if node.dataset.mountpoint != "-" && !node.dataset.isSnapshot {
+                            Label(node.dataset.mountpoint, systemImage: "folder")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        if node.dataset.isSnapshot {
+                            Text("snapshot")
+                                .font(.caption2)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.orange.opacity(0.2))
+                                .cornerRadius(3)
+                        }
+                    }
+                }
+
+                Spacer()
+            }
+            .padding(.vertical, 4)
+            .padding(.leading, 8)
+            .contentShape(Rectangle())
+            .background(selectedDataset?.id == node.dataset.id ? Color.accentColor.opacity(0.2) : Color.clear)
+            .onTapGesture {
+                selectedDataset = node.dataset
+            }
+            .onDrag {
+                onDragStarted(node.dataset)
+                return NSItemProvider(object: node.dataset.name as NSString)
+            }
+
+            // Children (if expanded)
+            if node.isExpanded {
+                ForEach(node.children) { childNode in
+                    DraggableDatasetNodeView(
+                        node: childNode,
+                        level: level + 1,
+                        expandedDatasets: $expandedDatasets,
+                        selectedDataset: $selectedDataset,
+                        onDragStarted: onDragStarted
+                    )
+                }
+            }
+        }
+    }
+
+    private func lastPathComponent(_ path: String) -> String {
+        // For snapshots, show the snapshot name
+        if path.contains("@") {
+            let parts = path.components(separatedBy: "@")
+            return "@" + (parts.last ?? path)
+        }
+
+        // For datasets, show the last component
+        if let lastSlash = path.lastIndex(of: "/") {
+            return String(path[path.index(after: lastSlash)...])
+        }
+        return path
+    }
+}
+
+// MARK: - Droppable Dataset Node View (for target side)
+
+struct DroppableDatasetNodeView: View {
+    @ObservedObject var node: DatasetNode
+    let level: Int
+    @Binding var expandedDatasets: Set<String>
+    let onDropped: (ZFSDataset) -> Void
+    @State private var isTargeted = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Current dataset row
+            HStack(spacing: 8) {
+                // Indentation
+                if level > 0 {
+                    ForEach(0..<level, id: \.self) { _ in
+                        Rectangle()
+                            .fill(Color.clear)
+                            .frame(width: 20)
+                    }
+                }
+
+                // Expand/collapse chevron
+                if node.hasChildren {
+                    Button(action: {
+                        withAnimation {
+                            if expandedDatasets.contains(node.dataset.name) {
+                                expandedDatasets.remove(node.dataset.name)
+                            } else {
+                                expandedDatasets.insert(node.dataset.name)
+                            }
+                            node.isExpanded.toggle()
+                        }
+                    }) {
+                        Image(systemName: node.isExpanded ? "chevron.down" : "chevron.right")
+                            .foregroundColor(.secondary)
+                            .frame(width: 20)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Rectangle()
+                        .fill(Color.clear)
+                        .frame(width: 20)
+                }
+
+                // Dataset icon
+                Image(systemName: node.dataset.icon)
+                    .foregroundColor(node.dataset.isSnapshot ? .orange : .blue)
+
+                // Dataset name (show only last component)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(lastPathComponent(node.dataset.name))
+                        .font(.body)
+
+                    HStack(spacing: 12) {
+                        Label(node.dataset.used, systemImage: "")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        if node.dataset.compression != "off" && node.dataset.compression != "-" {
+                            Label("\(node.dataset.compression) (\(node.dataset.compressRatio))", systemImage: "")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        if node.dataset.mountpoint != "-" && !node.dataset.isSnapshot {
+                            Label(node.dataset.mountpoint, systemImage: "folder")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        if node.dataset.isSnapshot {
+                            Text("snapshot")
+                                .font(.caption2)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.orange.opacity(0.2))
+                                .cornerRadius(3)
+                        }
+                    }
+                }
+
+                Spacer()
+            }
+            .padding(.vertical, 4)
+            .padding(.leading, 8)
+            .contentShape(Rectangle())
+            .background(isTargeted ? Color.accentColor.opacity(0.3) : Color.clear)
+            .onDrop(of: [.text], isTargeted: $isTargeted) { providers in
+                onDropped(node.dataset)
+                return true
+            }
+
+            // Children (if expanded)
+            if node.isExpanded {
+                ForEach(node.children) { childNode in
+                    DroppableDatasetNodeView(
+                        node: childNode,
+                        level: level + 1,
+                        expandedDatasets: $expandedDatasets,
+                        onDropped: onDropped
                     )
                 }
             }
