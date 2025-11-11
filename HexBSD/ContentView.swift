@@ -1036,6 +1036,28 @@ struct ConnectView: View {
                 TextField("username", text: $username)
                     .textFieldStyle(.roundedBorder)
 
+                // Warning for non-root users
+                if !username.isEmpty && username.lowercased() != "root" {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                            .font(.system(size: 14))
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Not using root account")
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.orange)
+                            Text("Some features and content that require elevated privileges will not be available. See Help for details.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(8)
+                    .background(Color.orange.opacity(0.1))
+                    .cornerRadius(8)
+                }
+
                 Text("SSH Private Key")
                     .font(.caption)
                 HStack {
