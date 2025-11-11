@@ -2343,6 +2343,54 @@ extension SSHConnectionManager {
         _ = try await executeCommand("zfs clone \(snapshot) \(destination)")
     }
 
+    /// Create a new ZFS dataset
+    func createZFSDataset(name: String, type: String = "filesystem", properties: [String: String] = [:]) async throws {
+        var command = "zfs create"
+
+        // Add properties
+        for (key, value) in properties {
+            command += " -o \(key)=\(value)"
+        }
+
+        // Add -V for volumes (zvol)
+        if type == "volume" {
+            // Volume size is required and should be in properties
+            if let size = properties["volsize"] {
+                command = "zfs create -V \(size)"
+                // Add other properties
+                for (key, value) in properties where key != "volsize" {
+                    command += " -o \(key)=\(value)"
+                }
+            } else {
+                throw NSError(domain: "ZFS", code: -1, userInfo: [NSLocalizedDescriptionKey: "Volume size (volsize) is required for volume creation"])
+            }
+        }
+
+        command += " \(name)"
+        _ = try await executeCommand(command)
+    }
+
+    /// Destroy (delete) a ZFS dataset or volume
+    func destroyZFSDataset(name: String, recursive: Bool = false, force: Bool = false) async throws {
+        var command = "zfs destroy"
+
+        if recursive {
+            command += " -r"
+        }
+
+        if force {
+            command += " -f"
+        }
+
+        command += " \(name)"
+        _ = try await executeCommand(command)
+    }
+
+    /// Set a property on a ZFS dataset
+    func setZFSDatasetProperty(dataset: String, property: String, value: String) async throws {
+        _ = try await executeCommand("zfs set \(property)=\(value) \(dataset)")
+    }
+
     /// Get ZFS scrub status for all pools
     func getZFSScrubStatus() async throws -> [ZFSScrubStatus] {
         // Get list of all pools first

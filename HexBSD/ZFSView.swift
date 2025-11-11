@@ -128,7 +128,6 @@ struct ZFSContentView: View {
         case pools = "Pools"
         case datasets = "Datasets"
         case bootEnvironments = "Boot Environments"
-        case replication = "Replication"
     }
 
     var body: some View {
@@ -153,8 +152,6 @@ struct ZFSContentView: View {
                     DatasetsView(viewModel: viewModel)
                 case .bootEnvironments:
                     BootEnvironmentsContentView()
-                case .replication:
-                    ReplicationView(viewModel: viewModel)
                 }
             }
         }
@@ -453,9 +450,17 @@ struct DatasetsView: View {
     @State private var selectedDataset: ZFSDataset?
     @State private var showCreateSnapshot = false
     @State private var showCloneDataset = false
+    @State private var showCreateDataset = false
+    @State private var showModifyProperties = false
     @State private var snapshotName = ""
     @State private var cloneDestination = ""
     @State private var expandedDatasets: Set<String> = []
+    @State private var selectedReplicationServer: String? = nil
+    @State private var savedServers: [SavedServer] = []
+    @State private var targetManager: SSHConnectionManager?
+    @State private var targetDatasets: [ZFSDataset] = []
+    @State private var isLoadingTarget = false
+    @State private var expandedTargetDatasets: Set<String> = []
 
     private var datasetsCount: Int {
         viewModel.datasets.filter { !$0.isSnapshot }.count
@@ -521,14 +526,177 @@ struct DatasetsView: View {
         return rootNodes.sorted { $0.dataset.name < $1.dataset.name }
     }
 
+    // Build hierarchical tree from target datasets
+    private func buildTargetHierarchy() -> [DatasetNode] {
+        var nodes: [String: DatasetNode] = [:]
+        var rootNodes: [DatasetNode] = []
+
+        // Create nodes for all datasets (not snapshots)
+        let datasets = targetDatasets.filter { !$0.isSnapshot }.sorted { $0.name < $1.name }
+
+        for dataset in datasets {
+            let node = DatasetNode(dataset: dataset)
+            node.isExpanded = expandedTargetDatasets.contains(dataset.name)
+            nodes[dataset.name] = node
+        }
+
+        // Build parent-child relationships
+        for node in nodes.values {
+            let name = node.dataset.name
+
+            // Find parent by removing last component
+            if let lastSlash = name.lastIndex(of: "/") {
+                let parentName = String(name[..<lastSlash])
+                if let parent = nodes[parentName] {
+                    parent.children.append(node)
+                } else {
+                    // Parent doesn't exist (maybe filtered out), add as root
+                    rootNodes.append(node)
+                }
+            } else {
+                // No slash means it's a pool-level dataset (root)
+                rootNodes.append(node)
+                // Expand root datasets by default
+                if !expandedTargetDatasets.contains(name) {
+                    expandedTargetDatasets.insert(name)
+                    node.isExpanded = true
+                }
+            }
+        }
+
+        // Sort children for each node
+        for node in nodes.values {
+            node.children.sort { $0.dataset.name < $1.dataset.name }
+        }
+
+        // Add snapshots as children of their parent datasets
+        let snapshots = targetDatasets.filter { $0.isSnapshot }.sorted { $0.name < $1.name }
+        for snapshot in snapshots {
+            let parentName = snapshot.name.components(separatedBy: "@")[0]
+            if let parent = nodes[parentName] {
+                let snapshotNode = DatasetNode(dataset: snapshot)
+                parent.children.append(snapshotNode)
+            }
+        }
+
+        return rootNodes.sorted { $0.dataset.name < $1.dataset.name }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            // Toolbar
+            // Toolbar with replication server picker
             HStack {
                 Text("\(datasetsCount) dataset(s), \(snapshotsCount) snapshot(s)")
                     .font(.headline)
                     .foregroundColor(.secondary)
 
+                Spacer()
+
+                // Replication server picker
+                HStack(spacing: 8) {
+                    Text("Replicate to:")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+
+                    Picker("", selection: $selectedReplicationServer) {
+                        Text("None").tag(nil as String?)
+                        ForEach(savedServers, id: \.id) { server in
+                            Text(server.name).tag(server.id.uuidString as String?)
+                        }
+                    }
+                    .frame(width: 200)
+                    .onChange(of: selectedReplicationServer) { oldValue, newValue in
+                        handleServerSelection(newValue)
+                    }
+                }
+            }
+            .padding()
+
+            Divider()
+
+            // Show split view if server selected, otherwise normal view
+            if selectedReplicationServer != nil {
+                replicationSplitView
+            } else {
+                datasetManagementView
+            }
+        }
+        .onAppear {
+            loadSavedServers()
+        }
+        .sheet(isPresented: $showCreateSnapshot) {
+            if let dataset = selectedDataset {
+                CreateSnapshotSheet(
+                    datasetName: dataset.name,
+                    snapshotName: $snapshotName,
+                    onCreate: {
+                        Task {
+                            await viewModel.createSnapshot(dataset: dataset.name, snapshotName: snapshotName)
+                            showCreateSnapshot = false
+                        }
+                    },
+                    onCancel: {
+                        showCreateSnapshot = false
+                    }
+                )
+            }
+        }
+        .sheet(isPresented: $showCloneDataset) {
+            if let dataset = selectedDataset {
+                CloneDatasetSheet(
+                    sourceName: dataset.name,
+                    isSnapshot: dataset.isSnapshot,
+                    destination: $cloneDestination,
+                    onClone: {
+                        Task {
+                            await viewModel.cloneDataset(source: dataset.name, isSnapshot: dataset.isSnapshot, destination: cloneDestination)
+                            showCloneDataset = false
+                        }
+                    },
+                    onCancel: {
+                        showCloneDataset = false
+                    }
+                )
+            }
+        }
+        .sheet(isPresented: $showCreateDataset) {
+            if let dataset = selectedDataset {
+                CreateDatasetSheet(
+                    parentDataset: dataset.name,
+                    onCreate: { name, type, properties in
+                        Task {
+                            await viewModel.createDataset(name: name, type: type, properties: properties)
+                            showCreateDataset = false
+                        }
+                    },
+                    onCancel: {
+                        showCreateDataset = false
+                    }
+                )
+            }
+        }
+        .sheet(isPresented: $showModifyProperties) {
+            if let dataset = selectedDataset {
+                ModifyPropertiesSheet(
+                    dataset: dataset,
+                    onSave: { property, value in
+                        Task {
+                            await viewModel.setProperty(dataset: dataset.name, property: property, value: value)
+                            showModifyProperties = false
+                        }
+                    },
+                    onCancel: {
+                        showModifyProperties = false
+                    }
+                )
+            }
+        }
+    }
+
+    private var datasetManagementView: some View {
+        VStack(spacing: 0) {
+            // Action toolbar
+            HStack {
                 Spacer()
 
                 if let dataset = selectedDataset {
@@ -562,12 +730,33 @@ struct DatasetsView: View {
                     } else {
                         // Dataset actions
                         Button(action: {
+                            showCreateDataset = true
+                        }) {
+                            Label("New Dataset", systemImage: "plus")
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button(action: {
                             snapshotName = ""
                             showCreateSnapshot = true
                         }) {
-                            Label("Create Snapshot", systemImage: "camera")
+                            Label("Snapshot", systemImage: "camera")
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.bordered)
+
+                        Button(action: {
+                            showModifyProperties = true
+                        }) {
+                            Label("Properties", systemImage: "slider.horizontal.3")
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button(action: {
+                            confirmDeleteDataset(dataset)
+                        }) {
+                            Label("Delete", systemImage: "trash")
+                        }
+                        .buttonStyle(.bordered)
 
                         Button(action: {
                             cloneDestination = ""
@@ -628,39 +817,180 @@ struct DatasetsView: View {
                 }
             }
         }
-        .sheet(isPresented: $showCreateSnapshot) {
-            if let dataset = selectedDataset {
-                CreateSnapshotSheet(
-                    datasetName: dataset.name,
-                    snapshotName: $snapshotName,
-                    onCreate: {
-                        Task {
-                            await viewModel.createSnapshot(dataset: dataset.name, snapshotName: snapshotName)
-                            showCreateSnapshot = false
+    }
+
+    private var replicationSplitView: some View {
+        HSplitView {
+            // Source (local) side
+            VStack(spacing: 0) {
+                HStack {
+                    Text("Source (Local)")
+                        .font(.headline)
+                    Spacer()
+                    if selectedDataset != nil {
+                        Button(action: {
+                            // Replicate selected dataset
+                            if let serverId = selectedReplicationServer,
+                               let _ = savedServers.first(where: { $0.id.uuidString == serverId }) {
+                                Task {
+                                    // TODO: Implement replication
+                                }
+                            }
+                        }) {
+                            Label("Replicate", systemImage: "arrow.right.circle.fill")
                         }
-                    },
-                    onCancel: {
-                        showCreateSnapshot = false
+                        .buttonStyle(.borderedProminent)
                     }
-                )
+                }
+                .padding()
+
+                Divider()
+
+                // Source datasets list
+                List(selection: $selectedDataset) {
+                    ForEach(buildHierarchy()) { node in
+                        DatasetNodeView(
+                            node: node,
+                            level: 0,
+                            expandedDatasets: $expandedDatasets,
+                            selectedDataset: $selectedDataset
+                        )
+                    }
+                }
             }
-        }
-        .sheet(isPresented: $showCloneDataset) {
-            if let dataset = selectedDataset {
-                CloneDatasetSheet(
-                    sourceName: dataset.name,
-                    isSnapshot: dataset.isSnapshot,
-                    destination: $cloneDestination,
-                    onClone: {
-                        Task {
-                            await viewModel.cloneDataset(source: dataset.name, isSnapshot: dataset.isSnapshot, destination: cloneDestination)
-                            showCloneDataset = false
-                        }
-                    },
-                    onCancel: {
-                        showCloneDataset = false
+            .frame(minWidth: 300)
+
+            // Target (remote) side
+            VStack(spacing: 0) {
+                HStack {
+                    if let serverId = selectedReplicationServer,
+                       let server = savedServers.first(where: { $0.id.uuidString == serverId }) {
+                        Text("Target: \(server.name)")
+                            .font(.headline)
                     }
-                )
+                    Spacer()
+                    Button(action: {
+                        Task {
+                            await loadTargetDatasets()
+                        }
+                    }) {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding()
+
+                Divider()
+
+                if isLoadingTarget {
+                    VStack(spacing: 20) {
+                        ProgressView()
+                            .scaleEffect(1.5)
+                        Text("Loading target datasets...")
+                            .font(.headline)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if targetDatasets.isEmpty {
+                    VStack(spacing: 20) {
+                        Image(systemName: "server.rack")
+                            .font(.system(size: 48))
+                            .foregroundColor(.secondary)
+                        Text("No datasets found")
+                            .font(.headline)
+                            .foregroundColor(.secondary)
+                        Text("The target server has no ZFS datasets")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List {
+                        ForEach(buildTargetHierarchy()) { node in
+                            DatasetNodeView(
+                                node: node,
+                                level: 0,
+                                expandedDatasets: $expandedTargetDatasets,
+                                selectedDataset: .constant(nil)
+                            )
+                        }
+                    }
+                }
+            }
+            .frame(minWidth: 300)
+        }
+    }
+
+    private func loadSavedServers() {
+        if let data = UserDefaults.standard.data(forKey: "savedServers"),
+           let decoded = try? JSONDecoder().decode([SavedServer].self, from: data) {
+            savedServers = decoded
+        }
+    }
+
+    private func handleServerSelection(_ serverId: String?) {
+        guard let serverId = serverId,
+              let server = savedServers.first(where: { $0.id.uuidString == serverId }) else {
+            targetManager = nil
+            targetDatasets = []
+            return
+        }
+
+        // Connect to target server and load datasets
+        Task {
+            await connectToTargetServer(server)
+        }
+    }
+
+    private func connectToTargetServer(_ server: SavedServer) async {
+        isLoadingTarget = true
+        targetDatasets = []
+
+        do {
+            let manager = SSHConnectionManager()
+            let keyURL = URL(fileURLWithPath: server.keyPath)
+            let authMethod = SSHAuthMethod(username: server.username, privateKeyURL: keyURL)
+
+            try await manager.connect(
+                host: server.host,
+                port: server.port,
+                authMethod: authMethod
+            )
+            targetManager = manager
+
+            // Load datasets from target
+            await loadTargetDatasets()
+        } catch {
+            // Connection failed
+            targetManager = nil
+            isLoadingTarget = false
+        }
+    }
+
+    private func loadTargetDatasets() async {
+        guard let manager = targetManager else { return }
+
+        isLoadingTarget = true
+        do {
+            targetDatasets = try await manager.listZFSDatasets()
+        } catch {
+            targetDatasets = []
+        }
+        isLoadingTarget = false
+    }
+
+    private func confirmDeleteDataset(_ dataset: ZFSDataset) {
+        let alert = NSAlert()
+        alert.messageText = "Delete Dataset?"
+        alert.informativeText = "Are you sure you want to delete '\(dataset.name)'?\n\nThis will permanently delete the dataset and all its contents. This action cannot be undone."
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            Task {
+                await viewModel.destroyDataset(name: dataset.name)
             }
         }
     }
@@ -1567,6 +1897,340 @@ class ZFSViewModel: ObservableObject {
             await refreshScrubStatus()
         } catch {
             self.error = "Failed to stop scrub: \(error.localizedDescription)"
+        }
+    }
+
+    func createDataset(name: String, type: String, properties: [String: String]) async {
+        error = nil
+
+        do {
+            try await sshManager.createZFSDataset(name: name, type: type, properties: properties)
+            await refreshDatasets()
+        } catch {
+            self.error = "Failed to create dataset: \(error.localizedDescription)"
+        }
+    }
+
+    func destroyDataset(name: String) async {
+        error = nil
+
+        do {
+            // Destroy with recursive and force flags to handle datasets with snapshots/children
+            try await sshManager.destroyZFSDataset(name: name, recursive: true, force: false)
+            await refreshDatasets()
+        } catch {
+            self.error = "Failed to delete dataset: \(error.localizedDescription)"
+        }
+    }
+
+    func setProperty(dataset: String, property: String, value: String) async {
+        error = nil
+
+        do {
+            try await sshManager.setZFSDatasetProperty(dataset: dataset, property: property, value: value)
+            await refreshDatasets()
+        } catch {
+            self.error = "Failed to set property: \(error.localizedDescription)"
+        }
+    }
+}
+
+// MARK: - Create Dataset Sheet
+
+struct CreateDatasetSheet: View {
+    let parentDataset: String
+    let onCreate: (String, String, [String: String]) -> Void
+    let onCancel: () -> Void
+
+    @State private var datasetName = ""
+    @State private var datasetType = "filesystem"
+    @State private var compression = "lz4"
+    @State private var quota = ""
+    @State private var mountpoint = ""
+    @State private var recordsize = "128K"
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Create New Dataset")
+                .font(.title2)
+                .fontWeight(.semibold)
+                .padding(.top, 20)
+                .padding(.bottom, 16)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    // Parent dataset (read-only)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Parent Dataset")
+                            .font(.headline)
+                        Text(parentDataset)
+                            .font(.body)
+                            .foregroundColor(.primary)
+                            .padding(8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(nsColor: .controlBackgroundColor))
+                            .cornerRadius(6)
+                        Text("New dataset will be created under this parent")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    // Dataset name
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Dataset Name")
+                            .font(.headline)
+                        TextField("e.g., data", text: $datasetName)
+                            .textFieldStyle(.roundedBorder)
+                        Text("Enter just the name for the new dataset")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    // Type
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Type")
+                            .font(.headline)
+                        Picker("Type", selection: $datasetType) {
+                            Text("Filesystem").tag("filesystem")
+                            Text("Volume").tag("volume")
+                        }
+                        .pickerStyle(.radioGroup)
+                    }
+
+                    Divider()
+
+                    Text("Properties")
+                        .font(.headline)
+
+                    // Compression
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Compression")
+                            .font(.subheadline)
+                        Picker("Compression", selection: $compression) {
+                            Text("Off").tag("off")
+                            Text("LZ4 (Recommended)").tag("lz4")
+                            Text("GZIP").tag("gzip")
+                            Text("ZLE").tag("zle")
+                        }
+                        .frame(width: 250)
+                    }
+
+                    // Record size (for filesystems)
+                    if datasetType == "filesystem" {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Record Size")
+                                .font(.subheadline)
+                            Picker("Record Size", selection: $recordsize) {
+                                Text("128K (Default)").tag("128K")
+                                Text("64K").tag("64K")
+                                Text("256K").tag("256K")
+                                Text("512K").tag("512K")
+                                Text("1M").tag("1M")
+                            }
+                            .frame(width: 250)
+                        }
+                    }
+
+                    // Quota
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Quota (Optional)")
+                            .font(.subheadline)
+                        TextField("e.g., 100G", text: $quota)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 200)
+                        Text("Leave empty for no quota")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    // Mountpoint
+                    if datasetType == "filesystem" {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Mountpoint (Optional)")
+                                .font(.subheadline)
+                            TextField("Leave empty for default", text: $mountpoint)
+                                .textFieldStyle(.roundedBorder)
+                            Text("Custom mount location (default: /pool/dataset)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .padding()
+            }
+            .frame(height: 450)
+
+            Divider()
+
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Button("Create Dataset") {
+                    var properties: [String: String] = [:]
+                    properties["compression"] = compression
+
+                    if datasetType == "filesystem" {
+                        properties["recordsize"] = recordsize
+                        if !mountpoint.isEmpty {
+                            properties["mountpoint"] = mountpoint
+                        }
+                    }
+
+                    if !quota.isEmpty {
+                        properties["quota"] = quota
+                    }
+
+                    // Combine parent dataset and new name
+                    let fullName = "\(parentDataset)/\(datasetName)"
+                    onCreate(fullName, datasetType, properties)
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(datasetName.isEmpty)
+            }
+            .padding()
+        }
+        .frame(width: 540)
+    }
+}
+
+// MARK: - Modify Properties Sheet
+
+struct ModifyPropertiesSheet: View {
+    let dataset: ZFSDataset
+    let onSave: (String, String) -> Void
+    let onCancel: () -> Void
+
+    @State private var selectedProperty = "compression"
+    @State private var propertyValue = ""
+
+    let commonProperties = [
+        ("compression", "Compression algorithm"),
+        ("quota", "Maximum size"),
+        ("reservation", "Guaranteed space"),
+        ("recordsize", "Record size (filesystem only)"),
+        ("mountpoint", "Mount location (filesystem only)"),
+        ("readonly", "Read-only mode"),
+        ("atime", "Access time updates"),
+        ("exec", "Allow program execution")
+    ]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Modify Properties")
+                .font(.title2)
+                .fontWeight(.semibold)
+                .padding(.top, 20)
+                .padding(.bottom, 8)
+
+            Text(dataset.name)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .padding(.bottom, 16)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Select a property to modify")
+                    .font(.headline)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(commonProperties, id: \.0) { property, description in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Button(action: {
+                                selectedProperty = property
+                                // Set default/current values
+                                switch property {
+                                case "compression":
+                                    propertyValue = dataset.compression
+                                case "quota":
+                                    propertyValue = dataset.quota
+                                case "reservation":
+                                    propertyValue = dataset.reservation
+                                case "mountpoint":
+                                    propertyValue = dataset.mountpoint
+                                default:
+                                    propertyValue = ""
+                                }
+                            }) {
+                                HStack {
+                                    Image(systemName: selectedProperty == property ? "checkmark.circle.fill" : "circle")
+                                        .foregroundColor(selectedProperty == property ? .blue : .secondary)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(property)
+                                            .font(.body)
+                                        Text(description)
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    Spacer()
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("New Value")
+                        .font(.headline)
+                    TextField("Enter new value", text: $propertyValue)
+                        .textFieldStyle(.roundedBorder)
+
+                    // Show hints based on selected property
+                    if selectedProperty == "compression" {
+                        Text("Examples: off, lz4, gzip, zle")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else if selectedProperty == "quota" || selectedProperty == "reservation" {
+                        Text("Examples: 100G, 1T, none")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else if selectedProperty == "recordsize" {
+                        Text("Examples: 128K, 256K, 1M")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else if selectedProperty == "readonly" || selectedProperty == "atime" || selectedProperty == "exec" {
+                        Text("Values: on, off")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .padding()
+            .frame(height: 450)
+
+            Divider()
+
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Button("Save") {
+                    onSave(selectedProperty, propertyValue)
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(propertyValue.isEmpty)
+            }
+            .padding()
+        }
+        .frame(width: 500)
+        .onAppear {
+            propertyValue = dataset.compression
         }
     }
 }
