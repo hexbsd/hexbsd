@@ -147,9 +147,10 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"
     case files = "Files"
     case logs = "Logs"
-    case sysctl = "Sysctl"
-    case sockstat = "Sockstat"
+    case poudriere = "Poudriere"
     case sessions = "Sessions"
+    case sockstat = "Sockstat"
+    case sysctl = "Sysctl"
     case terminal = "Terminal"
 
     var id: String { rawValue }
@@ -159,9 +160,10 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .dashboard: return "chart.bar"
         case .files: return "folder"
         case .logs: return "doc.text"
-        case .sysctl: return "slider.horizontal.3"
-        case .sockstat: return "network"
+        case .poudriere: return "shippingbox"
         case .sessions: return "person.2"
+        case .sockstat: return "network"
+        case .sysctl: return "slider.horizontal.3"
         case .terminal: return "terminal"
         }
     }
@@ -475,6 +477,9 @@ struct DetailView: View {
             } else if section == .sessions {
                 // User sessions viewer
                 SessionsContentView()
+            } else if section == .poudriere {
+                // Poudriere build status viewer
+                PoudriereContentView()
             } else if section == .terminal {
                 // Terminal view handled separately with its own coordinator
                 TerminalContentView()

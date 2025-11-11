@@ -681,6 +681,110 @@ extension SSHConnectionManager {
     }
 }
 
+// MARK: - Poudriere Operations
+
+extension SSHConnectionManager {
+    /// Check if poudriere is installed and get config
+    func checkPoudriere() async throws -> PoudriereInfo {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Check if poudriere is installed
+        let checkCommand = "command -v poudriere >/dev/null 2>&1 && echo 'installed' || echo 'not-installed'"
+        let checkOutput = try await executeCommand(checkCommand)
+
+        if checkOutput.trimmingCharacters(in: .whitespacesAndNewlines) != "installed" {
+            return PoudriereInfo(isInstalled: false, htmlPath: "", dataPath: "")
+        }
+
+        // Read poudriere.conf to get paths
+        let confCommand = """
+        if [ -f /usr/local/etc/poudriere.conf ]; then
+            cat /usr/local/etc/poudriere.conf
+        elif [ -f /etc/poudriere.conf ]; then
+            cat /etc/poudriere.conf
+        else
+            echo ""
+        fi
+        """
+        let confOutput = try await executeCommand(confCommand)
+
+        // Use shell to evaluate poudriere config and get actual paths
+        // This sources the config file and uses poudriere's own logic
+        let pathDetectionCommand = """
+        # Source poudriere functions to get actual configured paths
+        if [ -f /usr/local/etc/poudriere.conf ]; then
+            POUDRIERE_ETC=/usr/local/etc
+        elif [ -f /etc/poudriere.conf ]; then
+            POUDRIERE_ETC=/etc
+        else
+            # No config found, use defaults
+            echo "DATA:/usr/local/poudriere/data"
+            echo "HTML:/usr/local/share/poudriere/html"
+            exit 0
+        fi
+
+        # Source the config (safely - just extract variables)
+        eval $(grep -E '^[A-Z_]+=' ${POUDRIERE_ETC}/poudriere.conf 2>/dev/null)
+
+        # Get POUDRIERE_DATA (with default)
+        POUDRIERE_DATA=${POUDRIERE_DATA:-${BASEFS}/data}
+        POUDRIERE_DATA=${POUDRIERE_DATA:-/usr/local/poudriere/data}
+
+        # Output the paths
+        echo "DATA:${POUDRIERE_DATA}"
+
+        # Determine HTML path - check where index.html actually exists
+        if [ -f "${POUDRIERE_DATA}/logs/bulk/index.html" ]; then
+            echo "HTML:${POUDRIERE_DATA}/logs/bulk"
+        elif [ -f "/usr/local/share/poudriere/html/index.html" ]; then
+            echo "HTML:/usr/local/share/poudriere/html"
+        elif [ -d "${POUDRIERE_DATA}/logs/bulk" ]; then
+            echo "HTML:${POUDRIERE_DATA}/logs/bulk"
+        elif [ -d "/usr/local/share/poudriere/html" ]; then
+            echo "HTML:/usr/local/share/poudriere/html"
+        else
+            echo "HTML:/usr/local/share/poudriere/html"
+        fi
+        """
+
+        let pathOutput = try await executeCommand(pathDetectionCommand)
+        print("DEBUG: Path detection output:\n\(pathOutput)")
+
+        // Parse the output
+        var dataPath = "/usr/local/poudriere/data"
+        var htmlPath = "/usr/local/share/poudriere/html"
+
+        for line in pathOutput.components(separatedBy: .newlines) {
+            if line.hasPrefix("DATA:") {
+                dataPath = String(line.dropFirst(5))
+            } else if line.hasPrefix("HTML:") {
+                htmlPath = String(line.dropFirst(5))
+            }
+        }
+
+        print("DEBUG: Final paths - DATA: \(dataPath), HTML: \(htmlPath)")
+
+        return PoudriereInfo(isInstalled: true, htmlPath: htmlPath, dataPath: dataPath)
+    }
+
+    /// Load HTML content from poudriere
+    func loadPoudriereHTML(path: String) async throws -> String {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Read the HTML file
+        let command = "cat '\(path)' 2>/dev/null || echo ''"
+        let content = try await executeCommand(command)
+
+        return content
+    }
+}
+
 // MARK: - FreeBSD Data Fetchers
 
 extension SSHConnectionManager {
