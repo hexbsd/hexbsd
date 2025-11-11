@@ -453,18 +453,30 @@ struct StatItem: View {
 
 // MARK: - Datasets View
 
+// Helper class for hierarchical dataset structure
+class DatasetNode: Identifiable, ObservableObject {
+    let id = UUID()
+    let dataset: ZFSDataset
+    @Published var children: [DatasetNode] = []
+    @Published var isExpanded: Bool = false
+
+    var hasChildren: Bool {
+        !children.isEmpty
+    }
+
+    init(dataset: ZFSDataset) {
+        self.dataset = dataset
+    }
+}
+
 struct DatasetsView: View {
     @ObservedObject var viewModel: ZFSViewModel
-    @State private var selectedDatasets: Set<ZFSDataset.ID> = []
+    @State private var selectedDataset: ZFSDataset?
     @State private var showCreateSnapshot = false
     @State private var showCloneDataset = false
     @State private var snapshotName = ""
     @State private var cloneDestination = ""
-
-    private var selectedDataset: ZFSDataset? {
-        guard let id = selectedDatasets.first else { return nil }
-        return viewModel.datasets.first(where: { $0.id == id })
-    }
+    @State private var expandedDatasets: Set<String> = []
 
     private var datasetsCount: Int {
         viewModel.datasets.filter { !$0.isSnapshot }.count
@@ -472,6 +484,62 @@ struct DatasetsView: View {
 
     private var snapshotsCount: Int {
         viewModel.datasets.filter { $0.isSnapshot }.count
+    }
+
+    // Build hierarchical tree from flat dataset list
+    private func buildHierarchy() -> [DatasetNode] {
+        var nodes: [String: DatasetNode] = [:]
+        var rootNodes: [DatasetNode] = []
+
+        // Create nodes for all datasets (not snapshots)
+        let datasets = viewModel.datasets.filter { !$0.isSnapshot }.sorted { $0.name < $1.name }
+
+        for dataset in datasets {
+            let node = DatasetNode(dataset: dataset)
+            node.isExpanded = expandedDatasets.contains(dataset.name)
+            nodes[dataset.name] = node
+        }
+
+        // Build parent-child relationships
+        for node in nodes.values {
+            let name = node.dataset.name
+
+            // Find parent by removing last component
+            if let lastSlash = name.lastIndex(of: "/") {
+                let parentName = String(name[..<lastSlash])
+                if let parent = nodes[parentName] {
+                    parent.children.append(node)
+                } else {
+                    // Parent doesn't exist (maybe filtered out), add as root
+                    rootNodes.append(node)
+                }
+            } else {
+                // No slash means it's a pool-level dataset (root)
+                rootNodes.append(node)
+                // Expand root datasets by default
+                if !expandedDatasets.contains(name) {
+                    expandedDatasets.insert(name)
+                    node.isExpanded = true
+                }
+            }
+        }
+
+        // Sort children for each node
+        for node in nodes.values {
+            node.children.sort { $0.dataset.name < $1.dataset.name }
+        }
+
+        // Add snapshots as children of their parent datasets
+        let snapshots = viewModel.datasets.filter { $0.isSnapshot }.sorted { $0.name < $1.name }
+        for snapshot in snapshots {
+            let parentName = snapshot.name.components(separatedBy: "@")[0]
+            if let parent = nodes[parentName] {
+                let snapshotNode = DatasetNode(dataset: snapshot)
+                parent.children.append(snapshotNode)
+            }
+        }
+
+        return rootNodes.sorted { $0.dataset.name < $1.dataset.name }
     }
 
     var body: some View {
@@ -545,7 +613,7 @@ struct DatasetsView: View {
 
             Divider()
 
-            // Datasets table
+            // Datasets hierarchical list
             if viewModel.isLoadingDatasets {
                 VStack(spacing: 20) {
                     ProgressView()
@@ -569,44 +637,15 @@ struct DatasetsView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                Table(viewModel.datasets, selection: $selectedDatasets) {
-                    TableColumn("Name") { dataset in
-                        HStack(spacing: 8) {
-                            Image(systemName: dataset.icon)
-                                .foregroundColor(dataset.isSnapshot ? .orange : .blue)
-                            Text(dataset.name)
-                        }
+                List(selection: $selectedDataset) {
+                    ForEach(buildHierarchy()) { node in
+                        DatasetNodeView(
+                            node: node,
+                            level: 0,
+                            expandedDatasets: $expandedDatasets,
+                            selectedDataset: $selectedDataset
+                        )
                     }
-                    .width(min: 200, ideal: 300)
-
-                    TableColumn("Type", value: \.type)
-                        .width(min: 80, ideal: 100)
-
-                    TableColumn("Used", value: \.used)
-                        .width(min: 80, ideal: 100)
-
-                    TableColumn("Available", value: \.available)
-                        .width(min: 80, ideal: 100)
-
-                    TableColumn("Referenced", value: \.referenced)
-                        .width(min: 80, ideal: 100)
-
-                    TableColumn("Compression") { dataset in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(dataset.compression)
-                                .font(.caption)
-                            Text(dataset.compressRatio)
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    .width(min: 80, ideal: 100)
-
-                    TableColumn("Quota", value: \.quota)
-                        .width(min: 80, ideal: 100)
-
-                    TableColumn("Mountpoint", value: \.mountpoint)
-                        .width(min: 120, ideal: 200)
                 }
             }
         }
@@ -645,6 +684,126 @@ struct DatasetsView: View {
                 )
             }
         }
+    }
+}
+
+// MARK: - Dataset Node View
+
+struct DatasetNodeView: View {
+    @ObservedObject var node: DatasetNode
+    let level: Int
+    @Binding var expandedDatasets: Set<String>
+    @Binding var selectedDataset: ZFSDataset?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Current dataset row
+            HStack(spacing: 8) {
+                // Indentation
+                if level > 0 {
+                    ForEach(0..<level, id: \.self) { _ in
+                        Rectangle()
+                            .fill(Color.clear)
+                            .frame(width: 20)
+                    }
+                }
+
+                // Expand/collapse chevron
+                if node.hasChildren {
+                    Button(action: {
+                        withAnimation {
+                            if expandedDatasets.contains(node.dataset.name) {
+                                expandedDatasets.remove(node.dataset.name)
+                            } else {
+                                expandedDatasets.insert(node.dataset.name)
+                            }
+                            node.isExpanded.toggle()
+                        }
+                    }) {
+                        Image(systemName: node.isExpanded ? "chevron.down" : "chevron.right")
+                            .foregroundColor(.secondary)
+                            .frame(width: 20)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Rectangle()
+                        .fill(Color.clear)
+                        .frame(width: 20)
+                }
+
+                // Dataset icon
+                Image(systemName: node.dataset.icon)
+                    .foregroundColor(node.dataset.isSnapshot ? .orange : .blue)
+
+                // Dataset name (show only last component)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(lastPathComponent(node.dataset.name))
+                        .font(.body)
+
+                    HStack(spacing: 12) {
+                        Label(node.dataset.used, systemImage: "")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        if node.dataset.compression != "off" && node.dataset.compression != "-" {
+                            Label("\(node.dataset.compression) (\(node.dataset.compressRatio))", systemImage: "")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        if node.dataset.mountpoint != "-" && !node.dataset.isSnapshot {
+                            Label(node.dataset.mountpoint, systemImage: "folder")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        if node.dataset.isSnapshot {
+                            Text("snapshot")
+                                .font(.caption2)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.orange.opacity(0.2))
+                                .cornerRadius(3)
+                        }
+                    }
+                }
+
+                Spacer()
+            }
+            .padding(.vertical, 4)
+            .padding(.leading, 8)
+            .contentShape(Rectangle())
+            .background(selectedDataset?.id == node.dataset.id ? Color.accentColor.opacity(0.2) : Color.clear)
+            .onTapGesture {
+                selectedDataset = node.dataset
+            }
+
+            // Children (if expanded)
+            if node.isExpanded {
+                ForEach(node.children) { childNode in
+                    DatasetNodeView(
+                        node: childNode,
+                        level: level + 1,
+                        expandedDatasets: $expandedDatasets,
+                        selectedDataset: $selectedDataset
+                    )
+                }
+            }
+        }
+    }
+
+    private func lastPathComponent(_ path: String) -> String {
+        // For snapshots, show the snapshot name
+        if path.contains("@") {
+            let parts = path.components(separatedBy: "@")
+            return "@" + (parts.last ?? path)
+        }
+
+        // For datasets, show the last component
+        if let lastSlash = path.lastIndex(of: "/") {
+            return String(path[path.index(after: lastSlash)...])
+        }
+        return path
     }
 }
 
@@ -902,6 +1061,64 @@ struct ReplicationPaneView: View {
     let onDrag: (ZFSDataset) -> Void
     let onReplicate: (ZFSDataset) -> Void
 
+    @State private var expandedDatasets: Set<String> = []
+
+    // Build hierarchical tree from flat dataset list
+    private func buildHierarchy() -> [DatasetNode] {
+        var nodes: [String: DatasetNode] = [:]
+        var rootNodes: [DatasetNode] = []
+
+        // Create nodes for all datasets (not snapshots)
+        let datasetsOnly = datasets.filter { !$0.isSnapshot }.sorted { $0.name < $1.name }
+
+        for dataset in datasetsOnly {
+            let node = DatasetNode(dataset: dataset)
+            node.isExpanded = expandedDatasets.contains(dataset.name)
+            nodes[dataset.name] = node
+        }
+
+        // Build parent-child relationships
+        for node in nodes.values {
+            let name = node.dataset.name
+
+            // Find parent by removing last component
+            if let lastSlash = name.lastIndex(of: "/") {
+                let parentName = String(name[..<lastSlash])
+                if let parent = nodes[parentName] {
+                    parent.children.append(node)
+                } else {
+                    // Parent doesn't exist (maybe filtered out), add as root
+                    rootNodes.append(node)
+                }
+            } else {
+                // No slash means it's a pool-level dataset (root)
+                rootNodes.append(node)
+                // Expand root datasets by default
+                if !expandedDatasets.contains(name) {
+                    expandedDatasets.insert(name)
+                    node.isExpanded = true
+                }
+            }
+        }
+
+        // Sort children for each node
+        for node in nodes.values {
+            node.children.sort { $0.dataset.name < $1.dataset.name }
+        }
+
+        // Add snapshots as children of their parent datasets
+        let snapshots = datasets.filter { $0.isSnapshot }.sorted { $0.name < $1.name }
+        for snapshot in snapshots {
+            let parentName = snapshot.name.components(separatedBy: "@")[0]
+            if let parent = nodes[parentName] {
+                let snapshotNode = DatasetNode(dataset: snapshot)
+                parent.children.append(snapshotNode)
+            }
+        }
+
+        return rootNodes.sorted { $0.dataset.name < $1.dataset.name }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -918,7 +1135,7 @@ struct ReplicationPaneView: View {
 
             Divider()
 
-            // Datasets list
+            // Datasets hierarchical list
             if isLoading {
                 VStack(spacing: 20) {
                     ProgressView()
@@ -939,16 +1156,17 @@ struct ReplicationPaneView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(datasets) { dataset in
-                    ReplicationDatasetRow(
-                        dataset: dataset,
-                        isSource: isSource,
-                        onDrag: { onDrag(dataset) },
-                        onReplicate: { onReplicate(dataset) }
-                    )
-                    .onDrop(of: [.text], isTargeted: nil) { providers in
-                        // Handle drop on specific dataset (for targeting specific destination)
-                        return onDrop(dataset)
+                List {
+                    ForEach(buildHierarchy()) { node in
+                        ReplicationDatasetNodeView(
+                            node: node,
+                            level: 0,
+                            isSource: isSource,
+                            expandedDatasets: $expandedDatasets,
+                            onDrag: onDrag,
+                            onDrop: onDrop,
+                            onReplicate: onReplicate
+                        )
                     }
                 }
                 .onDrop(of: [.text], isTargeted: nil) { providers in
@@ -960,51 +1178,130 @@ struct ReplicationPaneView: View {
     }
 }
 
-struct ReplicationDatasetRow: View {
-    let dataset: ZFSDataset
+// MARK: - Replication Dataset Node View
+
+struct ReplicationDatasetNodeView: View {
+    @ObservedObject var node: DatasetNode
+    let level: Int
     let isSource: Bool
-    let onDrag: () -> Void
-    let onReplicate: () -> Void
+    @Binding var expandedDatasets: Set<String>
+    let onDrag: (ZFSDataset) -> Void
+    let onDrop: (ZFSDataset) -> Bool
+    let onReplicate: (ZFSDataset) -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: dataset.icon)
-                .foregroundColor(dataset.isSnapshot ? .orange : .blue)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(dataset.name)
-                    .font(.body)
-                HStack(spacing: 8) {
-                    Text(dataset.used)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    if dataset.isSnapshot {
-                        Text("snapshot")
-                            .font(.caption2)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(Color.orange.opacity(0.2))
-                            .cornerRadius(3)
+        VStack(spacing: 0) {
+            // Current dataset row
+            HStack(spacing: 8) {
+                // Indentation
+                if level > 0 {
+                    ForEach(0..<level, id: \.self) { _ in
+                        Rectangle()
+                            .fill(Color.clear)
+                            .frame(width: 20)
                     }
                 }
+
+                // Expand/collapse chevron
+                if node.hasChildren {
+                    Button(action: {
+                        withAnimation {
+                            if expandedDatasets.contains(node.dataset.name) {
+                                expandedDatasets.remove(node.dataset.name)
+                            } else {
+                                expandedDatasets.insert(node.dataset.name)
+                            }
+                            node.isExpanded.toggle()
+                        }
+                    }) {
+                        Image(systemName: node.isExpanded ? "chevron.down" : "chevron.right")
+                            .foregroundColor(.secondary)
+                            .frame(width: 20)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Rectangle()
+                        .fill(Color.clear)
+                        .frame(width: 20)
+                }
+
+                // Dataset icon
+                Image(systemName: node.dataset.icon)
+                    .foregroundColor(node.dataset.isSnapshot ? .orange : .blue)
+
+                // Dataset name (show only last component)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(lastPathComponent(node.dataset.name))
+                        .font(.body)
+
+                    HStack(spacing: 8) {
+                        Text(node.dataset.used)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        if node.dataset.isSnapshot {
+                            Text("snapshot")
+                                .font(.caption2)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.orange.opacity(0.2))
+                                .cornerRadius(3)
+                        }
+                    }
+                }
+
+                Spacer()
+
+                // Replicate button
+                Button(action: {
+                    onReplicate(node.dataset)
+                }) {
+                    Image(systemName: isSource ? "arrow.right.circle" : "arrow.left.circle")
+                        .foregroundColor(.blue)
+                }
+                .buttonStyle(.plain)
+                .help(isSource ? "Replicate to target" : "Replicate to local")
+            }
+            .padding(.vertical, 4)
+            .padding(.leading, 8)
+            .contentShape(Rectangle())
+            .onDrag {
+                onDrag(node.dataset)
+                return NSItemProvider(object: node.dataset.name as NSString)
+            }
+            .onDrop(of: [.text], isTargeted: nil) { providers in
+                return onDrop(node.dataset)
             }
 
-            Spacer()
-
-            // Replicate button
-            Button(action: onReplicate) {
-                Image(systemName: isSource ? "arrow.right.circle" : "arrow.left.circle")
-                    .foregroundColor(.blue)
+            // Children (if expanded)
+            if node.isExpanded {
+                ForEach(node.children) { childNode in
+                    ReplicationDatasetNodeView(
+                        node: childNode,
+                        level: level + 1,
+                        isSource: isSource,
+                        expandedDatasets: $expandedDatasets,
+                        onDrag: onDrag,
+                        onDrop: onDrop,
+                        onReplicate: onReplicate
+                    )
+                }
             }
-            .buttonStyle(.plain)
-            .help(isSource ? "Replicate to target" : "Replicate to local")
         }
-        .padding(.vertical, 4)
-        .contentShape(Rectangle())
-        .onDrag {
-            onDrag()
-            return NSItemProvider(object: dataset.name as NSString)
+    }
+
+    private func lastPathComponent(_ path: String) -> String {
+        // For snapshots, show the snapshot name
+        if path.contains("@") {
+            let parts = path.components(separatedBy: "@")
+            return "@" + (parts.last ?? path)
         }
+
+        // For datasets, show the last component
+        if let lastSlash = path.lastIndex(of: "/") {
+            return String(path[path.index(after: lastSlash)...])
+        }
+        return path
     }
 }
 
