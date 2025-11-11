@@ -442,60 +442,8 @@ struct JailDetailView: View {
                     }
                 }
 
-                // Resource usage
-                if jail.isRunning, let usage = detailViewModel.resourceUsage {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Resource Usage")
-                            .font(.headline)
-
-                        HStack(spacing: 20) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("CPU")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                Text(String(format: "%.1f%%", usage.cpuPercent))
-                                    .font(.title2)
-                                    .fontWeight(.bold)
-                                    .foregroundColor(.blue)
-                            }
-
-                            Divider()
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Memory")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                Text(usage.memoryUsed)
-                                    .font(.title2)
-                                    .fontWeight(.bold)
-                                    .foregroundColor(.green)
-                                if !usage.memoryLimit.isEmpty {
-                                    Text("of \(usage.memoryLimit)")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-
-                            Divider()
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Processes")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                Text("\(usage.processCount)")
-                                    .font(.title2)
-                                    .fontWeight(.bold)
-                                    .foregroundColor(.orange)
-                            }
-                        }
-                        .padding()
-                        .background(Color(nsColor: .controlBackgroundColor))
-                        .cornerRadius(8)
-                    }
-                }
-
-                // Configuration
-                if let config = detailViewModel.config {
+                // Configuration - only show for managed jails
+                if jail.isManaged, let config = detailViewModel.config {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Configuration")
                             .font(.headline)
@@ -603,12 +551,9 @@ class JailDetailViewModel: ObservableObject {
         error = nil
 
         do {
-            // Load config
-            config = try await sshManager.getJailConfig(name: jail.name)
-
-            // Load resource usage if running
-            if jail.isRunning {
-                resourceUsage = try await sshManager.getJailResourceUsage(name: jail.name)
+            // Load config only for managed jails
+            if jail.isManaged {
+                config = try await sshManager.getJailConfig(name: jail.name)
             }
         } catch {
             self.error = "Failed to load jail details: \(error.localizedDescription)"
