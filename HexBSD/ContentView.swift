@@ -659,16 +659,18 @@ struct ContentView: View {
                     systemStatus: systemStatus
                 )
             } else {
-                VStack {
-                    Text("Servers")
-                        .font(.title)
-                        .bold()
-                        .padding(.bottom, 10)
-
+                ZStack(alignment: .bottomTrailing) {
                     if savedServers.isEmpty {
-                        Text("No servers configured")
-                            .foregroundColor(.secondary)
-                            .padding()
+                        VStack {
+                            Spacer()
+                            Text("No servers configured")
+                                .foregroundColor(.secondary)
+                            Text("Click + to add a server")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(.top, 4)
+                            Spacer()
+                        }
                     } else {
                         List(savedServers) { server in
                             HStack {
@@ -694,17 +696,25 @@ struct ContentView: View {
                             }
                             .padding(.vertical, 4)
                         }
-                        .frame(maxHeight: 300)
                     }
 
-                    Button("Add Server") {
+                    // Floating Add button in bottom-right corner
+                    Button(action: {
                         selectedServer = nil
                         showConnectSheet.toggle()
+                    }) {
+                        Image(systemName: "plus")
+                            .font(.title2)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.white)
+                            .frame(width: 56, height: 56)
+                            .background(Color.accentColor)
+                            .clipShape(Circle())
+                            .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 2)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .padding(.top)
+                    .buttonStyle(.plain)
+                    .padding(20)
                 }
-                .padding()
             }
         }
         .sheet(isPresented: $showConnectSheet) {
