@@ -1833,11 +1833,14 @@ extension SSHConnectionManager {
         guard !lastCPUSnapshot.isEmpty,
               lastCPUSnapshot.count == currentValues.count,
               let lastTime = lastCPUTime else {
-            // First call - store snapshot and return empty
+            // First call - store snapshot and return placeholder data with 0% usage
             print("DEBUG: First CPU snapshot, storing for next call")
             lastCPUSnapshot = currentValues
             lastCPUTime = now
-            return []
+
+            // Return 0% usage for all cores so circles appear immediately
+            print("DEBUG: Returning \(actualCPUCount) cores with 0% usage as placeholder")
+            return Array(repeating: 0.0, count: actualCPUCount)
         }
 
         // Calculate time delta
