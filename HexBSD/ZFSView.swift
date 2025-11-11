@@ -48,9 +48,14 @@ struct ZFSDataset: Identifiable, Hashable {
     let quota: String
     let reservation: String
     let type: String  // filesystem, volume, snapshot
+    let sharenfs: String
 
     var isSnapshot: Bool {
         type == "snapshot" || name.contains("@")
+    }
+
+    var isShared: Bool {
+        sharenfs != "off" && sharenfs != "-"
     }
 
     var displayName: String {
@@ -79,6 +84,12 @@ struct ZFSDataset: Identifiable, Hashable {
         if isSnapshot {
             return "camera"
         }
+
+        // Show network icon if shared
+        if isShared {
+            return "network"
+        }
+
         switch type {
         case "filesystem":
             return "folder.fill"
@@ -127,7 +138,6 @@ struct ZFSContentView: View {
     enum ZFSViewType: String, CaseIterable {
         case pools = "Pools"
         case datasets = "Datasets"
-        case bootEnvironments = "Boot Environments"
     }
 
     var body: some View {
@@ -150,8 +160,6 @@ struct ZFSContentView: View {
                     PoolsView(viewModel: viewModel)
                 case .datasets:
                     DatasetsView(viewModel: viewModel)
-                case .bootEnvironments:
-                    BootEnvironmentsContentView()
                 }
             }
         }
@@ -226,6 +234,9 @@ struct PoolsView: View {
             } else {
                 ScrollView {
                     VStack(spacing: 12) {
+                        // Boot Environments section
+                        BootEnvironmentsSection()
+
                         ForEach(viewModel.pools, id: \.name) { pool in
                             PoolCard(
                                 pool: pool,
@@ -235,6 +246,214 @@ struct PoolsView: View {
                         }
                     }
                     .padding()
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Boot Environments Section
+
+struct BootEnvironmentsSection: View {
+    @StateObject private var viewModel = BootEnvironmentsViewModel()
+    @State private var showError = false
+    @State private var showCreateBE = false
+    @State private var showRenameBE = false
+    @State private var selectedBE: BootEnvironment?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header - Always visible
+            HStack(spacing: 12) {
+                Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                    .font(.title2)
+                    .foregroundColor(.blue)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Boot Environments")
+                        .font(.title3)
+                        .fontWeight(.semibold)
+
+                    Text("\(viewModel.bootEnvironments.count) environment(s)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+            }
+            .padding()
+            .background(Color(nsColor: .controlBackgroundColor))
+
+            Divider()
+
+            // Content - Always expanded
+            VStack(spacing: 12) {
+                    // Actions toolbar
+                    HStack {
+                        if let be = selectedBE {
+                            // Actions for selected BE
+                            if !be.active {
+                                Button(action: {
+                                    Task {
+                                        await viewModel.activate(be: be.name)
+                                    }
+                                }) {
+                                    Label("Activate", systemImage: "power")
+                                }
+                                .buttonStyle(.borderedProminent)
+                            }
+
+                            if be.mountpoint == "-" {
+                                Button(action: {
+                                    Task {
+                                        await viewModel.mount(be: be.name)
+                                    }
+                                }) {
+                                    Label("Mount", systemImage: "arrow.down.circle")
+                                }
+                                .buttonStyle(.bordered)
+                            } else if be.mountpoint != "/" {
+                                Button(action: {
+                                    Task {
+                                        await viewModel.unmount(be: be.name)
+                                    }
+                                }) {
+                                    Label("Unmount", systemImage: "eject")
+                                }
+                                .buttonStyle(.bordered)
+                            }
+
+                            if !be.active {
+                                Button(action: {
+                                    showRenameBE = true
+                                }) {
+                                    Label("Rename", systemImage: "pencil")
+                                }
+                                .buttonStyle(.bordered)
+                            }
+
+                            if !be.active {
+                                Button(action: {
+                                    Task {
+                                        await viewModel.delete(be: be.name)
+                                    }
+                                }) {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
+
+                        Spacer()
+
+                        Button(action: {
+                            showCreateBE = true
+                        }) {
+                            Label("Create", systemImage: "plus.circle")
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button(action: {
+                            Task {
+                                await viewModel.refresh()
+                            }
+                        }) {
+                            Label("Refresh", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .padding(.top, 8)
+
+                    // Boot environments list
+                    if viewModel.isLoading {
+                        VStack(spacing: 20) {
+                            ProgressView()
+                            Text("Loading boot environments...")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(height: 100)
+                    } else if viewModel.bootEnvironments.isEmpty {
+                        VStack(spacing: 12) {
+                            Image(systemName: "arrow.triangle.2.circlepath.circle")
+                                .font(.system(size: 36))
+                                .foregroundColor(.secondary)
+                            Text("No Boot Environments")
+                                .font(.headline)
+                                .foregroundColor(.secondary)
+                            Text("Boot environments allow you to snapshot and revert your system")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(height: 150)
+                        .frame(maxWidth: .infinity)
+                    } else {
+                        VStack(spacing: 8) {
+                            ForEach(viewModel.bootEnvironments) { be in
+                                BootEnvironmentRow(bootEnvironment: be)
+                                    .padding(8)
+                                    .background(selectedBE?.id == be.id ? Color.accentColor.opacity(0.2) : Color.clear)
+                                    .cornerRadius(6)
+                                    .onTapGesture {
+                                        selectedBE = be
+                                    }
+                            }
+                        }
+                    }
+                }
+                .padding()
+                .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+            }
+        .cornerRadius(8)
+        .alert("Boot Environment Error", isPresented: $showError) {
+            Button("OK") {
+                showError = false
+            }
+        } message: {
+            Text(viewModel.error ?? "Unknown error")
+        }
+        .onChange(of: viewModel.error) { oldValue, newValue in
+            if newValue != nil {
+                showError = true
+            }
+        }
+        .sheet(isPresented: $showCreateBE) {
+            CreateBootEnvironmentSheet(
+                existingBEs: viewModel.bootEnvironments.map { $0.name },
+                onCreate: { name, source in
+                    Task {
+                        await viewModel.create(name: name, source: source)
+                        showCreateBE = false
+                    }
+                },
+                onCancel: {
+                    showCreateBE = false
+                }
+            )
+        }
+        .sheet(isPresented: $showRenameBE) {
+            if let be = selectedBE {
+                RenameBootEnvironmentSheet(
+                    currentName: be.name,
+                    existingBEs: viewModel.bootEnvironments.map { $0.name },
+                    onRename: { newName in
+                        Task {
+                            await viewModel.rename(oldName: be.name, newName: newName)
+                            showRenameBE = false
+                            selectedBE = nil
+                        }
+                    },
+                    onCancel: {
+                        showRenameBE = false
+                    }
+                )
+            }
+        }
+        .onAppear {
+            if viewModel.bootEnvironments.isEmpty {
+                Task {
+                    await viewModel.loadBootEnvironments()
                 }
             }
         }
@@ -459,6 +678,7 @@ struct DatasetsView: View {
     @State private var savedServers: [SavedServer] = []
     @State private var targetManager: SSHConnectionManager?
     @State private var targetDatasets: [ZFSDataset] = []
+    @State private var targetPools: [ZFSPool] = []
     @State private var isLoadingTarget = false
     @State private var expandedTargetDatasets: Set<String> = []
     @State private var draggedDataset: ZFSDataset?
@@ -696,6 +916,41 @@ struct DatasetsView: View {
 
     private var datasetManagementView: some View {
         VStack(spacing: 0) {
+            // Pool statistics
+            if !viewModel.pools.isEmpty {
+                HStack(spacing: 20) {
+                    ForEach(viewModel.pools, id: \.name) { pool in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(pool.name)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            HStack(spacing: 12) {
+                                Label(pool.allocated, systemImage: "cylinder.fill")
+                                    .font(.callout)
+                                    .foregroundColor(.blue)
+                                Text("used")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+
+                                Label(pool.free, systemImage: "cylinder")
+                                    .font(.callout)
+                                    .foregroundColor(.green)
+                                Text("available")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .cornerRadius(6)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal)
+                .padding(.top)
+            }
+
             // Action toolbar
             HStack {
                 Spacer()
@@ -806,14 +1061,63 @@ struct DatasetsView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(selection: $selectedDataset) {
-                    ForEach(buildHierarchy()) { node in
-                        DatasetNodeView(
-                            node: node,
-                            level: 0,
-                            expandedDatasets: $expandedDatasets,
-                            selectedDataset: $selectedDataset
-                        )
+                VStack(spacing: 0) {
+                    // Column headers
+                    HStack(spacing: 0) {
+                        Text("Name")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.secondary)
+                            .frame(width: 300, alignment: .leading)
+                            .padding(.leading, 8)
+
+                        Text("Used")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.secondary)
+                            .frame(width: 100, alignment: .leading)
+
+                        Text("Available")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.secondary)
+                            .frame(width: 100, alignment: .leading)
+
+                        Text("Compression")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.secondary)
+                            .frame(width: 120, alignment: .leading)
+
+                        Text("Quota")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.secondary)
+                            .frame(width: 100, alignment: .leading)
+
+                        Text("Mountpoint")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.secondary)
+                            .frame(minWidth: 150, alignment: .leading)
+
+                        Spacer()
+                    }
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 8)
+                    .background(Color(nsColor: .controlBackgroundColor))
+
+                    Divider()
+
+                    List(selection: $selectedDataset) {
+                        ForEach(buildHierarchy()) { node in
+                            DatasetNodeView(
+                                node: node,
+                                level: 0,
+                                expandedDatasets: $expandedDatasets,
+                                selectedDataset: $selectedDataset
+                            )
+                        }
                     }
                 }
             }
@@ -832,6 +1136,13 @@ struct DatasetsView: View {
                         Text("Drag to target to replicate")
                             .font(.caption)
                             .foregroundColor(.secondary)
+
+                        // Invisible spacer to match target's refresh button
+                        Button(action: {}) {
+                            Label("Refresh", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.bordered)
+                        .hidden()
                     }
 
                     HStack {
@@ -846,20 +1157,71 @@ struct DatasetsView: View {
                 }
                 .padding()
 
+                // Pool statistics for source
+                if !viewModel.pools.isEmpty {
+                    HStack(spacing: 20) {
+                        ForEach(viewModel.pools, id: \.name) { pool in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(pool.name)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                HStack(spacing: 12) {
+                                    Label(pool.allocated, systemImage: "cylinder.fill")
+                                        .font(.callout)
+                                        .foregroundColor(.blue)
+                                    Text("used")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+
+                                    Label(pool.free, systemImage: "cylinder")
+                                        .font(.callout)
+                                        .foregroundColor(.green)
+                                    Text("available")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color(nsColor: .controlBackgroundColor))
+                            .cornerRadius(6)
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal)
+                }
+
                 Divider()
 
                 // Source datasets list (draggable)
-                List(selection: $selectedDataset) {
-                    ForEach(buildHierarchy()) { node in
-                        DraggableDatasetNodeView(
-                            node: node,
-                            level: 0,
-                            expandedDatasets: $expandedDatasets,
-                            selectedDataset: $selectedDataset,
-                            onDragStarted: { dataset in
-                                draggedDataset = dataset
-                            }
-                        )
+                VStack(spacing: 0) {
+                    // Column headers
+                    HStack(spacing: 0) {
+                        Text("Name")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.leading, 8)
+                    }
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 8)
+                    .background(Color(nsColor: .controlBackgroundColor))
+
+                    Divider()
+
+                    List(selection: $selectedDataset) {
+                        ForEach(buildHierarchy()) { node in
+                            DraggableDatasetNodeView(
+                                node: node,
+                                level: 0,
+                                expandedDatasets: $expandedDatasets,
+                                selectedDataset: $selectedDataset,
+                                onDragStarted: { dataset in
+                                    draggedDataset = dataset
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -867,23 +1229,69 @@ struct DatasetsView: View {
 
             // Target (remote) side
             VStack(spacing: 0) {
-                HStack {
-                    if let serverId = selectedReplicationServer,
-                       let server = savedServers.first(where: { $0.id.uuidString == serverId }) {
-                        Text("Target: \(server.name)")
-                            .font(.headline)
-                    }
-                    Spacer()
-                    Button(action: {
-                        Task {
-                            await loadTargetDatasets()
+                VStack(spacing: 8) {
+                    HStack {
+                        if let serverId = selectedReplicationServer,
+                           let server = savedServers.first(where: { $0.id.uuidString == serverId }) {
+                            Text("Target: \(server.name)")
+                                .font(.headline)
                         }
-                    }) {
-                        Label("Refresh", systemImage: "arrow.clockwise")
+                        Spacer()
+                        Button(action: {
+                            Task {
+                                await loadTargetData()
+                            }
+                        }) {
+                            Label("Refresh", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.bordered)
                     }
-                    .buttonStyle(.bordered)
+
+                    HStack {
+                        Image(systemName: "info.circle")
+                            .foregroundColor(.blue)
+                            .font(.caption)
+                        Text("Note: Target server must have source server's public key in ~/.ssh/authorized_keys for root user.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
                 }
                 .padding()
+
+                // Pool statistics for target
+                if !targetPools.isEmpty {
+                    HStack(spacing: 20) {
+                        ForEach(targetPools, id: \.name) { pool in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(pool.name)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                HStack(spacing: 12) {
+                                    Label(pool.allocated, systemImage: "cylinder.fill")
+                                        .font(.callout)
+                                        .foregroundColor(.blue)
+                                    Text("used")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+
+                                    Label(pool.free, systemImage: "cylinder")
+                                        .font(.callout)
+                                        .foregroundColor(.green)
+                                    Text("available")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color(nsColor: .controlBackgroundColor))
+                            .cornerRadius(6)
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal)
+                }
 
                 Divider()
 
@@ -910,31 +1318,48 @@ struct DatasetsView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    List {
-                        ForEach(buildTargetHierarchy()) { node in
-                            DroppableDatasetNodeView(
-                                node: node,
-                                level: 0,
-                                expandedDatasets: $expandedTargetDatasets,
-                                onDropped: { targetDataset in
-                                    if let sourceDataset = draggedDataset {
-                                        Task {
-                                            await replicateDataset(source: sourceDataset, targetParent: targetDataset)
+                    VStack(spacing: 0) {
+                        // Column headers
+                        HStack(spacing: 0) {
+                            Text("Name")
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.leading, 8)
+                        }
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 8)
+                        .background(Color(nsColor: .controlBackgroundColor))
+
+                        Divider()
+
+                        List {
+                            ForEach(buildTargetHierarchy()) { node in
+                                DroppableDatasetNodeView(
+                                    node: node,
+                                    level: 0,
+                                    expandedDatasets: $expandedTargetDatasets,
+                                    onDropped: { targetDataset in
+                                        if let sourceDataset = draggedDataset {
+                                            Task {
+                                                await replicateDataset(source: sourceDataset, targetParent: targetDataset)
+                                            }
                                         }
                                     }
-                                }
-                            )
-                        }
-                    }
-                    .onDrop(of: [.text], isTargeted: nil) { providers in
-                        // Drop on empty space - replicate to root
-                        if let sourceDataset = draggedDataset {
-                            Task {
-                                await replicateDataset(source: sourceDataset, targetParent: nil)
+                                )
                             }
-                            return true
                         }
-                        return false
+                        .onDrop(of: [.text], isTargeted: nil) { providers in
+                            // Drop on empty space - replicate to root
+                            if let sourceDataset = draggedDataset {
+                                Task {
+                                    await replicateDataset(source: sourceDataset, targetParent: nil)
+                                }
+                                return true
+                            }
+                            return false
+                        }
                     }
                 }
             }
@@ -966,6 +1391,7 @@ struct DatasetsView: View {
     private func connectToTargetServer(_ server: SavedServer) async {
         isLoadingTarget = true
         targetDatasets = []
+        targetPools = []
 
         do {
             let manager = SSHConnectionManager()
@@ -979,8 +1405,8 @@ struct DatasetsView: View {
             )
             targetManager = manager
 
-            // Load datasets from target
-            await loadTargetDatasets()
+            // Load datasets and pools from target
+            await loadTargetData()
         } catch {
             // Connection failed
             targetManager = nil
@@ -988,14 +1414,19 @@ struct DatasetsView: View {
         }
     }
 
-    private func loadTargetDatasets() async {
+    private func loadTargetData() async {
         guard let manager = targetManager else { return }
 
         isLoadingTarget = true
         do {
-            targetDatasets = try await manager.listZFSDatasets()
+            async let datasets = manager.listZFSDatasets()
+            async let pools = manager.listZFSPools()
+
+            targetDatasets = try await datasets
+            targetPools = try await pools
         } catch {
             targetDatasets = []
+            targetPools = []
         }
         isLoadingTarget = false
     }
@@ -1065,8 +1496,8 @@ struct DatasetsView: View {
 
             try await SSHConnectionManager.shared.executeCommand(replicationCommand)
 
-            // Refresh target datasets
-            await loadTargetDatasets()
+            // Refresh target datasets and pools
+            await loadTargetData()
 
             // Show success message
             await MainActor.run {
@@ -1091,64 +1522,50 @@ struct DatasetNodeView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Current dataset row
-            HStack(spacing: 8) {
-                // Indentation
-                if level > 0 {
-                    ForEach(0..<level, id: \.self) { _ in
+            HStack(spacing: 0) {
+                // Name column with indentation, chevron, and icon
+                HStack(spacing: 4) {
+                    // Indentation
+                    if level > 0 {
+                        ForEach(0..<level, id: \.self) { _ in
+                            Rectangle()
+                                .fill(Color.clear)
+                                .frame(width: 20)
+                        }
+                    }
+
+                    // Expand/collapse chevron
+                    if node.hasChildren {
+                        Button(action: {
+                            withAnimation {
+                                if expandedDatasets.contains(node.dataset.name) {
+                                    expandedDatasets.remove(node.dataset.name)
+                                } else {
+                                    expandedDatasets.insert(node.dataset.name)
+                                }
+                                node.isExpanded.toggle()
+                            }
+                        }) {
+                            Image(systemName: node.isExpanded ? "chevron.down" : "chevron.right")
+                                .foregroundColor(.secondary)
+                                .frame(width: 16)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
                         Rectangle()
                             .fill(Color.clear)
-                            .frame(width: 20)
+                            .frame(width: 16)
                     }
-                }
 
-                // Expand/collapse chevron
-                if node.hasChildren {
-                    Button(action: {
-                        withAnimation {
-                            if expandedDatasets.contains(node.dataset.name) {
-                                expandedDatasets.remove(node.dataset.name)
-                            } else {
-                                expandedDatasets.insert(node.dataset.name)
-                            }
-                            node.isExpanded.toggle()
-                        }
-                    }) {
-                        Image(systemName: node.isExpanded ? "chevron.down" : "chevron.right")
-                            .foregroundColor(.secondary)
-                            .frame(width: 20)
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    Rectangle()
-                        .fill(Color.clear)
-                        .frame(width: 20)
-                }
+                    // Dataset icon
+                    Image(systemName: node.dataset.icon)
+                        .foregroundColor(node.dataset.isSnapshot ? .orange : .blue)
+                        .frame(width: 16)
 
-                // Dataset icon
-                Image(systemName: node.dataset.icon)
-                    .foregroundColor(node.dataset.isSnapshot ? .orange : .blue)
-
-                // Dataset name (show only last component)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(lastPathComponent(node.dataset.name))
-                        .font(.body)
-
-                    HStack(spacing: 12) {
-                        Label(node.dataset.used, systemImage: "")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        if node.dataset.compression != "off" && node.dataset.compression != "-" {
-                            Label("\(node.dataset.compression) (\(node.dataset.compressRatio))", systemImage: "")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-
-                        if node.dataset.mountpoint != "-" && !node.dataset.isSnapshot {
-                            Label(node.dataset.mountpoint, systemImage: "folder")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
+                    // Dataset name
+                    HStack(spacing: 4) {
+                        Text(lastPathComponent(node.dataset.name))
+                            .font(.body)
 
                         if node.dataset.isSnapshot {
                             Text("snapshot")
@@ -1160,11 +1577,38 @@ struct DatasetNodeView: View {
                         }
                     }
                 }
+                .frame(width: 300, alignment: .leading)
+                .padding(.leading, 8)
+
+                // Used column
+                Text(node.dataset.used)
+                    .font(.body)
+                    .frame(width: 100, alignment: .leading)
+
+                // Available column
+                Text(node.dataset.available)
+                    .font(.body)
+                    .frame(width: 100, alignment: .leading)
+
+                // Compression column
+                Text(node.dataset.compression != "-" ? "\(node.dataset.compression) (\(node.dataset.compressRatio))" : "-")
+                    .font(.body)
+                    .frame(width: 120, alignment: .leading)
+
+                // Quota column
+                Text(node.dataset.quota)
+                    .font(.body)
+                    .frame(width: 100, alignment: .leading)
+
+                // Mountpoint column
+                Text(node.dataset.mountpoint)
+                    .font(.body)
+                    .lineLimit(1)
+                    .frame(minWidth: 150, alignment: .leading)
 
                 Spacer()
             }
             .padding(.vertical, 4)
-            .padding(.leading, 8)
             .contentShape(Rectangle())
             .background(selectedDataset?.id == node.dataset.id ? Color.accentColor.opacity(0.2) : Color.clear)
             .onTapGesture {
@@ -1212,64 +1656,50 @@ struct DraggableDatasetNodeView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Current dataset row
-            HStack(spacing: 8) {
-                // Indentation
-                if level > 0 {
-                    ForEach(0..<level, id: \.self) { _ in
+            HStack(spacing: 0) {
+                // Name column with indentation, chevron, and icon
+                HStack(spacing: 4) {
+                    // Indentation
+                    if level > 0 {
+                        ForEach(0..<level, id: \.self) { _ in
+                            Rectangle()
+                                .fill(Color.clear)
+                                .frame(width: 20)
+                        }
+                    }
+
+                    // Expand/collapse chevron
+                    if node.hasChildren {
+                        Button(action: {
+                            withAnimation {
+                                if expandedDatasets.contains(node.dataset.name) {
+                                    expandedDatasets.remove(node.dataset.name)
+                                } else {
+                                    expandedDatasets.insert(node.dataset.name)
+                                }
+                                node.isExpanded.toggle()
+                            }
+                        }) {
+                            Image(systemName: node.isExpanded ? "chevron.down" : "chevron.right")
+                                .foregroundColor(.secondary)
+                                .frame(width: 16)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
                         Rectangle()
                             .fill(Color.clear)
-                            .frame(width: 20)
+                            .frame(width: 16)
                     }
-                }
 
-                // Expand/collapse chevron
-                if node.hasChildren {
-                    Button(action: {
-                        withAnimation {
-                            if expandedDatasets.contains(node.dataset.name) {
-                                expandedDatasets.remove(node.dataset.name)
-                            } else {
-                                expandedDatasets.insert(node.dataset.name)
-                            }
-                            node.isExpanded.toggle()
-                        }
-                    }) {
-                        Image(systemName: node.isExpanded ? "chevron.down" : "chevron.right")
-                            .foregroundColor(.secondary)
-                            .frame(width: 20)
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    Rectangle()
-                        .fill(Color.clear)
-                        .frame(width: 20)
-                }
+                    // Dataset icon
+                    Image(systemName: node.dataset.icon)
+                        .foregroundColor(node.dataset.isSnapshot ? .orange : .blue)
+                        .frame(width: 16)
 
-                // Dataset icon
-                Image(systemName: node.dataset.icon)
-                    .foregroundColor(node.dataset.isSnapshot ? .orange : .blue)
-
-                // Dataset name (show only last component)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(lastPathComponent(node.dataset.name))
-                        .font(.body)
-
-                    HStack(spacing: 12) {
-                        Label(node.dataset.used, systemImage: "")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        if node.dataset.compression != "off" && node.dataset.compression != "-" {
-                            Label("\(node.dataset.compression) (\(node.dataset.compressRatio))", systemImage: "")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-
-                        if node.dataset.mountpoint != "-" && !node.dataset.isSnapshot {
-                            Label(node.dataset.mountpoint, systemImage: "folder")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
+                    // Dataset name
+                    HStack(spacing: 4) {
+                        Text(lastPathComponent(node.dataset.name))
+                            .font(.body)
 
                         if node.dataset.isSnapshot {
                             Text("snapshot")
@@ -1281,11 +1711,12 @@ struct DraggableDatasetNodeView: View {
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 8)
 
                 Spacer()
             }
             .padding(.vertical, 4)
-            .padding(.leading, 8)
             .contentShape(Rectangle())
             .background(selectedDataset?.id == node.dataset.id ? Color.accentColor.opacity(0.2) : Color.clear)
             .onTapGesture {
@@ -1338,64 +1769,50 @@ struct DroppableDatasetNodeView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Current dataset row
-            HStack(spacing: 8) {
-                // Indentation
-                if level > 0 {
-                    ForEach(0..<level, id: \.self) { _ in
+            HStack(spacing: 0) {
+                // Name column with indentation, chevron, and icon
+                HStack(spacing: 4) {
+                    // Indentation
+                    if level > 0 {
+                        ForEach(0..<level, id: \.self) { _ in
+                            Rectangle()
+                                .fill(Color.clear)
+                                .frame(width: 20)
+                        }
+                    }
+
+                    // Expand/collapse chevron
+                    if node.hasChildren {
+                        Button(action: {
+                            withAnimation {
+                                if expandedDatasets.contains(node.dataset.name) {
+                                    expandedDatasets.remove(node.dataset.name)
+                                } else {
+                                    expandedDatasets.insert(node.dataset.name)
+                                }
+                                node.isExpanded.toggle()
+                            }
+                        }) {
+                            Image(systemName: node.isExpanded ? "chevron.down" : "chevron.right")
+                                .foregroundColor(.secondary)
+                                .frame(width: 16)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
                         Rectangle()
                             .fill(Color.clear)
-                            .frame(width: 20)
+                            .frame(width: 16)
                     }
-                }
 
-                // Expand/collapse chevron
-                if node.hasChildren {
-                    Button(action: {
-                        withAnimation {
-                            if expandedDatasets.contains(node.dataset.name) {
-                                expandedDatasets.remove(node.dataset.name)
-                            } else {
-                                expandedDatasets.insert(node.dataset.name)
-                            }
-                            node.isExpanded.toggle()
-                        }
-                    }) {
-                        Image(systemName: node.isExpanded ? "chevron.down" : "chevron.right")
-                            .foregroundColor(.secondary)
-                            .frame(width: 20)
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    Rectangle()
-                        .fill(Color.clear)
-                        .frame(width: 20)
-                }
+                    // Dataset icon
+                    Image(systemName: node.dataset.icon)
+                        .foregroundColor(node.dataset.isSnapshot ? .orange : .blue)
+                        .frame(width: 16)
 
-                // Dataset icon
-                Image(systemName: node.dataset.icon)
-                    .foregroundColor(node.dataset.isSnapshot ? .orange : .blue)
-
-                // Dataset name (show only last component)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(lastPathComponent(node.dataset.name))
-                        .font(.body)
-
-                    HStack(spacing: 12) {
-                        Label(node.dataset.used, systemImage: "")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        if node.dataset.compression != "off" && node.dataset.compression != "-" {
-                            Label("\(node.dataset.compression) (\(node.dataset.compressRatio))", systemImage: "")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-
-                        if node.dataset.mountpoint != "-" && !node.dataset.isSnapshot {
-                            Label(node.dataset.mountpoint, systemImage: "folder")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
+                    // Dataset name
+                    HStack(spacing: 4) {
+                        Text(lastPathComponent(node.dataset.name))
+                            .font(.body)
 
                         if node.dataset.isSnapshot {
                             Text("snapshot")
@@ -1407,11 +1824,12 @@ struct DroppableDatasetNodeView: View {
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 8)
 
                 Spacer()
             }
             .padding(.vertical, 4)
-            .padding(.leading, 8)
             .contentShape(Rectangle())
             .background(isTargeted ? Color.accentColor.opacity(0.3) : Color.clear)
             .onDrop(of: [.text], isTargeted: $isTargeted) { providers in

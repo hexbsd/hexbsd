@@ -2296,13 +2296,13 @@ extension SSHConnectionManager {
     /// List all ZFS datasets with their properties
     func listZFSDatasets() async throws -> [ZFSDataset] {
         // Execute zfs list to get dataset information with all properties we need
-        let output = try await executeCommand("zfs list -H -o name,used,avail,refer,mountpoint,compression,compressratio,quota,reservation,type")
+        let output = try await executeCommand("zfs list -H -o name,used,avail,refer,mountpoint,compression,compressratio,quota,reservation,type,sharenfs")
 
         var datasets: [ZFSDataset] = []
 
         for line in output.split(separator: "\n") {
             let components = line.split(separator: "\t").map { String($0) }
-            guard components.count >= 10 else { continue }
+            guard components.count >= 11 else { continue }
 
             let dataset = ZFSDataset(
                 name: components[0],
@@ -2314,7 +2314,8 @@ extension SSHConnectionManager {
                 compressRatio: components[6],
                 quota: components[7],
                 reservation: components[8],
-                type: components[9]
+                type: components[9],
+                sharenfs: components[10]
             )
             datasets.append(dataset)
         }
