@@ -135,48 +135,50 @@ struct CPUCoresCard: View {
     let cpuCores: [Double]
     let color: Color
 
-    // Calculate optimal grid layout to maximize space usage
-    private var gridLayout: (columns: Int, circleSize: CGFloat, spacing: CGFloat) {
+    // Calculate optimal grid layout to maximize horizontal space usage
+    private func calculateGridLayout(availableWidth: CGFloat) -> (columns: Int, circleSize: CGFloat, spacing: CGFloat) {
         let coreCount = cpuCores.count
         let maxHeight: CGFloat = 120 // Fixed height to match memory card
 
-        // Calculate columns and size to maximize space
-        if coreCount <= 9 {
-            // 3x3 grid - large circles
-            let cols = 3
-            let rows = Int(ceil(Double(coreCount) / Double(cols)))
-            let spacing: CGFloat = 6
-            let circleSize = min((maxHeight - CGFloat(rows - 1) * spacing) / CGFloat(rows), 32)
-            return (cols, circleSize, spacing)
-        } else if coreCount <= 16 {
-            // 4x4 grid - medium circles
-            let cols = 4
-            let rows = Int(ceil(Double(coreCount) / Double(cols)))
-            let spacing: CGFloat = 5
-            let circleSize = (maxHeight - CGFloat(rows - 1) * spacing) / CGFloat(rows)
-            return (cols, circleSize, spacing)
-        } else if coreCount <= 30 {
-            // 6 columns - smaller circles
-            let cols = 6
-            let rows = Int(ceil(Double(coreCount) / Double(cols)))
-            let spacing: CGFloat = 4
-            let circleSize = (maxHeight - CGFloat(rows - 1) * spacing) / CGFloat(rows)
-            return (cols, circleSize, spacing)
-        } else if coreCount <= 56 {
-            // 8 columns - tiny circles
-            let cols = 8
-            let rows = Int(ceil(Double(coreCount) / Double(cols)))
-            let spacing: CGFloat = 3
-            let circleSize = (maxHeight - CGFloat(rows - 1) * spacing) / CGFloat(rows)
-            return (cols, circleSize, spacing)
-        } else {
-            // 10 columns - minimum size for 80+ cores
-            let cols = 10
-            let rows = Int(ceil(Double(coreCount) / Double(cols)))
-            let spacing: CGFloat = 2
-            let circleSize = (maxHeight - CGFloat(rows - 1) * spacing) / CGFloat(rows)
-            return (cols, circleSize, spacing)
+        guard coreCount > 0 else {
+            return (1, 120, 0)
         }
+
+        // Special case: single core - use full size like memory card
+        if coreCount == 1 {
+            return (1, 120, 0)
+        }
+
+        // Try different column counts and find the one that maximizes circle size
+        var bestLayout: (columns: Int, circleSize: CGFloat, spacing: CGFloat) = (1, 0, 0)
+        var bestCircleSize: CGFloat = 0
+
+        // Try column counts from 1 to coreCount (or reasonable max)
+        let maxColumns = min(coreCount, 12)
+
+        for cols in 1...maxColumns {
+            let rows = Int(ceil(Double(coreCount) / Double(cols)))
+
+            // Calculate spacing based on density
+            let spacing: CGFloat = cols <= 4 ? 8 : (cols <= 8 ? 5 : 3)
+
+            // Calculate circle size based on height constraint
+            let circleFromHeight = (maxHeight - CGFloat(rows - 1) * spacing) / CGFloat(rows)
+
+            // Calculate circle size based on width constraint
+            let circleFromWidth = (availableWidth - CGFloat(cols - 1) * spacing) / CGFloat(cols)
+
+            // Use the smaller of the two to ensure it fits
+            let circleSize = min(circleFromHeight, circleFromWidth)
+
+            // Only consider if circles are reasonable size (at least 10px)
+            if circleSize >= 10 && circleSize > bestCircleSize {
+                bestCircleSize = circleSize
+                bestLayout = (cols, circleSize, spacing)
+            }
+        }
+
+        return bestLayout
     }
 
     var body: some View {
@@ -201,39 +203,43 @@ struct CPUCoresCard: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else {
-                // Fixed-size container for cores grid - match CircularProgressView size exactly
-                VStack {
-                    let layout = gridLayout
+                // Use GeometryReader to get available width and calculate optimal layout
+                GeometryReader { geometry in
+                    let availableWidth = geometry.size.width
+                    let layout = calculateGridLayout(availableWidth: availableWidth)
                     let columns = Array(repeating: GridItem(.fixed(layout.circleSize), spacing: layout.spacing), count: layout.columns)
 
-                    LazyVGrid(columns: columns, spacing: layout.spacing) {
-                        ForEach(Array(cpuCores.enumerated()), id: \.offset) { index, usage in
-                            ZStack {
-                                // Background circle
-                                Circle()
-                                    .stroke(color.opacity(0.2), lineWidth: max(2, layout.circleSize / 10))
+                    VStack(spacing: 0) {
+                        LazyVGrid(columns: columns, spacing: layout.spacing) {
+                            ForEach(Array(cpuCores.enumerated()), id: \.offset) { index, usage in
+                                ZStack {
+                                    // Background circle
+                                    Circle()
+                                        .stroke(color.opacity(0.2), lineWidth: max(2, layout.circleSize / 10))
 
-                                // Progress circle
-                                Circle()
-                                    .trim(from: 0, to: min(usage / 100, 1.0))
-                                    .stroke(color, style: StrokeStyle(lineWidth: max(2, layout.circleSize / 10), lineCap: .round))
-                                    .rotationEffect(.degrees(-90))
-                                    .animation(.easeInOut(duration: 0.3), value: usage)
+                                    // Progress circle
+                                    Circle()
+                                        .trim(from: 0, to: min(usage / 100, 1.0))
+                                        .stroke(color, style: StrokeStyle(lineWidth: max(2, layout.circleSize / 10), lineCap: .round))
+                                        .rotationEffect(.degrees(-90))
+                                        .animation(.easeInOut(duration: 0.3), value: usage)
 
-                                // Core number (scale font based on circle size)
-                                if layout.circleSize >= 16 {
-                                    Text("\(index)")
-                                        .font(.system(size: max(6, layout.circleSize / 3.5), weight: .medium))
-                                        .foregroundColor(.primary)
+                                    // Core number (scale font based on circle size)
+                                    if layout.circleSize >= 16 {
+                                        Text("\(index)")
+                                            .font(.system(size: max(6, layout.circleSize / 3.5), weight: .medium))
+                                            .foregroundColor(.primary)
+                                    }
                                 }
+                                .frame(width: layout.circleSize, height: layout.circleSize)
+                                .help("Core \(index): \(String(format: "%.1f%%", usage))") // Tooltip on hover
                             }
-                            .frame(width: layout.circleSize, height: layout.circleSize)
-                            .help("Core \(index): \(String(format: "%.1f%%", usage))") // Tooltip on hover
                         }
+                        .frame(maxWidth: .infinity, alignment: .center)
                     }
+                    .frame(height: 120) // Match CircularProgressView height
                 }
-                .frame(width: 120, height: 120) // Match CircularProgressView dimensions exactly
-                .frame(maxWidth: .infinity)
+                .frame(height: 120)
 
                 // Add matching caption space like MetricCard has
                 Text("\(cpuCores.count) cores")
