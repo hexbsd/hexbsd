@@ -142,6 +142,8 @@ struct MetricCard: View {
                     .foregroundColor(.primary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
+
+            Spacer(minLength: 0) // Push content to top
         }
         .frame(height: 200) // Fixed height to match all cards
         .padding(20)
@@ -242,6 +244,8 @@ struct MemoryARCCard: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+
+            Spacer(minLength: 0) // Push content to top
         }
         .frame(height: 200) // Fixed height to match all cards
         .padding(20)
@@ -326,6 +330,8 @@ struct DiskIOCard: View {
                 }
                 .frame(height: 120)
             }
+
+            Spacer(minLength: 0) // Push content to top
         }
         .frame(height: 200) // Fixed height to match all cards
         .padding(20)
@@ -374,7 +380,7 @@ struct DiskCircle: View {
                         .font(.system(size: min(10, size / 6), weight: .medium))
                         .foregroundColor(.primary)
                     if size > 60 {
-                        Text(String(format: "%.1f", disk.totalMBps))
+                        Text(String(format: "%.1f MB/s", disk.totalMBps))
                             .font(.system(size: min(8, size / 8)))
                             .foregroundColor(.secondary)
                     }
@@ -560,6 +566,8 @@ struct CPUCoresCard: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+
+            Spacer(minLength: 0) // Push content to top
         }
         .frame(height: 200) // Fixed height to match all cards
         .padding(20)
