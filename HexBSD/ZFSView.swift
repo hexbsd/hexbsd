@@ -182,7 +182,6 @@ struct ZFSContentView: View {
 
 struct PoolsView: View {
     @ObservedObject var viewModel: ZFSViewModel
-    @State private var expandedPools: Set<String> = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -234,14 +233,6 @@ struct PoolsView: View {
                             PoolCard(
                                 pool: pool,
                                 scrubStatus: viewModel.scrubStatuses.first(where: { $0.poolName == pool.name }),
-                                isExpanded: expandedPools.contains(pool.name),
-                                onToggle: {
-                                    if expandedPools.contains(pool.name) {
-                                        expandedPools.remove(pool.name)
-                                    } else {
-                                        expandedPools.insert(pool.name)
-                                    }
-                                },
                                 viewModel: viewModel
                             )
                         }
@@ -256,59 +247,48 @@ struct PoolsView: View {
 struct PoolCard: View {
     let pool: ZFSPool
     let scrubStatus: ZFSScrubStatus?
-    let isExpanded: Bool
-    let onToggle: () -> Void
     @ObservedObject var viewModel: ZFSViewModel
 
     var body: some View {
         VStack(spacing: 0) {
             // Header - Always visible
-            Button(action: onToggle) {
-                HStack(spacing: 12) {
-                    Image(systemName: "cylinder.fill")
-                        .font(.title2)
-                        .foregroundColor(.blue)
+            HStack(spacing: 12) {
+                Image(systemName: "cylinder.fill")
+                    .font(.title2)
+                    .foregroundColor(.blue)
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(pool.name)
-                            .font(.title3)
-                            .fontWeight(.semibold)
-                            .foregroundColor(.primary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(pool.name)
+                        .font(.title3)
+                        .fontWeight(.semibold)
 
-                        HStack(spacing: 4) {
-                            Circle()
-                                .fill(pool.healthColor)
-                                .frame(width: 8, height: 8)
-                            Text(pool.health)
-                                .font(.caption)
-                                .foregroundColor(pool.healthColor)
-                        }
-                    }
-
-                    Spacer()
-
-                    // Capacity indicator
-                    VStack(alignment: .trailing, spacing: 4) {
-                        Text(pool.capacity)
-                            .font(.headline)
-                        Text("used")
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(pool.healthColor)
+                            .frame(width: 8, height: 8)
+                        Text(pool.health)
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(pool.healthColor)
                     }
+                }
 
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                Spacer()
+
+                // Capacity indicator
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(pool.capacity)
+                        .font(.headline)
+                    Text("used")
+                        .font(.caption)
                         .foregroundColor(.secondary)
                 }
-                .padding()
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .padding()
 
-            // Expanded details
-            if isExpanded {
-                Divider()
+            // Pool details - Always visible
+            Divider()
 
-                VStack(spacing: 16) {
+            VStack(spacing: 16) {
                     // Pool stats
                     LazyVGrid(columns: [
                         GridItem(.flexible()),
@@ -425,7 +405,6 @@ struct PoolCard: View {
                     }
                 }
                 .padding()
-            }
         }
         .background(
             RoundedRectangle(cornerRadius: 12)
