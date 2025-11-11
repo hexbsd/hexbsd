@@ -1741,6 +1741,23 @@ extension SSHConnectionManager {
             // Continue with empty interfaces
         }
 
+        // Get per-disk I/O stats
+        var disks: [DiskIO] = []
+        do {
+            let iostatOutput = try await executeCommand("iostat -x")
+            let diskStats = parseDiskIO(iostatOutput)
+            for stat in diskStats {
+                disks.append(DiskIO(
+                    name: stat.name,
+                    readMBps: stat.readMBps,
+                    writeMBps: stat.writeMBps,
+                    totalMBps: stat.readMBps + stat.writeMBps
+                ))
+            }
+        } catch {
+            print("DEBUG: Disk I/O stats error: \(error)")
+        }
+
         return SystemStatus(
             cpuUsage: String(format: "%.1f%%", cpuUsage),
             cpuCores: cpuCores,
@@ -1749,7 +1766,7 @@ extension SSHConnectionManager {
             swapUsage: String(format: "%.1f GB / %.1f GB", swapUsed, swapTotal),
             storageUsage: String(format: "%.1f GB / %.1f GB", storageUsed, storageTotal),
             uptime: uptime,
-            networkConnections: connectionCount,
+            disks: disks,
             networkInterfaces: networkInterfaces
         )
     }
@@ -1762,12 +1779,60 @@ extension SSHConnectionManager {
     private func parseUptime(_ output: String) -> String {
         // Parse uptime output
         // Example: "10:30AM up 5 days, 3:24, 2 users, load averages: 0.52, 0.58, 0.59"
+        // or: "10:30AM up 3:24, 2 users, load averages: 0.52, 0.58, 0.59"
         let components = output.components(separatedBy: "up ")
         if components.count > 1 {
-            let uptimePart = components[1].components(separatedBy: ",")
-            if !uptimePart.isEmpty {
-                return uptimePart[0].trimmingCharacters(in: .whitespaces)
+            let uptimePart = components[1].components(separatedBy: ",")[0].trimmingCharacters(in: .whitespaces)
+
+            var days = 0
+            var hours = 0
+            var minutes = 0
+
+            // Check for "X days" or "X day"
+            if uptimePart.contains("day") {
+                let dayComponents = uptimePart.components(separatedBy: " ")
+                if let dayValue = Int(dayComponents[0]) {
+                    days = dayValue
+                }
+
+                // Check if there's also hours:minutes after "days"
+                if uptimePart.contains(":") {
+                    let timeComponents = uptimePart.components(separatedBy: ", ")
+                    if timeComponents.count > 1 {
+                        let timePart = timeComponents[1]
+                        let hm = timePart.split(separator: ":")
+                        if hm.count == 2 {
+                            hours = Int(hm[0]) ?? 0
+                            minutes = Int(hm[1]) ?? 0
+                        }
+                    }
+                }
+            } else if uptimePart.contains(":") {
+                // Format: "3:24" (hours:minutes only, less than a day)
+                let hm = uptimePart.split(separator: ":")
+                if hm.count == 2 {
+                    hours = Int(hm[0]) ?? 0
+                    minutes = Int(hm[1]) ?? 0
+                }
             }
+
+            // Build friendly string
+            var parts: [String] = []
+            if days > 0 {
+                parts.append("\(days) day\(days == 1 ? "" : "s")")
+            }
+            if hours > 0 {
+                parts.append("\(hours) hour\(hours == 1 ? "" : "s")")
+            }
+            if minutes > 0 {
+                parts.append("\(minutes) minute\(minutes == 1 ? "" : "s")")
+            }
+
+            if parts.isEmpty {
+                return "Just started"
+            }
+
+            return parts.joined(separator: " ")
         }
         return "Unknown"
     }
@@ -2143,6 +2208,56 @@ extension SSHConnectionManager {
         }
 
         return (inbound: totalIn, outbound: totalOut)
+    }
+
+    private func parseDiskIO(_ output: String) -> [(name: String, readMBps: Double, writeMBps: Double)] {
+        // Parse iostat -x output to get per-disk read/write rates
+        // iostat -x format:
+        // device     r/s   w/s    kr/s    kw/s  qlen  svc_t  %b
+        // ada0      10.5   5.2   150.3    75.1     0    0.5   2
+
+        let lines = output.components(separatedBy: .newlines).filter { !$0.isEmpty }
+        var disks: [(name: String, readMBps: Double, writeMBps: Double)] = []
+
+        for line in lines {
+            // Skip header lines
+            if line.contains("device") || line.contains("r/s") || line.contains("KB/t") {
+                continue
+            }
+
+            let components = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+
+            // iostat -x format on FreeBSD:
+            // device   r/s   w/s    kr/s    kw/s  qlen  svc_t  %b
+            //   0      1     2       3       4     5     6      7
+
+            if components.count >= 5 {
+                let deviceName = components[0]
+
+                // Skip if device name contains special characters (might be garbage)
+                if deviceName.contains("<") || deviceName.contains(">") {
+                    continue
+                }
+
+                // Skip passthrough devices (pass0, pass1, etc.)
+                if deviceName.hasPrefix("pass") {
+                    continue
+                }
+
+                // kr/s is at index 3, kw/s is at index 4
+                if let readKBps = Double(components[3]),
+                   let writeKBps = Double(components[4]) {
+                    // Convert KB/s to MB/s
+                    disks.append((
+                        name: deviceName,
+                        readMBps: readKBps / 1024,
+                        writeMBps: writeKBps / 1024
+                    ))
+                }
+            }
+        }
+
+        return disks
     }
 
     private func formatBytesPerSecond(_ bytesPerSec: Double) -> String {

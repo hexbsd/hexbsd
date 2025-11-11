@@ -18,6 +18,13 @@ struct NetworkInterface {
     let outRate: String
 }
 
+struct DiskIO {
+    let name: String
+    let readMBps: Double
+    let writeMBps: Double
+    let totalMBps: Double  // Combined for visualization
+}
+
 struct SystemStatus {
     let cpuUsage: String
     let cpuCores: [Double]  // Per-core CPU usage percentages
@@ -26,7 +33,7 @@ struct SystemStatus {
     let swapUsage: String
     let storageUsage: String
     let uptime: String
-    let networkConnections: String
+    let disks: [DiskIO]  // Per-disk I/O stats
     let networkInterfaces: [NetworkInterface]
 
     // Helper to extract percentage from cpuUsage string
@@ -133,10 +140,10 @@ struct MetricCard: View {
                 Text(value)
                     .font(.system(size: 28, weight: .semibold))
                     .foregroundColor(.primary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 20)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
         }
+        .frame(height: 200) // Fixed height to match all cards
         .padding(20)
         .frame(maxWidth: .infinity)
         .background(
@@ -236,6 +243,7 @@ struct MemoryARCCard: View {
                     .foregroundColor(.secondary)
             }
         }
+        .frame(height: 200) // Fixed height to match all cards
         .padding(20)
         .frame(maxWidth: .infinity)
         .background(
@@ -243,6 +251,137 @@ struct MemoryARCCard: View {
                 .fill(Color(nsColor: .controlBackgroundColor))
                 .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
         )
+    }
+}
+
+struct DiskIOCard: View {
+    let disks: [DiskIO]
+    let color: Color
+
+    // Calculate optimal grid layout to maximize horizontal space usage
+    private func calculateGridLayout(availableWidth: CGFloat) -> (columns: Int, circleSize: CGFloat, spacing: CGFloat) {
+        let diskCount = disks.count
+        let maxHeight: CGFloat = 120 // Fixed height to match other cards
+
+        guard diskCount > 0 else {
+            return (1, 120, 0)
+        }
+
+        // Special case: single disk - use full size
+        if diskCount == 1 {
+            return (1, 120, 0)
+        }
+
+        // Try different column counts and find the one that maximizes circle size
+        var bestLayout: (columns: Int, circleSize: CGFloat, spacing: CGFloat) = (1, 0, 0)
+        var bestCircleSize: CGFloat = 0
+
+        let maxColumns = min(diskCount, 12)
+
+        for cols in 1...maxColumns {
+            let rows = Int(ceil(Double(diskCount) / Double(cols)))
+            let spacing: CGFloat = cols <= 4 ? 8 : (cols <= 8 ? 5 : 3)
+
+            let circleFromHeight = (maxHeight - CGFloat(rows - 1) * spacing) / CGFloat(rows)
+            let circleFromWidth = (availableWidth - CGFloat(cols - 1) * spacing) / CGFloat(cols)
+            let circleSize = min(circleFromHeight, circleFromWidth)
+
+            if circleSize >= 10 && circleSize > bestCircleSize {
+                bestCircleSize = circleSize
+                bestLayout = (cols, circleSize, spacing)
+            }
+        }
+
+        return bestLayout
+    }
+
+    var body: some View {
+        VStack(spacing: 15) {
+            HStack {
+                Image(systemName: "internaldrive")
+                    .font(.title2)
+                    .foregroundColor(color)
+                Text("Disk I/O")
+                    .font(.headline)
+                    .foregroundColor(.primary)
+                Spacer()
+            }
+
+            if disks.isEmpty {
+                Text("No disks detected")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(height: 120)
+            } else {
+                GeometryReader { geometry in
+                    let layout = calculateGridLayout(availableWidth: geometry.size.width)
+
+                    LazyVGrid(columns: Array(repeating: GridItem(.fixed(layout.circleSize), spacing: layout.spacing), count: layout.columns), spacing: layout.spacing) {
+                        ForEach(disks.indices, id: \.self) { index in
+                            let disk = disks[index]
+                            DiskCircle(disk: disk, size: layout.circleSize, color: color)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+                .frame(height: 120)
+            }
+        }
+        .frame(height: 200) // Fixed height to match all cards
+        .padding(20)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
+        )
+    }
+}
+
+struct DiskCircle: View {
+    let disk: DiskIO
+    let size: CGFloat
+    let color: Color
+
+    // Normalize activity to a 0-100 scale for visualization
+    // Using a logarithmic scale since disk I/O can vary widely
+    private var activityLevel: Double {
+        let totalIO = disk.totalMBps
+        // Scale: 0 MB/s = 0%, 100 MB/s = ~100%
+        // Using log scale to better represent wide range of values
+        if totalIO <= 0 { return 0 }
+        let normalized = min(100, (log10(totalIO + 1) / log10(101)) * 100)
+        return normalized
+    }
+
+    var body: some View {
+        ZStack {
+            // Background circle
+            Circle()
+                .stroke(color.opacity(0.2), lineWidth: max(2, size / 12))
+
+            // Activity level circle
+            Circle()
+                .trim(from: 0, to: activityLevel / 100)
+                .stroke(color, style: StrokeStyle(lineWidth: max(2, size / 12), lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .animation(.easeInOut(duration: 0.5), value: activityLevel)
+
+            // Disk name (if space allows)
+            if size > 40 {
+                VStack(spacing: 2) {
+                    Text(disk.name)
+                        .font(.system(size: min(10, size / 6), weight: .medium))
+                        .foregroundColor(.primary)
+                    if size > 60 {
+                        Text(String(format: "%.1f", disk.totalMBps))
+                            .font(.system(size: min(8, size / 8)))
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+        }
+        .frame(width: size, height: size)
     }
 }
 
@@ -422,6 +561,7 @@ struct CPUCoresCard: View {
                     .foregroundColor(.secondary)
             }
         }
+        .frame(height: 200) // Fixed height to match all cards
         .padding(20)
         .frame(maxWidth: .infinity)
         .background(
@@ -712,17 +852,14 @@ struct DetailView: View {
                                 )
                             }
 
-                            // Row 2: Storage and Swap
+                            // Row 2: Disk I/O and Swap
                             LazyVGrid(columns: [
                                 GridItem(.flexible(), spacing: 20),
                                 GridItem(.flexible(), spacing: 20)
                             ], spacing: 20) {
-                                MetricCard(
-                                    title: "Storage",
-                                    value: systemStatus.storageUsage,
-                                    progress: systemStatus.storagePercentage,
-                                    color: .orange,
-                                    systemImage: "internaldrive"
+                                DiskIOCard(
+                                    disks: systemStatus.disks,
+                                    color: .orange
                                 )
 
                                 MetricCard(
@@ -756,7 +893,7 @@ struct DetailView: View {
                                 )
                             }
 
-                            // Row 4: System Uptime and Network Connections
+                            // Row 4: Uptime and Storage
                             LazyVGrid(columns: [
                                 GridItem(.flexible(), spacing: 20),
                                 GridItem(.flexible(), spacing: 20)
@@ -770,11 +907,11 @@ struct DetailView: View {
                                 )
 
                                 MetricCard(
-                                    title: "Network Connections",
-                                    value: systemStatus.networkConnections,
-                                    progress: nil,
-                                    color: .pink,
-                                    systemImage: "network"
+                                    title: "Storage",
+                                    value: systemStatus.storageUsage,
+                                    progress: systemStatus.storagePercentage,
+                                    color: .purple,
+                                    systemImage: "internaldrive"
                                 )
                             }
                         } else {
