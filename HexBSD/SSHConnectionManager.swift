@@ -50,6 +50,38 @@ class SSHConnectionManager {
     // Private initializer to enforce singleton
     private init() {}
 
+    /// Validate that the connected server is running FreeBSD
+    func validateFreeBSD() async throws {
+        do {
+            let output = try await executeCommand("uname -s")
+            let osName = output.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if osName != "FreeBSD" {
+                throw NSError(
+                    domain: "SSHConnectionManager",
+                    code: 2,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: "Unsupported Operating System",
+                        NSLocalizedRecoverySuggestionErrorKey: "HexBSD only supports FreeBSD servers. Detected OS: \(osName)"
+                    ]
+                )
+            }
+        } catch let error as NSError where error.domain == "SSHConnectionManager" && error.code == 2 {
+            // Re-throw our OS validation error
+            throw error
+        } catch {
+            // If we can't determine the OS, throw a generic error
+            throw NSError(
+                domain: "SSHConnectionManager",
+                code: 2,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "Unable to validate operating system",
+                    NSLocalizedRecoverySuggestionErrorKey: "Could not verify that the server is running FreeBSD."
+                ]
+            )
+        }
+    }
+
     /// Connect to a FreeBSD server via SSH using key-based authentication
     func connect(host: String, port: Int = 22, authMethod: SSHAuthMethod) async throws {
         print("DEBUG: Attempting SSH key auth to \(authMethod.username)@\(host):\(port)")

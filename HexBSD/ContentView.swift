@@ -814,12 +814,17 @@ struct ContentView: View {
 
                 try await sshManager.connect(host: server.host, port: server.port, authMethod: authMethod)
 
+                // Validate that server is running FreeBSD
+                try await sshManager.validateFreeBSD()
+
                 await MainActor.run {
                     loadDataFromServer()
                     // Navigate to status screen after successful connection
                     selectedSection = .dashboard
                 }
             } catch {
+                // Disconnect if connection or validation failed
+                await sshManager.disconnect()
                 print("Connection failed: \(error.localizedDescription)")
             }
         }
@@ -1192,6 +1197,9 @@ struct ConnectView: View {
 
                 try await sshManager.connect(host: hostToConnect, port: portInt, authMethod: authMethod)
 
+                // Validate that server is running FreeBSD
+                try await sshManager.validateFreeBSD()
+
                 // Connection successful - prompt to save server
                 await MainActor.run {
                     // Create pending server for save prompt
@@ -1211,6 +1219,9 @@ struct ConnectView: View {
                     }
                 }
             } catch {
+                // Disconnect if connection or validation failed
+                await sshManager.disconnect()
+
                 await MainActor.run {
                     errorMessage = "Connection failed: \(error.localizedDescription)"
                     isConnecting = false
