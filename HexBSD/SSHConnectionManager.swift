@@ -2908,4 +2908,629 @@ extension SSHConnectionManager {
 
         return slaves
     }
+
+    // MARK: - NFS (Network File System) Methods
+
+    /// Get NFS status (client and server)
+    func getNFSStatus() async throws -> NFSStatus {
+        // Check if rpcbind is running
+        let rpcbindCheck = try await executeCommand("ps aux | grep -v grep | grep rpcbind | wc -l")
+        let rpcbindRunning = (Int(rpcbindCheck.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) > 0
+
+        // Check if nfsd (server) is running
+        let nfsdCheck = try await executeCommand("ps aux | grep -v grep | grep nfsd | wc -l")
+        let isServerEnabled = (Int(nfsdCheck.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) > 0
+
+        // Check if there are any NFS mounts (client)
+        let mountCheck = try await executeCommand("mount -t nfs,nfs4 2>/dev/null | wc -l")
+        let hasMounts = (Int(mountCheck.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) > 0
+        let isClientEnabled = rpcbindRunning && hasMounts
+
+        // Get number of nfsd threads if server is running
+        var nfsdThreads = 0
+        if isServerEnabled {
+            let threadsOutput = try await executeCommand("sysctl vfs.nfsd.server_max_nfsvers 2>/dev/null || echo '0'")
+            nfsdThreads = Int(threadsOutput.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        }
+
+        return NFSStatus(
+            isClientEnabled: isClientEnabled,
+            isServerEnabled: isServerEnabled,
+            nfsdThreads: nfsdThreads,
+            rpcbindRunning: rpcbindRunning
+        )
+    }
+
+    /// List mounted NFS shares
+    func listNFSMounts() async throws -> [NFSMount] {
+        let output = try await executeCommand("mount -t nfs,nfs4 2>/dev/null || echo ''")
+
+        var mounts: [NFSMount] = []
+        for line in output.split(separator: "\n") {
+            let line = String(line)
+            // Parse: server:/path on /mountpoint (nfs, options)
+            if let onIndex = line.range(of: " on "),
+               let parenIndex = line.range(of: " (") {
+                let serverPath = String(line[..<onIndex.lowerBound])
+                let mountPoint = String(line[onIndex.upperBound..<parenIndex.lowerBound])
+                let remainder = String(line[parenIndex.upperBound...])
+
+                // Split server and path
+                let serverParts = serverPath.split(separator: ":", maxSplits: 1)
+                guard serverParts.count == 2 else { continue }
+
+                let server = String(serverParts[0])
+                let remotePath = String(serverParts[1])
+
+                // Parse type and options
+                let typeAndOptions = remainder.replacingOccurrences(of: ")", with: "").split(separator: ",", maxSplits: 1)
+                let type = typeAndOptions.first.map(String.init) ?? "nfs"
+                let options = typeAndOptions.count > 1 ? String(typeAndOptions[1]).trimmingCharacters(in: .whitespaces) : ""
+
+                mounts.append(NFSMount(
+                    server: server,
+                    remotePath: remotePath,
+                    mountPoint: mountPoint,
+                    type: type.trimmingCharacters(in: .whitespaces),
+                    options: options,
+                    status: .mounted
+                ))
+            }
+        }
+
+        return mounts
+    }
+
+    /// Mount an NFS share
+    func mountNFSShare(server: String, remotePath: String, mountPoint: String, options: String, addToFstab: Bool) async throws {
+        // Create mount point if it doesn't exist
+        _ = try await executeCommand("mkdir -p \(mountPoint)")
+
+        // Build mount command
+        var mountCmd = "mount -t nfs"
+        if !options.isEmpty {
+            mountCmd += " -o \(options)"
+        }
+        mountCmd += " \(server):\(remotePath) \(mountPoint)"
+
+        _ = try await executeCommand(mountCmd)
+
+        // Add to fstab if requested
+        if addToFstab {
+            let fstabEntry = "\(server):\(remotePath) \(mountPoint) nfs \(options.isEmpty ? "rw" : options) 0 0"
+            _ = try await executeCommand("echo '\(fstabEntry)' >> /etc/fstab")
+        }
+    }
+
+    /// Unmount an NFS share
+    func unmountNFS(mountPoint: String) async throws {
+        _ = try await executeCommand("umount \(mountPoint)")
+    }
+
+    /// Get NFS client statistics
+    func getNFSClientStats() async throws -> NFSStats {
+        let output = try await executeCommand("nfsstat -c 2>/dev/null || echo ''")
+
+        // Parse nfsstat output for key metrics
+        var getattr = "0"
+        var lookup = "0"
+        var read = "0"
+        var write = "0"
+        var total = "0"
+
+        for line in output.split(separator: "\n") {
+            let line = String(line).trimmingCharacters(in: .whitespaces)
+            if line.contains("Getattr") {
+                let parts = line.split(separator: " ")
+                getattr = parts.last.map(String.init) ?? "0"
+            } else if line.contains("Lookup") {
+                let parts = line.split(separator: " ")
+                lookup = parts.last.map(String.init) ?? "0"
+            } else if line.contains("Read") {
+                let parts = line.split(separator: " ")
+                read = parts.last.map(String.init) ?? "0"
+            } else if line.contains("Write") {
+                let parts = line.split(separator: " ")
+                write = parts.last.map(String.init) ?? "0"
+            }
+        }
+
+        // Calculate total
+        if let g = Int(getattr), let l = Int(lookup), let r = Int(read), let w = Int(write) {
+            total = String(g + l + r + w)
+        }
+
+        return NFSStats(
+            getattr: getattr,
+            lookup: lookup,
+            read: read,
+            write: write,
+            total: total
+        )
+    }
+
+    /// Start NFS server
+    func startNFSServer() async throws {
+        // Enable services in rc.conf
+        _ = try await executeCommand("sysrc rpcbind_enable='YES'")
+        _ = try await executeCommand("sysrc nfs_server_enable='YES'")
+        _ = try await executeCommand("sysrc mountd_enable='YES'")
+
+        // Start services
+        _ = try await executeCommand("service rpcbind start 2>/dev/null || service rpcbind restart")
+        _ = try await executeCommand("service nfsd start")
+        _ = try await executeCommand("service mountd start")
+    }
+
+    /// Stop NFS server
+    func stopNFSServer() async throws {
+        _ = try await executeCommand("service mountd stop")
+        _ = try await executeCommand("service nfsd stop")
+
+        // Disable in rc.conf
+        _ = try await executeCommand("sysrc nfs_server_enable='NO'")
+        _ = try await executeCommand("sysrc mountd_enable='NO'")
+    }
+
+    /// List NFS exports
+    func listNFSExports() async throws -> [NFSExport] {
+        // Read /etc/exports
+        let output = try await executeCommand("cat /etc/exports 2>/dev/null || echo ''")
+
+        var exports: [NFSExport] = []
+        for line in output.split(separator: "\n") {
+            let line = String(line).trimmingCharacters(in: .whitespaces)
+
+            // Skip comments and empty lines
+            if line.isEmpty || line.hasPrefix("#") {
+                continue
+            }
+
+            // Parse: /path -options host1 host2
+            let parts = line.split(separator: " ", maxSplits: 1)
+            guard !parts.isEmpty else { continue }
+
+            let path = String(parts[0])
+            var clients = ""
+            var options = ""
+
+            if parts.count > 1 {
+                let remainder = String(parts[1]).trimmingCharacters(in: .whitespaces)
+                // Options start with - or are empty
+                if remainder.hasPrefix("-") {
+                    let optParts = remainder.split(separator: " ", maxSplits: 1)
+                    options = String(optParts[0]).replacingOccurrences(of: "-", with: "")
+                    if optParts.count > 1 {
+                        clients = String(optParts[1])
+                    }
+                } else {
+                    clients = remainder
+                }
+            }
+
+            // Check if export is active (listed in exportfs output)
+            let isActiveCheck = try await executeCommand("showmount -e localhost 2>/dev/null | grep '\(path)' | wc -l")
+            let isActive = (Int(isActiveCheck.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) > 0
+
+            exports.append(NFSExport(
+                path: path,
+                clients: clients,
+                options: options,
+                isActive: isActive
+            ))
+        }
+
+        return exports
+    }
+
+    /// Add NFS export
+    func addNFSExport(path: String, clients: String, options: String) async throws {
+        // Build export line
+        var exportLine = path
+        if !options.isEmpty {
+            exportLine += " -\(options)"
+        }
+        if !clients.isEmpty {
+            exportLine += " \(clients)"
+        }
+
+        // Add to /etc/exports
+        _ = try await executeCommand("echo '\(exportLine)' >> /etc/exports")
+
+        // Reload exports
+        try await reloadNFSExports()
+    }
+
+    /// Remove NFS export
+    func removeNFSExport(path: String) async throws {
+        // Remove line from /etc/exports
+        _ = try await executeCommand("sed -i '' '/^\(path.replacingOccurrences(of: "/", with: "\\/"))/d' /etc/exports")
+
+        // Reload exports
+        try await reloadNFSExports()
+    }
+
+    /// Reload NFS exports
+    func reloadNFSExports() async throws {
+        // Signal mountd to reload exports
+        _ = try await executeCommand("service mountd reload 2>/dev/null || kill -HUP $(cat /var/run/mountd.pid 2>/dev/null) 2>/dev/null || true")
+    }
+
+    /// List connected NFS clients
+    func listNFSClients() async throws -> [NFSClient] {
+        let output = try await executeCommand("showmount -a 2>/dev/null || echo ''")
+
+        var clients: [NFSClient] = []
+        for line in output.split(separator: "\n") {
+            let line = String(line).trimmingCharacters(in: .whitespaces)
+
+            // Skip header lines
+            if line.contains("All mounts") || line.isEmpty {
+                continue
+            }
+
+            // Parse: hostname:/path
+            if let colonIndex = line.firstIndex(of: ":") {
+                let hostname = String(line[..<colonIndex])
+                let path = String(line[line.index(after: colonIndex)...])
+
+                clients.append(NFSClient(
+                    hostname: hostname,
+                    mountedPath: path
+                ))
+            }
+        }
+
+        return clients
+    }
+
+    /// Get NFS server statistics
+    func getNFSServerStats() async throws -> NFSStats {
+        let output = try await executeCommand("nfsstat -s 2>/dev/null || echo ''")
+
+        // Parse nfsstat output for key metrics
+        var getattr = "0"
+        var lookup = "0"
+        var read = "0"
+        var write = "0"
+        var total = "0"
+
+        for line in output.split(separator: "\n") {
+            let line = String(line).trimmingCharacters(in: .whitespaces)
+            if line.contains("Getattr") {
+                let parts = line.split(separator: " ")
+                getattr = parts.last.map(String.init) ?? "0"
+            } else if line.contains("Lookup") {
+                let parts = line.split(separator: " ")
+                lookup = parts.last.map(String.init) ?? "0"
+            } else if line.contains("Read") {
+                let parts = line.split(separator: " ")
+                read = parts.last.map(String.init) ?? "0"
+            } else if line.contains("Write") {
+                let parts = line.split(separator: " ")
+                write = parts.last.map(String.init) ?? "0"
+            }
+        }
+
+        // Calculate total
+        if let g = Int(getattr), let l = Int(lookup), let r = Int(read), let w = Int(write) {
+            total = String(g + l + r + w)
+        }
+
+        return NFSStats(
+            getattr: getattr,
+            lookup: lookup,
+            read: read,
+            write: write,
+            total: total
+        )
+    }
+
+    // MARK: - Bhyve Virtual Machine Methods
+
+    /// List bhyve virtual machines
+    func listBhyveVMs() async throws -> [BhyveVM] {
+        let output = try await executeCommand("vm list 2>/dev/null || echo ''")
+
+        var vms: [BhyveVM] = []
+        for line in output.split(separator: "\n") {
+            let line = String(line).trimmingCharacters(in: .whitespaces)
+
+            // Skip header lines
+            if line.contains("NAME") || line.isEmpty {
+                continue
+            }
+
+            // Parse: NAME  DATASTORE  LOADER  CPU  MEMORY  VNC  AUTOSTART  STATE
+            let components = line.split(separator: " ").compactMap { part -> String? in
+                let trimmed = part.trimmingCharacters(in: .whitespaces)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+
+            guard components.count >= 8 else { continue }
+
+            let name = components[0]
+            let cpu = components[3]
+            let memory = components[4]
+            let vncStr = components[5]
+            let autostartStr = components[6]
+            let stateStr = components[7]
+
+            // Parse VNC port
+            var vncPort: Int?
+            if vncStr != "-" && vncStr.contains(":") {
+                let parts = vncStr.split(separator: ":")
+                if let portStr = parts.last {
+                    vncPort = Int(portStr)
+                }
+            }
+
+            // Parse status
+            let status: BhyveVM.VMStatus
+            switch stateStr.lowercased() {
+            case "running":
+                status = .running
+            case "stopped":
+                status = .stopped
+            default:
+                status = .unknown
+            }
+
+            vms.append(BhyveVM(
+                name: name,
+                status: status,
+                cpu: cpu,
+                memory: memory,
+                autostart: autostartStr == "Yes" || autostartStr == "1",
+                vncPort: vncPort,
+                serialPort: "/dev/nmdm-\(name).1A"  // Default serial port pattern
+            ))
+        }
+
+        return vms
+    }
+
+    /// Start a bhyve VM
+    func startBhyveVM(name: String) async throws {
+        _ = try await executeCommand("vm start \(name)")
+    }
+
+    /// Stop a bhyve VM
+    func stopBhyveVM(name: String) async throws {
+        _ = try await executeCommand("vm stop \(name)")
+    }
+
+    /// Restart a bhyve VM
+    func restartBhyveVM(name: String) async throws {
+        _ = try await executeCommand("vm restart \(name)")
+    }
+
+    /// Delete a bhyve VM
+    func deleteBhyveVM(name: String) async throws {
+        _ = try await executeCommand("vm destroy -f \(name)")
+    }
+
+    /// Get detailed VM information
+    func getBhyveVMInfo(name: String) async throws -> VMInfo {
+        let output = try await executeCommand("vm info \(name) 2>/dev/null || echo ''")
+
+        var cpu = "1"
+        var memory = "512M"
+        var disks: [String] = []
+        var networks: [String] = []
+        var bootrom = "default"
+        var autostart = false
+
+        for line in output.split(separator: "\n") {
+            let line = String(line).trimmingCharacters(in: .whitespaces)
+
+            if line.contains("cpu:") {
+                cpu = line.components(separatedBy: ":").last?.trimmingCharacters(in: .whitespaces) ?? "1"
+            } else if line.contains("memory:") {
+                memory = line.components(separatedBy: ":").last?.trimmingCharacters(in: .whitespaces) ?? "512M"
+            } else if line.contains("disk") {
+                disks.append(line)
+            } else if line.contains("network") {
+                networks.append(line)
+            } else if line.contains("loader:") {
+                bootrom = line.components(separatedBy: ":").last?.trimmingCharacters(in: .whitespaces) ?? "default"
+            } else if line.contains("autostart:") {
+                let value = line.components(separatedBy: ":").last?.trimmingCharacters(in: .whitespaces) ?? "no"
+                autostart = value.lowercased() == "yes" || value == "1"
+            }
+        }
+
+        return VMInfo(
+            name: name,
+            cpu: cpu,
+            memory: memory,
+            disks: disks,
+            networks: networks,
+            bootrom: bootrom,
+            autostart: autostart
+        )
+    }
+
+    /// Create a new bhyve VM
+    func createBhyveVM(name: String, cpu: String, memory: String, disk: String) async throws {
+        // Create VM with basic configuration
+        var createCmd = "vm create"
+        createCmd += " -t generic"  // Generic template
+        createCmd += " -c \(cpu)"
+        createCmd += " -m \(memory)"
+        createCmd += " -s \(disk)"
+        createCmd += " \(name)"
+
+        _ = try await executeCommand(createCmd)
+    }
+
+    // MARK: - IPFW Firewall Management
+
+    func getFirewallStatus() async throws -> FirewallStatus {
+        // Check if ipfw is enabled
+        let enableCheck = try await executeCommand("sysctl net.inet.ip.fw.enable 2>/dev/null || echo '0'")
+        let enabled = enableCheck.trimmingCharacters(in: .whitespacesAndNewlines).contains("1")
+
+        // Count rules
+        let rulesOutput = try await executeCommand("ipfw list 2>/dev/null | wc -l")
+        let ruleCount = Int(rulesOutput.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+
+        // Count dynamic states
+        let statesOutput = try await executeCommand("ipfw -d list 2>/dev/null | grep -c dynamic || echo '0'")
+        let stateCount = Int(statesOutput.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+
+        return FirewallStatus(
+            enabled: enabled,
+            ruleCount: ruleCount,
+            stateCount: stateCount
+        )
+    }
+
+    func getFirewallRules() async throws -> [FirewallRule] {
+        var rules: [FirewallRule] = []
+
+        // Get ipfw rules with packet/byte counters
+        let output = try await executeCommand("ipfw -a list 2>/dev/null")
+        let lines = output.split(separator: "\n")
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+
+            // Parse ipfw rule format: 00100 12345 1234567 allow ip from any to any
+            let parts = trimmed.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
+            guard parts.count >= 3 else { continue }
+
+            let ruleNumber = String(parts[0])
+            let packets = String(parts[1])
+            let bytes = String(parts[2])
+            let ruleLine = parts.count > 3 ? String(parts[3]) : ""
+
+            // Parse action, proto, source, dest from rule line
+            let ruleComponents = ruleLine.split(separator: " ", omittingEmptySubsequences: true)
+            let action = ruleComponents.first.map(String.init) ?? "unknown"
+            let proto = ruleComponents.count > 1 ? String(ruleComponents[1]) : "ip"
+
+            // Find "from" and "to" keywords
+            var source = "any"
+            var destination = "any"
+            var options = ""
+
+            if let fromIndex = ruleComponents.firstIndex(of: "from"),
+               fromIndex + 1 < ruleComponents.count {
+                source = String(ruleComponents[fromIndex + 1])
+
+                if let toIndex = ruleComponents.firstIndex(of: "to"),
+                   toIndex + 1 < ruleComponents.count {
+                    destination = String(ruleComponents[toIndex + 1])
+
+                    // Everything after destination is options
+                    if toIndex + 2 < ruleComponents.count {
+                        options = ruleComponents[(toIndex + 2)...].joined(separator: " ")
+                    }
+                }
+            }
+
+            rules.append(FirewallRule(
+                number: ruleNumber,
+                action: action,
+                proto: proto,
+                source: source,
+                destination: destination,
+                options: options,
+                packets: packets,
+                bytes: bytes
+            ))
+        }
+
+        return rules
+    }
+
+    func getFirewallStates() async throws -> [FirewallState] {
+        var states: [FirewallState] = []
+
+        // Get ipfw dynamic rules/states
+        let output = try await executeCommand("ipfw -d list 2>/dev/null")
+        let lines = output.split(separator: "\n")
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.contains("dynamic") else { continue }
+
+            // Parse dynamic rule format
+            // Example: ## 00001 (T 10, slot 3) tcp 192.168.1.100:12345 192.168.1.1:80 ESTABLISHED
+
+            var proto = "tcp"
+            var source = "unknown"
+            var destination = "unknown"
+            var state = "ACTIVE"
+
+            let parts = trimmed.split(separator: " ", omittingEmptySubsequences: true)
+
+            // Find protocol
+            if let protoIndex = parts.firstIndex(where: { $0 == "tcp" || $0 == "udp" || $0 == "icmp" }) {
+                proto = String(parts[protoIndex])
+
+                if protoIndex + 2 < parts.count {
+                    source = String(parts[protoIndex + 1])
+                    destination = String(parts[protoIndex + 2])
+
+                    if protoIndex + 3 < parts.count {
+                        state = String(parts[protoIndex + 3])
+                    }
+                }
+            }
+
+            states.append(FirewallState(
+                proto: proto,
+                source: source,
+                destination: destination,
+                state: state
+            ))
+        }
+
+        return states
+    }
+
+    func getFirewallStats() async throws -> FirewallStats {
+        // Get ipfw statistics from sysctl
+        let packetsIn = try await executeCommand("sysctl -n net.inet.ip.fw.packets_in 2>/dev/null || echo '0'")
+        let packetsOut = try await executeCommand("sysctl -n net.inet.ip.fw.packets_out 2>/dev/null || echo '0'")
+        let bytesIn = try await executeCommand("sysctl -n net.inet.ip.fw.bytes_in 2>/dev/null || echo '0'")
+        let bytesOut = try await executeCommand("sysctl -n net.inet.ip.fw.bytes_out 2>/dev/null || echo '0'")
+
+        // Calculate blocked and passed from rules
+        let rulesOutput = try await executeCommand("ipfw -a list 2>/dev/null")
+        var blocked = 0
+        var passed = 0
+
+        for line in rulesOutput.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.contains("deny") || trimmed.contains("reject") {
+                let parts = trimmed.split(separator: " ", maxSplits: 2)
+                if parts.count >= 2, let count = Int(parts[1]) {
+                    blocked += count
+                }
+            } else if trimmed.contains("allow") || trimmed.contains("pass") {
+                let parts = trimmed.split(separator: " ", maxSplits: 2)
+                if parts.count >= 2, let count = Int(parts[1]) {
+                    passed += count
+                }
+            }
+        }
+
+        return FirewallStats(
+            packetsIn: packetsIn.trimmingCharacters(in: .whitespacesAndNewlines),
+            packetsOut: packetsOut.trimmingCharacters(in: .whitespacesAndNewlines),
+            bytesIn: formatBytes(bytesIn.trimmingCharacters(in: .whitespacesAndNewlines)),
+            bytesOut: formatBytes(bytesOut.trimmingCharacters(in: .whitespacesAndNewlines)),
+            blocked: String(blocked),
+            passed: String(passed)
+        )
+    }
+
+    func reloadFirewallRules() async throws {
+        // Reload IPFW rules
+        _ = try await executeCommand("service ipfw reload 2>&1")
+    }
 }
