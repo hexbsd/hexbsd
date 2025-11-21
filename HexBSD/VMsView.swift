@@ -794,7 +794,7 @@ struct VMCreateSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var vmName: String = ""
-    @State private var template: String = "default"
+    @State private var template: String = "windows"
     @State private var datastore: String = "default"
     @State private var diskSize: String = "20G"
     @State private var cpuCount: String = "2"
@@ -830,17 +830,6 @@ struct VMCreateSheet: View {
                 Section("Basic Configuration") {
                     TextField("VM Name:", text: $vmName)
                         .textFieldStyle(.roundedBorder)
-
-                    Picker("Template:", selection: $template) {
-                        Text("default").tag("default")
-                        Text("FreeBSD").tag("freebsd")
-                        Text("Linux").tag("linux")
-                        Text("Windows").tag("windows")
-                    }
-
-                    Picker("Datastore:", selection: $datastore) {
-                        Text("default").tag("default")
-                    }
                 }
 
                 Section("Resources") {
