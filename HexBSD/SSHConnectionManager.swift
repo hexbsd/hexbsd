@@ -2739,4 +2739,212 @@ extension SSHConnectionManager {
         let escapedCrontab = newCrontab.replacingOccurrences(of: "'", with: "'\\''")
         _ = try await executeCommand("echo '\(escapedCrontab)' | crontab -u \(task.user) -")
     }
+
+    // MARK: - Virtual Machine Management
+
+    /// List all bhyve virtual machines
+    func listVirtualMachines() async throws -> [VirtualMachine] {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Check running bhyve processes (exclude bhyveload and shell wrappers)
+        let command = """
+        ps aux | grep 'bhyve' | grep -v grep | grep -v bhyveload | grep -v '/bin/sh' | awk '{
+            # Only process lines that contain the bhyve executable with flags
+            if ($0 !~ /-c[[:space:]]/ && $0 !~ /-m[[:space:]]/) {
+                next;
+            }
+
+            # The VM name is typically the last argument
+            name = $NF;
+
+            # Skip if it looks like a path, flag, or process name in parens
+            if (name ~ /^\\/|^-|^\\(/) {
+                name = "";
+            }
+
+            # PID is field 2
+            printf "%s|%s|", $2, name;
+
+            # Extract CPU count from -c flag
+            cpu = "";
+            for (i = 11; i <= NF; i++) {
+                if ($i == "-c" && i+1 <= NF) {
+                    cpu = $(i+1);
+                    break;
+                }
+            }
+            printf "%s|", cpu;
+
+            # Extract memory from -m flag
+            mem = "";
+            for (i = 11; i <= NF; i++) {
+                if ($i == "-m" && i+1 <= NF) {
+                    mem = $(i+1);
+                    break;
+                }
+            }
+            printf "%s|", mem;
+
+            # Extract console device from -l com1 or -s lpc
+            console = "";
+            for (i = 11; i <= NF; i++) {
+                if ($i == "-l" && i+1 <= NF && $(i+1) ~ /com[0-9]/) {
+                    # Format: -l com1,/dev/nmdm0A
+                    split($(i+1), arr, ",");
+                    if (length(arr) > 1 && arr[2] ~ /\\/dev\\/nmdm/) {
+                        console = arr[2];
+                        break;
+                    }
+                } else if ($i == "-s" && i+1 <= NF && $(i+1) ~ /lpc/) {
+                    # Format: -s 30,lpc,com1=/dev/nmdm0A
+                    if ($(i+1) ~ /com[0-9]=/) {
+                        match($(i+1), /com[0-9]=\\/dev\\/nmdm[^,]*/);
+                        if (RSTART > 0) {
+                            result = substr($(i+1), RSTART, RLENGTH);
+                            split(result, arr, "=");
+                            console = arr[2];
+                            break;
+                        }
+                    }
+                }
+            }
+            printf "%s|", console;
+
+            # Extract VNC address from fbuf
+            vnc = "";
+            for (i = 11; i <= NF; i++) {
+                if ($i == "-s" && i+1 <= NF && $(i+1) ~ /fbuf.*tcp=/) {
+                    match($(i+1), /tcp=[^:,]+:[0-9]+/);
+                    if (RSTART > 0) {
+                        vnc = substr($(i+1), RSTART+4, RLENGTH-4);
+                    }
+                    break;
+                }
+            }
+            printf "%s", vnc;
+
+            printf "\\n";
+        }' 2>/dev/null || echo ''
+        """
+
+        print("DEBUG: Listing virtual machines...")
+        let output = try await executeCommand(command)
+        print("DEBUG: bhyve processes output: \(output)")
+
+        return parseVirtualMachines(output)
+    }
+
+    /// Parse virtual machine list from bhyve process output
+    private func parseVirtualMachines(_ output: String) -> [VirtualMachine] {
+        let lines = output.components(separatedBy: .newlines)
+            .filter { !$0.isEmpty }
+
+        var vms: [VirtualMachine] = []
+        var seenPIDs = Set<String>()
+
+        for line in lines {
+            let parts = line.components(separatedBy: "|")
+            guard parts.count >= 5 else { continue }
+
+            let pid = parts[0].trimmingCharacters(in: .whitespaces)
+            let name = parts[1].trimmingCharacters(in: .whitespaces)
+            let cpu = parts[2].trimmingCharacters(in: .whitespaces)
+            let memory = parts[3].trimmingCharacters(in: .whitespaces)
+            let console = parts[4].trimmingCharacters(in: .whitespaces)
+            let vnc = parts.count > 5 ? parts[5].trimmingCharacters(in: .whitespaces) : ""
+
+            // Skip if name is empty, looks like a flag, or is a process name in parens
+            guard !name.isEmpty && !name.hasPrefix("-") && !name.hasPrefix("(") else { continue }
+
+            // Skip duplicate PIDs
+            guard !seenPIDs.contains(pid) else { continue }
+            seenPIDs.insert(pid)
+
+            let vm = VirtualMachine(
+                name: name,
+                state: .running,
+                pid: pid.isEmpty ? nil : pid,
+                cpu: cpu.isEmpty ? "1" : cpu,
+                memory: memory.isEmpty ? "Unknown" : memory,
+                console: console.isEmpty ? nil : console,
+                vnc: vnc.isEmpty ? nil : vnc
+            )
+            vms.append(vm)
+        }
+
+        print("DEBUG: Found \(vms.count) running VMs")
+        return vms
+    }
+
+    /// Start a virtual machine
+    func startVirtualMachine(name: String) async throws {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Try to start VM using common methods
+        // First, check if there's an rc.conf entry
+        let command = """
+        # Check if VM has rc.d script or service
+        if service \(name) status >/dev/null 2>&1 || service \(name) onestatus >/dev/null 2>&1; then
+            service \(name) start
+        # Check for VM startup script in common locations
+        elif [ -x /usr/local/vm/\(name)/start.sh ]; then
+            /usr/local/vm/\(name)/start.sh
+        elif [ -x /vm/\(name)/start.sh ]; then
+            /vm/\(name)/start.sh
+        elif [ -x /usr/local/etc/vm/\(name)/start.sh ]; then
+            /usr/local/etc/vm/\(name)/start.sh
+        # Check for vm-bhyve (even though user said raw bhyve, might still have it)
+        elif command -v vm >/dev/null 2>&1; then
+            vm start \(name)
+        else
+            echo "Error: No start method found for VM '\(name)'"
+            echo "Please ensure the VM has a startup script or rc.d service"
+            exit 1
+        fi
+        """
+
+        print("DEBUG: Starting VM: \(name)")
+        let output = try await executeCommand(command)
+        print("DEBUG: Start output: \(output)")
+
+        if output.contains("Error:") {
+            throw NSError(domain: "SSHConnectionManager", code: 2,
+                         userInfo: [NSLocalizedDescriptionKey: output])
+        }
+    }
+
+    /// Stop a virtual machine
+    func stopVirtualMachine(name: String) async throws {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Try to stop VM using bhyvectl or service
+        let command = """
+        # Check if VM has rc.d script or service
+        if service \(name) status >/dev/null 2>&1; then
+            service \(name) stop
+        # Try bhyvectl to destroy VM
+        elif bhyvectl --vm=\(name) --destroy >/dev/null 2>&1; then
+            echo "VM stopped via bhyvectl"
+        # Check for vm-bhyve
+        elif command -v vm >/dev/null 2>&1; then
+            vm stop \(name)
+        # Try to find and kill the process
+        else
+            pkill -f "bhyve.*\(name)" && echo "VM process killed"
+        fi
+        """
+
+        print("DEBUG: Stopping VM: \(name)")
+        let output = try await executeCommand(command)
+        print("DEBUG: Stop output: \(output)")
+    }
 }

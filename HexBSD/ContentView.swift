@@ -605,6 +605,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case sockstat = "Sockets"
     case tasks = "Tasks"
     case terminal = "Terminal"
+    case vms = "Virtual Machines"
     case zfs = "ZFS"
 
     var id: String { rawValue }
@@ -622,6 +623,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .sockstat: return "network"
         case .tasks: return "clock"
         case .terminal: return "terminal"
+        case .vms: return "desktopcomputer"
         case .zfs: return "cylinder.split.1x2"
         }
     }
@@ -984,6 +986,9 @@ struct DetailView: View {
             } else if section == .terminal {
                 // Terminal view handled separately with its own coordinator
                 TerminalContentView()
+            } else if section == .vms {
+                // Virtual Machine management
+                VMsContentView()
             } else if section == .zfs {
                 // ZFS pool and dataset management
                 ZFSContentView()
