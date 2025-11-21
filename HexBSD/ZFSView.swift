@@ -1448,7 +1448,7 @@ struct DatasetsView: View {
     }
 
     private func replicateDataset(source: ZFSDataset, targetParent: ZFSDataset?) async {
-        guard let manager = targetManager,
+        guard targetManager != nil,
               let serverId = selectedReplicationServer,
               let targetServer = savedServers.first(where: { $0.id.uuidString == serverId }) else {
             viewModel.error = "No target server selected"
@@ -1494,7 +1494,7 @@ struct DatasetsView: View {
             'zfs receive -F \(destinationPath)'
             """
 
-            try await SSHConnectionManager.shared.executeCommand(replicationCommand)
+            _ = try await SSHConnectionManager.shared.executeCommand(replicationCommand)
 
             // Refresh target datasets and pools
             await loadTargetData()

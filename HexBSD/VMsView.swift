@@ -11,19 +11,48 @@ import AppKit
 // MARK: - Data Models
 
 struct VirtualMachine: Identifiable, Hashable {
-    let id = UUID()
+    var id: String { name } // Use VM name as ID (unique in vm-bhyve)
     let name: String
     let state: VMState
+    let datastore: String?
+    let loader: String?
     let pid: String?
     let cpu: String
     let memory: String
     let console: String?
     let vnc: String?
+    let autostart: Bool
 
-    enum VMState: String {
+    enum VMState: String, Hashable {
         case running = "Running"
         case stopped = "Stopped"
         case unknown = "Unknown"
+    }
+
+    // Initialize with default values for new fields
+    init(name: String, state: VMState, datastore: String? = nil, loader: String? = nil,
+         pid: String? = nil, cpu: String, memory: String, console: String? = nil,
+         vnc: String? = nil, autostart: Bool = false) {
+        self.name = name
+        self.state = state
+        self.datastore = datastore
+        self.loader = loader
+        self.pid = pid
+        self.cpu = cpu
+        self.memory = memory
+        self.console = console
+        self.vnc = vnc
+        self.autostart = autostart
+    }
+
+    // Custom Hashable implementation based on name
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(name)
+    }
+
+    // Custom Equatable implementation based on name
+    static func == (lhs: VirtualMachine, rhs: VirtualMachine) -> Bool {
+        lhs.name == rhs.name
     }
 
     var statusIcon: String {
@@ -57,101 +86,205 @@ struct VMsContentView: View {
     @State private var selectedVM: VirtualMachine?
     @State private var showConsole = false
     @State private var showVNC = false
+    @State private var showCreateVM = false
+    @State private var showVMInfo = false
+    @State private var showSnapshot = false
+    @State private var embeddedVNCVM: VirtualMachine?
 
     var body: some View {
         VStack(spacing: 0) {
-            // Toolbar
-            HStack {
-                Text("\(viewModel.vms.count) virtual machine(s)")
-                    .font(.headline)
-                    .foregroundColor(.secondary)
-
-                Spacer()
-
-                if let vm = selectedVM {
-                    // Console access button
-                    if let console = vm.console, !console.isEmpty {
+            // Show embedded VNC if active
+            if let vncVM = embeddedVNCVM, let vnc = vncVM.vnc {
+                // Embedded VNC Viewer
+                VStack(spacing: 0) {
+                    // Header with back button
+                    HStack {
                         Button(action: {
-                            showConsole = true
+                            embeddedVNCVM = nil
                         }) {
-                            Label("Console", systemImage: "terminal")
+                            Label("Back to VMs", systemImage: "chevron.left")
                         }
                         .buttonStyle(.bordered)
-                    }
 
-                    // VNC access button
-                    if let vnc = vm.vnc, !vnc.isEmpty {
-                        Button(action: {
-                            showVNC = true
-                        }) {
-                            Label("VNC", systemImage: "rectangle.on.rectangle")
-                        }
-                        .buttonStyle(.bordered)
-                    }
+                        Spacer()
 
-                    // Start/Stop buttons
-                    if vm.state == .stopped {
+                        Text("VNC: \(vncVM.name)")
+                            .font(.headline)
+
+                        Spacer()
+
+                        // Placeholder for symmetry
+                        Color.clear.frame(width: 120)
+                    }
+                    .padding()
+                    .background(Color(NSColor.windowBackgroundColor))
+
+                    Divider()
+
+                    // VNC Viewer
+                    let components = vnc.split(separator: ":")
+                    let host = String(components.first ?? "")
+                    let port = Int(components.last ?? "5900") ?? 5900
+
+                    VNCViewerView(host: host, port: port)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color.black)
+                }
+            } else {
+                // Normal VM list view
+                VStack(spacing: 0) {
+                    // Toolbar
+                    HStack {
+                        Text("\(viewModel.vms.count) virtual machine(s)")
+                            .font(.headline)
+                            .foregroundColor(.secondary)
+
+                        Spacer()
+
+                        // Create VM button
                         Button(action: {
-                            Task {
-                                await viewModel.startVM(name: vm.name)
-                            }
+                            showCreateVM = true
                         }) {
-                            Label("Start", systemImage: "play.fill")
+                            Label("New VM", systemImage: "plus.circle.fill")
                         }
                         .buttonStyle(.borderedProminent)
-                    } else if vm.state == .running {
+
+                        if let vm = selectedVM {
+                            Divider()
+                                .frame(height: 20)
+                                .padding(.horizontal, 8)
+
+                            // VM Info button
+                            Button(action: {
+                                showVMInfo = true
+                            }) {
+                                Label("Info", systemImage: "info.circle")
+                            }
+                            .buttonStyle(.bordered)
+
+                            // Console access button
+                            if let console = vm.console, !console.isEmpty {
+                                Button(action: {
+                                    showConsole = true
+                                }) {
+                                    Label("Console", systemImage: "terminal")
+                                }
+                                .buttonStyle(.bordered)
+                            }
+
+                            // VNC access button
+                            if let vnc = vm.vnc, !vnc.isEmpty {
+                                Button(action: {
+                                    embeddedVNCVM = vm
+                                }) {
+                                    Label("VNC", systemImage: "rectangle.on.rectangle")
+                                }
+                                .buttonStyle(.bordered)
+                            }
+
+                            // Snapshot button
+                            Button(action: {
+                                showSnapshot = true
+                            }) {
+                                Label("Snapshot", systemImage: "camera")
+                            }
+                            .buttonStyle(.bordered)
+
+                            Divider()
+                                .frame(height: 20)
+                                .padding(.horizontal, 8)
+
+                            // Start/Stop/Restart buttons
+                            if vm.state == .stopped {
+                                Button(action: {
+                                    Task {
+                                        await viewModel.startVM(name: vm.name)
+                                    }
+                                }) {
+                                    Label("Start", systemImage: "play.fill")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.green)
+                            } else if vm.state == .running {
+                                Button(action: {
+                                    Task {
+                                        await viewModel.restartVM(name: vm.name)
+                                    }
+                                }) {
+                                    Label("Restart", systemImage: "arrow.clockwise")
+                                }
+                                .buttonStyle(.bordered)
+
+                                Button(action: {
+                                    Task {
+                                        await viewModel.stopVM(name: vm.name)
+                                    }
+                                }) {
+                                    Label("Stop", systemImage: "stop.fill")
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(.orange)
+
+                                Button(action: {
+                                    Task {
+                                        await viewModel.poweroffVM(name: vm.name)
+                                    }
+                                }) {
+                                    Label("Force Off", systemImage: "power")
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(.red)
+                            }
+                        }
+
+                        Divider()
+                            .frame(height: 20)
+                            .padding(.horizontal, 8)
+
                         Button(action: {
                             Task {
-                                await viewModel.stopVM(name: vm.name)
+                                await viewModel.refresh()
                             }
                         }) {
-                            Label("Stop", systemImage: "stop.fill")
+                            Label("Refresh", systemImage: "arrow.clockwise")
                         }
                         .buttonStyle(.bordered)
-                        .foregroundColor(.red)
                     }
-                }
+                    .padding()
 
-                Button(action: {
-                    Task {
-                        await viewModel.refresh()
+                    Divider()
+
+                    // Virtual machines list
+                    if viewModel.isLoading {
+                        VStack(spacing: 20) {
+                            ProgressView()
+                                .scaleEffect(1.5)
+                            Text("Loading virtual machines...")
+                                .font(.headline)
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if viewModel.vms.isEmpty {
+                        VStack(spacing: 20) {
+                            Image(systemName: "desktopcomputer")
+                                .font(.system(size: 72))
+                                .foregroundColor(.secondary)
+                            Text("No Virtual Machines")
+                                .font(.title2)
+                                .foregroundColor(.secondary)
+                            Text("No running bhyve VMs detected on this server")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        List(viewModel.vms, id: \.id, selection: $selectedVM) { vm in
+                            VirtualMachineRow(vm: vm)
+                                .tag(vm)
+                        }
+                        .listStyle(.inset)
                     }
-                }) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
-            }
-            .padding()
-
-            Divider()
-
-            // Virtual machines list
-            if viewModel.isLoading {
-                VStack(spacing: 20) {
-                    ProgressView()
-                        .scaleEffect(1.5)
-                    Text("Loading virtual machines...")
-                        .font(.headline)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if viewModel.vms.isEmpty {
-                VStack(spacing: 20) {
-                    Image(systemName: "desktopcomputer")
-                        .font(.system(size: 72))
-                        .foregroundColor(.secondary)
-                    Text("No Virtual Machines")
-                        .font(.title2)
-                        .foregroundColor(.secondary)
-                    Text("No running bhyve VMs detected on this server")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                List(viewModel.vms, selection: $selectedVM) { vm in
-                    VirtualMachineRow(vm: vm)
                 }
             }
         }
@@ -167,14 +300,22 @@ struct VMsContentView: View {
                 showError = true
             }
         }
+        .sheet(isPresented: $showCreateVM) {
+            VMCreateSheet(viewModel: viewModel)
+        }
+        .sheet(isPresented: $showVMInfo) {
+            if let vm = selectedVM {
+                VMInfoSheet(vm: vm, viewModel: viewModel)
+            }
+        }
+        .sheet(isPresented: $showSnapshot) {
+            if let vm = selectedVM {
+                VMSnapshotSheet(vm: vm, viewModel: viewModel)
+            }
+        }
         .sheet(isPresented: $showConsole) {
             if let vm = selectedVM, let console = vm.console {
                 VMConsoleSheet(vmName: vm.name, consolePath: console)
-            }
-        }
-        .sheet(isPresented: $showVNC) {
-            if let vm = selectedVM, let vnc = vm.vnc {
-                VMVNCSheet(vmName: vm.name, vncAddress: vnc)
             }
         }
         .onAppear {
@@ -199,22 +340,43 @@ struct VirtualMachineRow: View {
                 .frame(width: 30)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(vm.name)
-                    .font(.headline)
+                HStack {
+                    Text(vm.name)
+                        .font(.headline)
+
+                    if vm.autostart {
+                        Image(systemName: "arrow.clockwise.circle.fill")
+                            .font(.caption)
+                            .foregroundColor(.green)
+                            .help("Autostart enabled")
+                    }
+                }
 
                 HStack(spacing: 12) {
                     Label(vm.state.rawValue, systemImage: "")
                         .font(.caption)
                         .foregroundColor(vm.statusColor)
 
+                    if let datastore = vm.datastore {
+                        Label(datastore, systemImage: "internaldrive")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    if let loader = vm.loader {
+                        Label(loader, systemImage: "memorychip")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
                     if !vm.cpu.isEmpty {
-                        Label(vm.cpu, systemImage: "cpu")
+                        Label("\(vm.cpu) CPU", systemImage: "cpu")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
 
                     if !vm.memory.isEmpty {
-                        Label(vm.memory, systemImage: "memorychip")
+                        Label(vm.memory, systemImage: "memorychip.fill")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -322,22 +484,44 @@ struct VMVNCSheet: View {
     let vmName: String
     let vncAddress: String
     @Environment(\.dismiss) private var dismiss
+    @State private var showEmbeddedViewer = false
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 0) {
+            // Header - draggable area
             HStack {
                 Text("VM VNC: \(vmName)")
                     .font(.title2)
                     .bold()
                 Spacer()
+                if showEmbeddedViewer {
+                    Button("Back") {
+                        showEmbeddedViewer = false
+                    }
+                    .buttonStyle(.bordered)
+                }
                 Button("Close") {
                     dismiss()
                 }
             }
+            .padding()
+            .background(Color(NSColor.windowBackgroundColor))
 
-            VStack(alignment: .leading, spacing: 12) {
-                Text("VNC Server")
-                    .font(.caption)
+            if showEmbeddedViewer {
+                // Embedded VNC Viewer
+                let components = vncAddress.split(separator: ":")
+                let host = String(components.first ?? "")
+                let port = Int(components.last ?? "5900") ?? 5900
+
+                VNCViewerView(host: host, port: port)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.black)
+            } else {
+                // Connection options
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("VNC Server")
+                            .font(.caption)
 
                 HStack {
                     Text(vncAddress)
@@ -356,29 +540,78 @@ struct VMVNCSheet: View {
                     .help("Copy to clipboard")
                 }
 
-                Text("Connect using a VNC client:")
+                Divider()
+
+                Text("Connection Instructions:")
                     .font(.caption)
                     .foregroundColor(.secondary)
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("• macOS: Screen Sharing app or VNC viewer")
-                    Text("• Command: open vnc://\(vncAddress)")
+                    Text("• Click 'Open VNC Connection' (uses Screen Sharing)")
+                    Text("• If Screen Sharing still prompts, install RealVNC Viewer or TigerVNC")
+                    Text("• These clients handle passwordless VNC connections properly")
                 }
                 .font(.caption)
                 .foregroundColor(.secondary)
 
-                Button("Open VNC Connection") {
-                    if let url = URL(string: "vnc://\(vncAddress)") {
-                        NSWorkspace.shared.open(url)
+                HStack {
+                    Text("Recommended:")
+                        .font(.caption)
+                        .bold()
+                    Button("Get RealVNC Viewer") {
+                        if let url = URL(string: "https://www.realvnc.com/en/connect/download/viewer/") {
+                            NSWorkspace.shared.open(url)
+                        }
                     }
-                    dismiss()
+                    .buttonStyle(.link)
+                    .font(.caption)
                 }
-                .buttonStyle(.borderedProminent)
+                .foregroundColor(.secondary)
+
+                        // Primary button - Embedded viewer
+                        Button("Open Embedded Viewer (No Password!)") {
+                            showEmbeddedViewer = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+
+                        Divider()
+                            .padding(.vertical, 8)
+
+                        Text("Alternative Options:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                HStack(spacing: 12) {
+                    Button("Use Screen Sharing") {
+                        // Use VNC URL with empty password to bypass authentication prompt
+                        // Format: vnc://:@host:port (colon before @ indicates empty password)
+                        if let url = URL(string: "vnc://:@\(vncAddress)") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button("Open in Browser (noVNC)") {
+                        // Many vm-bhyve setups also have noVNC web interface
+                        // Try common noVNC port (6080) or VNC port + 1000
+                        if let vncPort = vncAddress.split(separator: ":").last,
+                           let portNum = Int(vncPort) {
+                            let host = vncAddress.split(separator: ":").first ?? ""
+                            let noVNCPort = portNum + 1000 // Common noVNC offset
+                            if let url = URL(string: "http://\(host):\(noVNCPort)") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                }
+                    }
+                    .padding()
+                }
             }
-            .padding()
         }
-        .padding()
-        .frame(width: 500)
+        .frame(width: 900, height: 700)
     }
 }
 
@@ -437,7 +670,7 @@ class VMsViewModel: ObservableObject {
         // Confirm stop
         let alert = NSAlert()
         alert.messageText = "Stop Virtual Machine?"
-        alert.informativeText = "This will forcefully stop the VM '\(name)'. Data may be lost if not properly shut down."
+        alert.informativeText = "This will send an ACPI shutdown signal to VM '\(name)'."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Stop")
         alert.addButton(withTitle: "Cancel")
@@ -454,5 +687,316 @@ class VMsViewModel: ObservableObject {
         } catch {
             self.error = "Failed to stop virtual machine: \(error.localizedDescription)"
         }
+    }
+
+    func restartVM(name: String) async {
+        error = nil
+
+        do {
+            try await sshManager.restartVirtualMachine(name: name)
+            await loadVMs()
+        } catch {
+            self.error = "Failed to restart virtual machine: \(error.localizedDescription)"
+        }
+    }
+
+    func poweroffVM(name: String) async {
+        // Confirm poweroff
+        let alert = NSAlert()
+        alert.messageText = "Force Poweroff Virtual Machine?"
+        alert.informativeText = "This will forcefully poweroff the VM '\(name)'. Data may be lost if not properly shut down."
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "Force Poweroff")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+
+        error = nil
+
+        do {
+            try await sshManager.poweroffVirtualMachine(name: name)
+            await loadVMs()
+        } catch {
+            self.error = "Failed to poweroff virtual machine: \(error.localizedDescription)"
+        }
+    }
+
+    func getVMInfo(name: String) async -> String? {
+        do {
+            return try await sshManager.getVirtualMachineInfo(name: name)
+        } catch {
+            self.error = "Failed to get VM info: \(error.localizedDescription)"
+            return nil
+        }
+    }
+}
+
+// MARK: - VM Info Sheet
+
+struct VMInfoSheet: View {
+    let vm: VirtualMachine
+    let viewModel: VMsViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var vmInfo: String = "Loading..."
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                VStack(alignment: .leading) {
+                    Text("VM Information")
+                        .font(.title2)
+                        .bold()
+                    Text(vm.name)
+                        .font(.headline)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                Button("Done") {
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding()
+
+            Divider()
+
+            // Info content
+            ScrollView {
+                Text(vmInfo)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+            }
+        }
+        .frame(width: 700, height: 600)
+        .onAppear {
+            Task {
+                if let info = await viewModel.getVMInfo(name: vm.name) {
+                    vmInfo = info
+                } else {
+                    vmInfo = "Failed to load VM information"
+                }
+            }
+        }
+    }
+}
+
+// MARK: - VM Create Sheet
+
+struct VMCreateSheet: View {
+    let viewModel: VMsViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var vmName: String = ""
+    @State private var template: String = "default"
+    @State private var datastore: String = "default"
+    @State private var diskSize: String = "20G"
+    @State private var cpuCount: String = "2"
+    @State private var memory: String = "2G"
+    @State private var isCreating = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                VStack(alignment: .leading) {
+                    Text("Create Virtual Machine")
+                        .font(.title2)
+                        .bold()
+                    Text("Create a new VM using vm-bhyve")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                Button("Cancel") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+            .padding()
+
+            Divider()
+
+            // Form
+            Form {
+                Section("Basic Configuration") {
+                    TextField("VM Name:", text: $vmName)
+                        .textFieldStyle(.roundedBorder)
+
+                    Picker("Template:", selection: $template) {
+                        Text("default").tag("default")
+                        Text("FreeBSD").tag("freebsd")
+                        Text("Linux").tag("linux")
+                        Text("Windows").tag("windows")
+                    }
+
+                    Picker("Datastore:", selection: $datastore) {
+                        Text("default").tag("default")
+                    }
+                }
+
+                Section("Resources") {
+                    TextField("CPU Cores:", text: $cpuCount)
+                        .textFieldStyle(.roundedBorder)
+
+                    TextField("Memory (e.g., 2G, 512M):", text: $memory)
+                        .textFieldStyle(.roundedBorder)
+
+                    TextField("Disk Size (e.g., 20G, 50G):", text: $diskSize)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+            .padding()
+            .formStyle(.grouped)
+
+            Divider()
+
+            // Footer
+            HStack {
+                Spacer()
+
+                if isCreating {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                        .padding(.trailing, 8)
+                }
+
+                Button("Create") {
+                    Task {
+                        await createVM()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(vmName.isEmpty || isCreating)
+            }
+            .padding()
+        }
+        .frame(width: 500, height: 450)
+    }
+
+    private func createVM() async {
+        isCreating = true
+
+        do {
+            try await SSHConnectionManager.shared.createVirtualMachine(
+                name: vmName,
+                template: template,
+                size: diskSize,
+                datastore: datastore,
+                cpu: cpuCount,
+                memory: memory
+            )
+
+            await viewModel.loadVMs()
+            dismiss()
+        } catch {
+            viewModel.error = "Failed to create VM: \(error.localizedDescription)"
+        }
+
+        isCreating = false
+    }
+}
+
+// MARK: - VM Snapshot Sheet
+
+struct VMSnapshotSheet: View {
+    let vm: VirtualMachine
+    let viewModel: VMsViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var snapshotName: String = ""
+    @State private var isCreating = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                VStack(alignment: .leading) {
+                    Text("Create Snapshot")
+                        .font(.title2)
+                        .bold()
+                    Text(vm.name)
+                        .font(.headline)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                Button("Cancel") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+            .padding()
+
+            Divider()
+
+            // Form
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Create a ZFS snapshot of this virtual machine")
+                    .font(.body)
+                    .foregroundColor(.secondary)
+
+                TextField("Snapshot Name (optional):", text: $snapshotName)
+                    .textFieldStyle(.roundedBorder)
+
+                Text("Leave empty to auto-generate a timestamp-based name")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding()
+
+            Spacer()
+
+            Divider()
+
+            // Footer
+            HStack {
+                Spacer()
+
+                if isCreating {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                        .padding(.trailing, 8)
+                }
+
+                Button("Create Snapshot") {
+                    Task {
+                        await createSnapshot()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isCreating)
+            }
+            .padding()
+        }
+        .frame(width: 450, height: 250)
+    }
+
+    private func createSnapshot() async {
+        isCreating = true
+
+        do {
+            try await SSHConnectionManager.shared.snapshotVirtualMachine(
+                name: vm.name,
+                snapshotName: snapshotName.isEmpty ? nil : snapshotName,
+                force: vm.state == .running
+            )
+
+            await viewModel.loadVMs()
+            dismiss()
+        } catch {
+            viewModel.error = "Failed to create snapshot: \(error.localizedDescription)"
+        }
+
+        isCreating = false
     }
 }

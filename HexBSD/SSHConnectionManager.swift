@@ -296,7 +296,7 @@ class SSHConnectionManager {
 
     /// List files in a remote directory
     func listDirectory(path: String) async throws -> [RemoteFile] {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -310,7 +310,7 @@ class SSHConnectionManager {
 
     /// Download a file from the remote server
     func downloadFile(remotePath: String, localURL: URL) async throws {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -327,7 +327,7 @@ class SSHConnectionManager {
 
     /// Upload a file to the remote server
     func uploadFile(localURL: URL, remotePath: String) async throws {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -343,7 +343,7 @@ class SSHConnectionManager {
 
     /// Delete a file or directory on the remote server
     func deleteFile(path: String, isDirectory: Bool) async throws {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -449,7 +449,7 @@ class SSHConnectionManager {
 extension SSHConnectionManager {
     /// List log files in /var/log directory
     func listLogFiles() async throws -> [LogFile] {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -472,7 +472,7 @@ extension SSHConnectionManager {
 
     /// Read log file content (last N lines)
     func readLogFile(path: String, lines: Int) async throws -> String {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -526,7 +526,7 @@ extension SSHConnectionManager {
 extension SSHConnectionManager {
     /// List all network connections using sockstat
     func listNetworkConnections() async throws -> [NetworkConnection] {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -600,7 +600,7 @@ extension SSHConnectionManager {
 extension SSHConnectionManager {
     /// List all active user sessions using w command
     func listUserSessions() async throws -> [UserSession] {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -665,7 +665,7 @@ extension SSHConnectionManager {
 extension SSHConnectionManager {
     /// Detect custom poudriere config path from running processes
     private func detectPoudriereConfigPath() async throws -> String? {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -697,7 +697,7 @@ extension SSHConnectionManager {
 
     /// Check for running poudriere bulk builds
     func getRunningPoudriereBulk() async throws -> [String] {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -718,7 +718,7 @@ extension SSHConnectionManager {
 
     /// Check if poudriere is installed and get config
     func checkPoudriere() async throws -> PoudriereInfo {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -756,7 +756,7 @@ extension SSHConnectionManager {
             fi
             """
         }
-        let confOutput = try await executeCommand(confCommand)
+        _ = try await executeCommand(confCommand)
 
         // Use shell to evaluate poudriere config and get actual paths
         // This sources the config file and uses poudriere's own logic
@@ -888,7 +888,7 @@ extension SSHConnectionManager {
 
     /// Load HTML content from poudriere
     func loadPoudriereHTML(path: String) async throws -> String {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -906,7 +906,7 @@ extension SSHConnectionManager {
 extension SSHConnectionManager {
     /// Check if ports tree is installed
     func checkPorts() async throws -> PortsInfo {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -951,7 +951,7 @@ extension SSHConnectionManager {
 
     /// List all ports categories
     func listPortsCategories() async throws -> [String] {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -976,7 +976,7 @@ extension SSHConnectionManager {
 
     /// Get total ports count
     func getPortsCount() async throws -> Int {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -997,7 +997,7 @@ extension SSHConnectionManager {
 
     /// Search ports by name or description
     func searchPorts(query: String, category: String) async throws -> [Port] {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -1030,7 +1030,7 @@ extension SSHConnectionManager {
 
     /// Get detailed port information
     func getPortDetails(path: String) async throws -> PortDetails {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -1194,7 +1194,7 @@ extension SSHConnectionManager {
 extension SSHConnectionManager {
     /// Audit packages for security vulnerabilities using pkg audit
     func auditPackageVulnerabilities() async throws -> [Vulnerability] {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -1283,7 +1283,7 @@ extension SSHConnectionManager {
 extension SSHConnectionManager {
     /// Check if user is root
     func hasElevatedPrivileges() async throws -> Bool {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -1299,7 +1299,7 @@ extension SSHConnectionManager {
 
     /// List all jails (running and configured)
     func listJails() async throws -> [Jail] {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -1349,7 +1349,7 @@ extension SSHConnectionManager {
 
     /// Start a jail
     func startJail(name: String) async throws {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -1372,7 +1372,7 @@ extension SSHConnectionManager {
 
     /// Stop a jail
     func stopJail(name: String) async throws {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -1395,7 +1395,7 @@ extension SSHConnectionManager {
 
     /// Restart a jail
     func restartJail(name: String) async throws {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -1418,7 +1418,7 @@ extension SSHConnectionManager {
 
     /// Get jail configuration from /etc/jail.conf or /etc/jail.conf.d/
     func getJailConfig(name: String) async throws -> JailConfig {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -1453,7 +1453,7 @@ extension SSHConnectionManager {
 
     /// Get jail resource usage
     func getJailResourceUsage(name: String) async throws -> JailResourceUsage {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -1631,7 +1631,7 @@ extension SSHConnectionManager {
 
         // Get active network connections count
         let connectionsOutput = try await executeCommand("netstat -an | grep ESTABLISHED | wc -l")
-        let connectionCount = connectionsOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        _ = connectionsOutput.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Get memory usage - use vm.stats.vm for accurate memory reporting
         let memInfo = try await executeCommand("sysctl -n hw.physmem vm.stats.vm.v_page_count vm.stats.vm.v_free_count vm.stats.vm.v_inactive_count hw.pagesize")
@@ -2151,7 +2151,7 @@ extension SSHConnectionManager {
         var totalIn: UInt64 = 0
         var totalOut: UInt64 = 0
 
-        for (index, line) in lines.enumerated() {
+        for (_, line) in lines.enumerated() {
             // Skip header lines
             if line.contains("Name") || line.contains("Mtu") || line.contains("<Link#") {
                 continue
@@ -2408,13 +2408,13 @@ extension SSHConnectionManager {
             var state = "none"
             var progress: Double?
             var scanned: String?
-            var issued: String?
+            let issued: String? = nil
             var duration: String?
             var errors = 0
 
             // Look for scrub information in the output
             let lines = statusOutput.split(separator: "\n")
-            for (index, line) in lines.enumerated() {
+            for (_, line) in lines.enumerated() {
                 let trimmedLine = line.trimmingCharacters(in: .whitespaces)
 
                 // Look for scrub status line
@@ -2512,8 +2512,6 @@ extension SSHConnectionManager {
         let receiveCommand = "zfs receive -F \(snapshotToSend.split(separator: "@")[0])"
 
         // Execute send on source and capture output
-        let sendCommand = "zfs send \(snapshotToSend)"
-
         // For now, we'll use a temporary file approach
         let tempFile = "/tmp/zfs-replication-\(UUID().uuidString).zfs"
 
@@ -2742,209 +2740,516 @@ extension SSHConnectionManager {
 
     // MARK: - Virtual Machine Management
 
-    /// List all bhyve virtual machines
+    /// List all bhyve virtual machines using vm-bhyve
     func listVirtualMachines() async throws -> [VirtualMachine] {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
-        // Check running bhyve processes (exclude bhyveload and shell wrappers)
-        let command = """
-        ps aux | grep 'bhyve' | grep -v grep | grep -v bhyveload | grep -v '/bin/sh' | awk '{
-            # Only process lines that contain the bhyve executable with flags
-            if ($0 !~ /-c[[:space:]]/ && $0 !~ /-m[[:space:]]/) {
-                next;
-            }
-
-            # The VM name is typically the last argument
-            name = $NF;
-
-            # Skip if it looks like a path, flag, or process name in parens
-            if (name ~ /^\\/|^-|^\\(/) {
-                name = "";
-            }
-
-            # PID is field 2
-            printf "%s|%s|", $2, name;
-
-            # Extract CPU count from -c flag
-            cpu = "";
-            for (i = 11; i <= NF; i++) {
-                if ($i == "-c" && i+1 <= NF) {
-                    cpu = $(i+1);
-                    break;
-                }
-            }
-            printf "%s|", cpu;
-
-            # Extract memory from -m flag
-            mem = "";
-            for (i = 11; i <= NF; i++) {
-                if ($i == "-m" && i+1 <= NF) {
-                    mem = $(i+1);
-                    break;
-                }
-            }
-            printf "%s|", mem;
-
-            # Extract console device from -l com1 or -s lpc
-            console = "";
-            for (i = 11; i <= NF; i++) {
-                if ($i == "-l" && i+1 <= NF && $(i+1) ~ /com[0-9]/) {
-                    # Format: -l com1,/dev/nmdm0A
-                    split($(i+1), arr, ",");
-                    if (length(arr) > 1 && arr[2] ~ /\\/dev\\/nmdm/) {
-                        console = arr[2];
-                        break;
-                    }
-                } else if ($i == "-s" && i+1 <= NF && $(i+1) ~ /lpc/) {
-                    # Format: -s 30,lpc,com1=/dev/nmdm0A
-                    if ($(i+1) ~ /com[0-9]=/) {
-                        match($(i+1), /com[0-9]=\\/dev\\/nmdm[^,]*/);
-                        if (RSTART > 0) {
-                            result = substr($(i+1), RSTART, RLENGTH);
-                            split(result, arr, "=");
-                            console = arr[2];
-                            break;
-                        }
-                    }
-                }
-            }
-            printf "%s|", console;
-
-            # Extract VNC address from fbuf
-            vnc = "";
-            for (i = 11; i <= NF; i++) {
-                if ($i == "-s" && i+1 <= NF && $(i+1) ~ /fbuf.*tcp=/) {
-                    match($(i+1), /tcp=[^:,]+:[0-9]+/);
-                    if (RSTART > 0) {
-                        vnc = substr($(i+1), RSTART+4, RLENGTH-4);
-                    }
-                    break;
-                }
-            }
-            printf "%s", vnc;
-
-            printf "\\n";
-        }' 2>/dev/null || echo ''
-        """
+        // Use vm list command with column separator for easier parsing
+        let command = "vm list | column -t | tail -n +2"
 
         print("DEBUG: Listing virtual machines...")
         let output = try await executeCommand(command)
-        print("DEBUG: bhyve processes output: \(output)")
+        print("DEBUG: vm list output:\n\(output)")
 
         return parseVirtualMachines(output)
     }
 
-    /// Parse virtual machine list from bhyve process output
+    /// Parse virtual machine list from vm-bhyve list output
     private func parseVirtualMachines(_ output: String) -> [VirtualMachine] {
         let lines = output.components(separatedBy: .newlines)
-            .filter { !$0.isEmpty }
+            .filter { !$0.isEmpty && !$0.starts(with: "NAME") }
 
         var vms: [VirtualMachine] = []
-        var seenPIDs = Set<String>()
 
         for line in lines {
-            let parts = line.components(separatedBy: "|")
-            guard parts.count >= 5 else { continue }
+            // Split by whitespace but preserve multi-word fields like "Running (1234)"
+            let parts = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard parts.count >= 8 else {
+                print("DEBUG: Skipping malformed line: \(line)")
+                continue
+            }
 
-            let pid = parts[0].trimmingCharacters(in: .whitespaces)
-            let name = parts[1].trimmingCharacters(in: .whitespaces)
-            let cpu = parts[2].trimmingCharacters(in: .whitespaces)
-            let memory = parts[3].trimmingCharacters(in: .whitespaces)
-            let console = parts[4].trimmingCharacters(in: .whitespaces)
-            let vnc = parts.count > 5 ? parts[5].trimmingCharacters(in: .whitespaces) : ""
+            let name = String(parts[0])
+            let datastore = String(parts[1])
+            let loader = String(parts[2])
+            let cpu = String(parts[3])
+            let memory = String(parts[4])
+            let vncPort = String(parts[5])
+            let autostart = String(parts[6])
 
-            // Skip if name is empty, looks like a flag, or is a process name in parens
-            guard !name.isEmpty && !name.hasPrefix("-") && !name.hasPrefix("(") else { continue }
+            // State can be multi-word like "Running (1234)" or just "Stopped"
+            let stateStart = 7
+            let stateComponents = parts[stateStart...].map(String.init)
+            let stateString = stateComponents.joined(separator: " ")
 
-            // Skip duplicate PIDs
-            guard !seenPIDs.contains(pid) else { continue }
-            seenPIDs.insert(pid)
+            // Parse state and extract PID if running
+            var state: VirtualMachine.VMState = .stopped
+            var pid: String? = nil
+
+            if stateString.starts(with: "Running") {
+                state = .running
+                // Extract PID from "Running (1234)" format
+                if let pidMatch = stateString.range(of: #"\((\d+)\)"#, options: .regularExpression) {
+                    let pidStr = stateString[pidMatch]
+                    pid = String(pidStr.dropFirst().dropLast())
+                }
+            } else if stateString.starts(with: "Stopped") {
+                state = .stopped
+            } else if stateString.starts(with: "Locked") {
+                state = .unknown
+            } else if stateString.starts(with: "Suspended") {
+                state = .unknown
+            }
+
+            // Build full VNC address with server hostname/IP
+            let vncAddress: String?
+            if vncPort != "-" {
+                // Get the server address (hostname or IP)
+                let serverHost = serverAddress.isEmpty ? "localhost" : serverAddress
+
+                // vm-bhyve returns the VNC field as "0.0.0.0:5900" or just "5900"
+                // Extract just the port number
+                let port: String
+                if vncPort.contains(":") {
+                    // Format is "0.0.0.0:5900" - extract port after last colon
+                    port = vncPort.components(separatedBy: ":").last ?? vncPort
+                } else {
+                    // Format is just "5900"
+                    port = vncPort
+                }
+
+                vncAddress = "\(serverHost):\(port)"
+            } else {
+                vncAddress = nil
+            }
 
             let vm = VirtualMachine(
                 name: name,
-                state: .running,
-                pid: pid.isEmpty ? nil : pid,
-                cpu: cpu.isEmpty ? "1" : cpu,
-                memory: memory.isEmpty ? "Unknown" : memory,
-                console: console.isEmpty ? nil : console,
-                vnc: vnc.isEmpty ? nil : vnc
+                state: state,
+                datastore: datastore,
+                loader: loader,
+                pid: pid,
+                cpu: cpu,
+                memory: memory,
+                console: nil, // Will be fetched from vm info if needed
+                vnc: vncAddress,
+                autostart: autostart.starts(with: "Yes")
             )
             vms.append(vm)
         }
 
-        print("DEBUG: Found \(vms.count) running VMs")
+        print("DEBUG: Found \(vms.count) VMs")
         return vms
     }
 
-    /// Start a virtual machine
+    /// Start a virtual machine using vm-bhyve
     func startVirtualMachine(name: String) async throws {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
-        // Try to start VM using common methods
-        // First, check if there's an rc.conf entry
-        let command = """
-        # Check if VM has rc.d script or service
-        if service \(name) status >/dev/null 2>&1 || service \(name) onestatus >/dev/null 2>&1; then
-            service \(name) start
-        # Check for VM startup script in common locations
-        elif [ -x /usr/local/vm/\(name)/start.sh ]; then
-            /usr/local/vm/\(name)/start.sh
-        elif [ -x /vm/\(name)/start.sh ]; then
-            /vm/\(name)/start.sh
-        elif [ -x /usr/local/etc/vm/\(name)/start.sh ]; then
-            /usr/local/etc/vm/\(name)/start.sh
-        # Check for vm-bhyve (even though user said raw bhyve, might still have it)
-        elif command -v vm >/dev/null 2>&1; then
-            vm start \(name)
-        else
-            echo "Error: No start method found for VM '\(name)'"
-            echo "Please ensure the VM has a startup script or rc.d service"
-            exit 1
-        fi
-        """
-
+        let command = "vm start \(name)"
         print("DEBUG: Starting VM: \(name)")
         let output = try await executeCommand(command)
         print("DEBUG: Start output: \(output)")
 
-        if output.contains("Error:") {
+        if output.contains("Error:") || output.contains("failed") {
             throw NSError(domain: "SSHConnectionManager", code: 2,
                          userInfo: [NSLocalizedDescriptionKey: output])
         }
     }
 
-    /// Stop a virtual machine
+    /// Stop a virtual machine using vm-bhyve (sends ACPI shutdown)
     func stopVirtualMachine(name: String) async throws {
-        guard let client = client else {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
-        // Try to stop VM using bhyvectl or service
-        let command = """
-        # Check if VM has rc.d script or service
-        if service \(name) status >/dev/null 2>&1; then
-            service \(name) stop
-        # Try bhyvectl to destroy VM
-        elif bhyvectl --vm=\(name) --destroy >/dev/null 2>&1; then
-            echo "VM stopped via bhyvectl"
-        # Check for vm-bhyve
-        elif command -v vm >/dev/null 2>&1; then
-            vm stop \(name)
-        # Try to find and kill the process
-        else
-            pkill -f "bhyve.*\(name)" && echo "VM process killed"
-        fi
-        """
-
+        let command = "vm stop \(name)"
         print("DEBUG: Stopping VM: \(name)")
         let output = try await executeCommand(command)
         print("DEBUG: Stop output: \(output)")
+    }
+
+    /// Restart a virtual machine using vm-bhyve
+    func restartVirtualMachine(name: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "vm restart \(name)"
+        print("DEBUG: Restarting VM: \(name)")
+        let output = try await executeCommand(command)
+        print("DEBUG: Restart output: \(output)")
+    }
+
+    /// Force poweroff a virtual machine using vm-bhyve
+    func poweroffVirtualMachine(name: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "vm poweroff -f \(name)"
+        print("DEBUG: Poweroff VM: \(name)")
+        let output = try await executeCommand(command)
+        print("DEBUG: Poweroff output: \(output)")
+    }
+
+    /// Get detailed information about a virtual machine
+    func getVirtualMachineInfo(name: String) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "vm info \(name)"
+        return try await executeCommand(command)
+    }
+
+    /// Connect to VM console
+    func connectToConsole(name: String) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Get console device from vm info
+        let info = try await getVirtualMachineInfo(name: name)
+
+        // Parse console device from info
+        if let consoleLine = info.components(separatedBy: .newlines).first(where: { $0.contains("com1:") }) {
+            let parts = consoleLine.components(separatedBy: ":")
+            if parts.count >= 2 {
+                return parts[1].trimmingCharacters(in: .whitespaces)
+            }
+        }
+
+        throw NSError(domain: "SSHConnectionManager", code: 3,
+                     userInfo: [NSLocalizedDescriptionKey: "Could not find console device for VM"])
+    }
+
+    // MARK: - VM Creation & Destruction
+
+    /// Create a new virtual machine
+    func createVirtualMachine(name: String, template: String = "default", size: String = "20G",
+                            datastore: String = "default", cpu: String? = nil, memory: String? = nil) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var command = "vm create -t \(template) -s \(size) -d \(datastore)"
+        if let cpu = cpu {
+            command += " -c \(cpu)"
+        }
+        if let memory = memory {
+            command += " -m \(memory)"
+        }
+        command += " \(name)"
+
+        print("DEBUG: Creating VM: \(name)")
+        let output = try await executeCommand(command)
+        print("DEBUG: Create output: \(output)")
+
+        if output.contains("Error:") || output.contains("failed") {
+            throw NSError(domain: "SSHConnectionManager", code: 2,
+                         userInfo: [NSLocalizedDescriptionKey: output])
+        }
+    }
+
+    /// Destroy a virtual machine
+    func destroyVirtualMachine(name: String, force: Bool = false) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = force ? "vm destroy -f \(name)" : "vm destroy \(name)"
+        print("DEBUG: Destroying VM: \(name)")
+        let output = try await executeCommand(command)
+        print("DEBUG: Destroy output: \(output)")
+    }
+
+    /// Rename a virtual machine
+    func renameVirtualMachine(oldName: String, newName: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "vm rename \(oldName) \(newName)"
+        print("DEBUG: Renaming VM: \(oldName) -> \(newName)")
+        let output = try await executeCommand(command)
+        print("DEBUG: Rename output: \(output)")
+    }
+
+    /// Clone a virtual machine
+    func cloneVirtualMachine(source: String, destination: String, snapshot: String? = nil) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let sourceName = snapshot != nil ? "\(source)@\(snapshot!)" : source
+        let command = "vm clone \(sourceName) \(destination)"
+        print("DEBUG: Cloning VM: \(sourceName) -> \(destination)")
+        let output = try await executeCommand(command)
+        print("DEBUG: Clone output: \(output)")
+    }
+
+    // MARK: - VM Snapshots
+
+    /// Create a snapshot of a virtual machine
+    func snapshotVirtualMachine(name: String, snapshotName: String? = nil, force: Bool = false) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var command = "vm snapshot"
+        if force {
+            command += " -f"
+        }
+        if let snapshotName = snapshotName {
+            command += " \(name)@\(snapshotName)"
+        } else {
+            command += " \(name)"
+        }
+
+        print("DEBUG: Creating snapshot for VM: \(name)")
+        let output = try await executeCommand(command)
+        print("DEBUG: Snapshot output: \(output)")
+    }
+
+    /// Rollback a virtual machine to a snapshot
+    func rollbackVirtualMachine(name: String, snapshot: String, removeNewer: Bool = false) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var command = "vm rollback"
+        if removeNewer {
+            command += " -r"
+        }
+        command += " \(name)@\(snapshot)"
+
+        print("DEBUG: Rolling back VM: \(name) to snapshot: \(snapshot)")
+        let output = try await executeCommand(command)
+        print("DEBUG: Rollback output: \(output)")
+    }
+
+    // MARK: - Virtual Switches
+
+    /// List all virtual switches
+    func listVirtualSwitches() async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        return try await executeCommand("vm switch list")
+    }
+
+    /// Get detailed information about virtual switches
+    func getVirtualSwitchInfo(name: String? = nil) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = name != nil ? "vm switch info \(name!)" : "vm switch info"
+        return try await executeCommand(command)
+    }
+
+    /// Create a virtual switch
+    func createVirtualSwitch(name: String, type: String = "standard", interface: String? = nil,
+                           address: String? = nil, vlan: String? = nil) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var command = "vm switch create -t \(type)"
+        if let interface = interface {
+            command += " -i \(interface)"
+        }
+        if let address = address {
+            command += " -a \(address)"
+        }
+        if let vlan = vlan {
+            command += " -n \(vlan)"
+        }
+        command += " \(name)"
+
+        print("DEBUG: Creating switch: \(name)")
+        let output = try await executeCommand(command)
+        print("DEBUG: Switch create output: \(output)")
+    }
+
+    /// Destroy a virtual switch
+    func destroyVirtualSwitch(name: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "vm switch destroy \(name)"
+        print("DEBUG: Destroying switch: \(name)")
+        let output = try await executeCommand(command)
+        print("DEBUG: Switch destroy output: \(output)")
+    }
+
+    // MARK: - Datastores
+
+    /// List all datastores
+    func listDatastores() async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        return try await executeCommand("vm datastore list")
+    }
+
+    /// Add a datastore
+    func addDatastore(name: String, path: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "vm datastore add \(name) \(path)"
+        print("DEBUG: Adding datastore: \(name) at \(path)")
+        let output = try await executeCommand(command)
+        print("DEBUG: Datastore add output: \(output)")
+    }
+
+    /// Remove a datastore
+    func removeDatastore(name: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "vm datastore remove \(name)"
+        print("DEBUG: Removing datastore: \(name)")
+        let output = try await executeCommand(command)
+        print("DEBUG: Datastore remove output: \(output)")
+    }
+
+    // MARK: - ISO & Image Management
+
+    /// List ISOs
+    func listISOs(datastore: String? = nil) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var command = "vm iso"
+        if let datastore = datastore {
+            command += " -d \(datastore)"
+        }
+        return try await executeCommand(command)
+    }
+
+    /// Download an ISO
+    func downloadISO(url: String, datastore: String? = nil) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var command = "vm iso"
+        if let datastore = datastore {
+            command += " -d \(datastore)"
+        }
+        command += " \(url)"
+
+        print("DEBUG: Downloading ISO from: \(url)")
+        let output = try await executeCommand(command)
+        print("DEBUG: ISO download output: \(output)")
+    }
+
+    /// List cloud images
+    func listImages(datastore: String? = nil) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var command = "vm img"
+        if let datastore = datastore {
+            command += " -d \(datastore)"
+        }
+        return try await executeCommand(command)
+    }
+
+    // MARK: - VM Installation
+
+    /// Install OS from ISO to VM
+    func installVirtualMachine(name: String, iso: String, foreground: Bool = false) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var command = "vm install"
+        if foreground {
+            command += " -f"
+        }
+        command += " \(name) \(iso)"
+
+        print("DEBUG: Installing OS on VM: \(name) from ISO: \(iso)")
+        let output = try await executeCommand(command)
+        print("DEBUG: Install output: \(output)")
+    }
+
+    // MARK: - PCI Passthrough
+
+    /// List available PCI devices for passthrough
+    func listPassthroughDevices() async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        return try await executeCommand("vm passthru")
+    }
+
+    // MARK: - Bulk Operations
+
+    /// Start all VMs in autostart list
+    func startAllVirtualMachines() async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "vm startall"
+        print("DEBUG: Starting all VMs")
+        let output = try await executeCommand(command)
+        print("DEBUG: Startall output: \(output)")
+    }
+
+    /// Stop all running VMs
+    func stopAllVirtualMachines() async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "vm stopall"
+        print("DEBUG: Stopping all VMs")
+        let output = try await executeCommand(command)
+        print("DEBUG: Stopall output: \(output)")
     }
 }
