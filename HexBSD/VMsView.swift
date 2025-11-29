@@ -8,6 +8,12 @@
 import SwiftUI
 import AppKit
 
+// MARK: - Notification Names
+
+extension Notification.Name {
+    static let launchVNCForVM = Notification.Name("launchVNCForVM")
+}
+
 // MARK: - Data Models
 
 struct VMBhyveInfo: Equatable {
@@ -46,6 +52,18 @@ struct VMNetworkInterface: Identifiable, Hashable {
         self.description = description
         self.isUp = isUp
         self.hasIPv4 = hasIPv4
+    }
+}
+
+struct ISOImage: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let size: String?
+
+    init(name: String, size: String? = nil) {
+        self.id = name
+        self.name = name
+        self.size = size
     }
 }
 
@@ -130,6 +148,7 @@ struct VMsContentView: View {
     @State private var showSnapshot = false
     @State private var embeddedVNCVM: VirtualMachine?
     @State private var showNetworkSwitches = false
+    @State private var showISOManagement = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -268,6 +287,15 @@ struct VMsContentView: View {
                             showNetworkSwitches = true
                         }) {
                             Label("Network Switches", systemImage: "network")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!viewModel.isInstalled || !viewModel.serviceEnabled)
+
+                        // ISO management button
+                        Button(action: {
+                            showISOManagement = true
+                        }) {
+                            Label("ISOs", systemImage: "opticaldiscdrive")
                         }
                         .buttonStyle(.bordered)
                         .disabled(!viewModel.isInstalled || !viewModel.serviceEnabled)
@@ -707,9 +735,32 @@ struct VMsContentView: View {
         .sheet(isPresented: $showNetworkSwitches) {
             NetworkSwitchesSheet(viewModel: viewModel)
         }
+        .sheet(isPresented: $showISOManagement) {
+            ISOManagementSheet(viewModel: viewModel)
+        }
         .onAppear {
             Task {
                 await viewModel.loadVMs()
+            }
+
+            // Listen for VNC launch notifications
+            NotificationCenter.default.addObserver(
+                forName: .launchVNCForVM,
+                object: nil,
+                queue: .main
+            ) { notification in
+                if let vmName = notification.userInfo?["vmName"] as? String {
+                    // Wait a bit for VMs to refresh, then launch VNC
+                    Task {
+                        // Refresh VMs to get the latest state with VNC info
+                        await viewModel.loadVMs()
+
+                        // Find the VM and launch VNC
+                        if let vm = viewModel.vms.first(where: { $0.name == vmName }) {
+                            embeddedVNCVM = vm
+                        }
+                    }
+                }
             }
         }
     }
@@ -1228,6 +1279,125 @@ class VMsViewModel: ObservableObject {
             self.error = "Failed to destroy virtual switch: \(error.localizedDescription)"
         }
     }
+
+    func listISOs() async -> [ISOImage] {
+        do {
+            let output = try await sshManager.listISOs(datastore: nil)
+            print("DEBUG: vm iso output: '\(output)'")
+            return parseISOs(output)
+        } catch {
+            self.error = "Failed to list ISOs: \(error.localizedDescription)"
+            return []
+        }
+    }
+
+    private func parseISOs(_ output: String) -> [ISOImage] {
+        var isos: [ISOImage] = []
+        let lines = output.split(separator: "\n")
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+
+            // vm iso output format:
+            // DATASTORE           FILENAME
+            // default             GhostBSD-26.1-R15.0b3-11-29-09.iso
+
+            // Split by whitespace and take the last component (filename)
+            let parts = trimmed.split(separator: " ", omittingEmptySubsequences: true)
+            guard parts.count >= 2 else {
+                print("DEBUG: Skipping line (not enough parts): '\(trimmed)'")
+                continue
+            }
+
+            let filename = String(parts.last!)
+
+            // Only include .iso files
+            guard filename.lowercased().hasSuffix(".iso") else {
+                print("DEBUG: Skipping line (not .iso): '\(trimmed)'")
+                continue
+            }
+
+            // Store both datastore and filename
+            let datastore = String(parts[0])
+            isos.append(ISOImage(name: filename, size: datastore))
+        }
+
+        print("DEBUG: Parsed \(isos.count) ISOs")
+        return isos.sorted { $0.name < $1.name }
+    }
+
+    func uploadISO(localURL: URL, progress: @escaping (Double) -> Void) async {
+        error = nil
+
+        do {
+            let fileName = localURL.lastPathComponent
+            let tempPath = "/tmp/\(fileName)"
+
+            print("DEBUG: Starting ISO upload: \(fileName)")
+            print("DEBUG: Temp path: \(tempPath)")
+
+            // Step 1: Upload to /tmp with progress tracking (90% of progress)
+            print("DEBUG: Uploading to temp location...")
+            try await sshManager.uploadFile(localURL: localURL, remotePath: tempPath, progressCallback: { uploadProgress in
+                // Upload is 90% of the total
+                let totalProgress = uploadProgress * 0.9
+                print("DEBUG: Upload progress: \(totalProgress)")
+                progress(totalProgress)
+            })
+
+            print("DEBUG: Upload complete, importing with vm iso...")
+            // Step 2: Import using vm iso command (10% of progress)
+            // Note: vm iso writes to stderr even on success, so we ignore errors here
+            do {
+                let importOutput = try await sshManager.executeCommand("vm iso \(tempPath)")
+                print("DEBUG: vm iso output: '\(importOutput)'")
+            } catch {
+                // vm iso often returns output via stderr which appears as an error
+                // Check if the ISO was actually imported by listing ISOs
+                print("DEBUG: vm iso command completed (may have written to stderr)")
+            }
+
+            progress(0.95)
+
+            // Step 3: Clean up temp file
+            print("DEBUG: Cleaning up temp file...")
+            _ = try await sshManager.executeCommand("rm -f \(tempPath)")
+
+            // Mark as complete
+            print("DEBUG: Upload and import complete!")
+            progress(1.0)
+
+            // Give UI a moment to show 100% before dismissing
+            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+        } catch {
+            print("DEBUG: Upload error: \(error)")
+            self.error = "Failed to upload ISO: \(error.localizedDescription)"
+        }
+    }
+
+    func deleteISO(iso: ISOImage) async {
+        error = nil
+
+        do {
+            // Get the datastore (stored in size field for now)
+            let datastore = iso.size ?? "default"
+
+            // Get VM directory and construct path to ISO
+            let vmDirPath = vmDir.hasPrefix("zfs:") ? String(vmDir.dropFirst(4)) : vmDir
+            let isoPath = "\(vmDirPath)/.iso/\(iso.name)"
+
+            print("DEBUG: Deleting ISO: \(iso.name) from datastore: \(datastore)")
+            print("DEBUG: ISO path: \(isoPath)")
+
+            // Delete the ISO file directly (vm-bhyve doesn't have a delete command for ISOs)
+            let output = try await sshManager.executeCommand("rm -f '\(isoPath)'")
+            print("DEBUG: Delete output: '\(output)'")
+        } catch {
+            print("DEBUG: Delete error: \(error)")
+            self.error = "Failed to delete ISO: \(error.localizedDescription)"
+        }
+    }
 }
 
 // MARK: - VM Info Sheet
@@ -1297,6 +1467,11 @@ struct VMCreateSheet: View {
     @State private var cpuCount: String = "2"
     @State private var memory: String = "2G"
     @State private var isCreating = false
+    @State private var installFromISO: Bool = false
+    @State private var selectedISO: ISOImage?
+    @State private var availableISOs: [ISOImage] = []
+    @State private var isLoadingISOs = false
+    @State private var autoStartVNC: Bool = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1339,6 +1514,42 @@ struct VMCreateSheet: View {
                     TextField("Disk Size (e.g., 20G, 50G):", text: $diskSize)
                         .textFieldStyle(.roundedBorder)
                 }
+
+                Section("OS Installation") {
+                    Toggle("Install from ISO", isOn: $installFromISO)
+
+                    if installFromISO {
+                        if isLoadingISOs {
+                            HStack {
+                                ProgressView()
+                                    .scaleEffect(0.7)
+                                Text("Loading ISOs...")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        } else if availableISOs.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("No ISOs available")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text("Upload or download an ISO first")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        } else {
+                            Picker("ISO Image:", selection: $selectedISO) {
+                                Text("Select ISO...").tag(nil as ISOImage?)
+                                ForEach(availableISOs) { iso in
+                                    Text(iso.name).tag(iso as ISOImage?)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                        }
+
+                        Toggle("Auto-launch VNC after creation", isOn: $autoStartVNC)
+                            .disabled(selectedISO == nil)
+                    }
+                }
             }
             .padding()
             .formStyle(.grouped)
@@ -1361,17 +1572,29 @@ struct VMCreateSheet: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(vmName.isEmpty || isCreating)
+                .disabled(vmName.isEmpty || isCreating || (installFromISO && selectedISO == nil))
             }
             .padding()
         }
-        .frame(width: 500, height: 450)
+        .frame(width: 500, height: installFromISO ? 600 : 450)
+        .onAppear {
+            Task {
+                await loadISOs()
+            }
+        }
+    }
+
+    private func loadISOs() async {
+        isLoadingISOs = true
+        availableISOs = await viewModel.listISOs()
+        isLoadingISOs = false
     }
 
     private func createVM() async {
         isCreating = true
 
         do {
+            // Step 1: Create the VM
             try await SSHConnectionManager.shared.createVirtualMachine(
                 name: vmName,
                 template: template,
@@ -1380,6 +1603,27 @@ struct VMCreateSheet: View {
                 cpu: cpuCount,
                 memory: memory
             )
+
+            // Step 2: If installing from ISO, run the install command
+            if installFromISO, let iso = selectedISO {
+                try await SSHConnectionManager.shared.installVirtualMachine(
+                    name: vmName,
+                    iso: iso.name,
+                    foreground: false
+                )
+
+                // Wait a moment for the VM to start
+                try await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
+
+                // If auto-launch VNC is enabled, post notification to launch VNC
+                if autoStartVNC {
+                    NotificationCenter.default.post(
+                        name: .launchVNCForVM,
+                        object: nil,
+                        userInfo: ["vmName": vmName]
+                    )
+                }
+            }
 
             await viewModel.loadVMs()
             dismiss()
@@ -1831,3 +2075,297 @@ struct CreateSwitchSheet: View {
         }
     }
 }
+
+// MARK: - ISO Management Sheet
+
+struct ISOManagementSheet: View {
+    let viewModel: VMsViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var isos: [ISOImage] = []
+    @State private var isLoading = false
+    @State private var showUploadISO = false
+    @State private var uploadProgress: Double = 0
+    @State private var isUploading = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                VStack(alignment: .leading) {
+                    Text("ISO Management")
+                        .font(.title2)
+                        .bold()
+                    Text("Manage ISO images for VM installation")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                Button("Close") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+            .padding()
+
+            Divider()
+
+            // Toolbar
+            HStack {
+                Button(action: {
+                    Task {
+                        await loadISOs()
+                    }
+                }) {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                .disabled(isLoading)
+
+                Spacer()
+
+                Button(action: {
+                    showUploadISO = true
+                }) {
+                    Label("Upload ISO", systemImage: "arrow.up.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isLoading || isUploading)
+            }
+            .padding()
+
+            Divider()
+
+            // Upload progress
+            if isUploading {
+                VStack(spacing: 8) {
+                    ProgressView(value: uploadProgress, total: 1.0)
+                        .progressViewStyle(.linear)
+                    Text("Uploading ISO... \(Int(uploadProgress * 100))%")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding()
+                Divider()
+            }
+
+            // ISOs list
+            if isLoading {
+                VStack(spacing: 20) {
+                    ProgressView()
+                        .scaleEffect(1.5)
+                    Text("Loading ISO images...")
+                        .font(.headline)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if isos.isEmpty {
+                VStack(spacing: 20) {
+                    Image(systemName: "opticaldiscdrive")
+                        .font(.system(size: 72))
+                        .foregroundColor(.secondary)
+                    Text("No ISO Images")
+                        .font(.title2)
+                        .foregroundColor(.secondary)
+                    Text("Upload or download ISO images to install operating systems")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List {
+                    ForEach(isos) { iso in
+                        ISORow(iso: iso, onDelete: {
+                            Task {
+                                await deleteISO(iso)
+                            }
+                        })
+                    }
+                }
+                .listStyle(.inset)
+            }
+        }
+        .frame(width: 700, height: 500)
+        .sheet(isPresented: $showUploadISO) {
+            UploadISOSheet(viewModel: viewModel) {
+                Task {
+                    await loadISOs()
+                }
+            }
+        }
+        .onAppear {
+            Task {
+                await loadISOs()
+            }
+        }
+    }
+
+    private func loadISOs() async {
+        isLoading = true
+        isos = await viewModel.listISOs()
+        isLoading = false
+    }
+
+    private func deleteISO(_ iso: ISOImage) async {
+        // Confirm deletion
+        let alert = NSAlert()
+        alert.messageText = "Delete ISO Image?"
+        alert.informativeText = "Are you sure you want to delete '\(iso.name)'?"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+
+        await viewModel.deleteISO(iso: iso)
+        await loadISOs()
+    }
+}
+
+struct ISORow: View {
+    let iso: ISOImage
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "opticaldiscdrive.fill")
+                .font(.title2)
+                .foregroundColor(.orange)
+                .frame(width: 30)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(iso.name)
+                    .font(.headline)
+
+                if let datastore = iso.size {
+                    Label("Datastore: \(datastore)", systemImage: "internaldrive")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Spacer()
+
+            Button(action: onDelete) {
+                Image(systemName: "trash")
+                    .foregroundColor(.red)
+            }
+            .buttonStyle(.borderless)
+            .help("Delete ISO")
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+struct UploadISOSheet: View {
+    let viewModel: VMsViewModel
+    let onUploaded: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var isUploading = false
+    @State private var uploadProgress: Double = 0
+    @State private var selectedFileURL: URL?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                VStack(alignment: .leading) {
+                    Text("Upload ISO")
+                        .font(.title2)
+                        .bold()
+                    Text("Select an ISO file from your computer")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                Button("Cancel") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+                .disabled(isUploading)
+            }
+            .padding()
+
+            Divider()
+
+            // Content
+            VStack(spacing: 16) {
+                if isUploading {
+                    VStack(spacing: 12) {
+                        ProgressView(value: uploadProgress, total: 1.0)
+                            .progressViewStyle(.linear)
+                        Text("Uploading ISO... \(Int(uploadProgress * 100))%")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        if let url = selectedFileURL {
+                            Text(url.lastPathComponent)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .padding()
+                } else {
+                    VStack(spacing: 20) {
+                        Image(systemName: "arrow.up.doc.fill")
+                            .font(.system(size: 48))
+                            .foregroundColor(.blue)
+
+                        Text("Select an ISO file to upload")
+                            .font(.headline)
+
+                        Button("Choose File...") {
+                            selectFile()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .padding()
+        }
+        .frame(width: 500, height: 300)
+    }
+
+    private func selectFile() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.diskImage]
+        panel.allowsOtherFileTypes = true
+        panel.message = "Select an ISO file to upload"
+
+        if panel.runModal() == .OK, let url = panel.url {
+            selectedFileURL = url
+            Task { @MainActor in
+                await uploadISO(url: url)
+            }
+        }
+    }
+
+    private func uploadISO(url: URL) async {
+        isUploading = true
+        uploadProgress = 0
+
+        await viewModel.uploadISO(localURL: url, progress: { progress in
+            Task { @MainActor in
+                self.uploadProgress = progress
+            }
+        })
+
+        isUploading = false
+
+        if viewModel.error == nil {
+            onUploaded()
+            dismiss()
+        }
+    }
+}
+

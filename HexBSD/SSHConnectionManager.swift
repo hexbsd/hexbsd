@@ -39,6 +39,12 @@ class SSHConnectionManager {
     // SSH client
     private var client: SSHClient?
 
+    // Connection parameters (stored for SCP)
+    private var connectedHost: String?
+    private var connectedPort: Int?
+    private var connectedUsername: String?
+    private var connectedKeyPath: String?
+
     // Network rate tracking per interface
     private var lastInterfaceStats: [String: (inBytes: UInt64, outBytes: UInt64)] = [:]
     private var lastNetworkTime: Date?
@@ -130,6 +136,12 @@ class SSHConnectionManager {
             self.isConnected = true
             self.serverAddress = host
             self.lastError = nil
+
+            // Store connection parameters for SCP
+            self.connectedHost = host
+            self.connectedPort = port
+            self.connectedUsername = authMethod.username
+            self.connectedKeyPath = authMethod.privateKeyURL.path
         } catch let error as NSError {
             print("DEBUG: Connection failed - Domain: \(error.domain), Code: \(error.code)")
             print("DEBUG: Error description: \(error.localizedDescription)")
@@ -326,19 +338,106 @@ class SSHConnectionManager {
     }
 
     /// Upload a file to the remote server
-    func uploadFile(localURL: URL, remotePath: String) async throws {
+    func uploadFile(localURL: URL, remotePath: String, progressCallback: ((Double) -> Void)? = nil) async throws {
         guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
-        // Read local file
+        // Get file size
+        let fileAttributes = try FileManager.default.attributesOfItem(atPath: localURL.path)
+        guard let fileSize = fileAttributes[.size] as? UInt64 else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Could not determine file size"])
+        }
+
+        print("DEBUG: Uploading file of size: \(fileSize) bytes (\(Double(fileSize) / 1_000_000_000.0) GB)")
+
+        // For large files (> 5MB), use scp which is much faster
+        if fileSize > 5_000_000 {
+            print("DEBUG: Using SCP for large file upload")
+            return try await uploadWithSCP(localURL: localURL, remotePath: remotePath, progressCallback: progressCallback)
+        }
+
+        // For small files (< 5MB), use single command method
+        print("DEBUG: Using single-command upload for small file")
         let data = try Data(contentsOf: localURL)
         let base64 = data.base64EncodedString()
-
-        // Upload using base64 encoding to handle binary files
         let command = "echo '\(base64)' | base64 -d > '\(remotePath)'"
         _ = try await executeCommand(command)
+        progressCallback?(1.0)
+    }
+
+    private func uploadWithSCP(localURL: URL, remotePath: String, progressCallback: ((Double) -> Void)? = nil) async throws {
+        // Use scp command for fast, reliable large file uploads
+        // Format: scp -i keyfile localfile user@host:remotepath
+
+        guard let keyPath = connectedKeyPath else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "No SSH key configured"])
+        }
+
+        guard let host = connectedHost else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected"])
+        }
+
+        let user = connectedUsername ?? "root"
+        let portNum = connectedPort ?? 22
+
+        print("DEBUG: Starting SCP upload to \(user)@\(host):\(remotePath)")
+
+        // Build scp command
+        let scpCommand = [
+            "/usr/bin/scp",
+            "-i", keyPath,
+            "-P", "\(portNum)",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            localURL.path,
+            "\(user)@\(host):\(remotePath)"
+        ]
+
+        print("DEBUG: SCP command: \(scpCommand.joined(separator: " "))")
+
+        // Execute scp using Process
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/scp")
+        process.arguments = Array(scpCommand.dropFirst())
+
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        try process.run()
+
+        // Report progress periodically while process runs
+        let progressTask = Task {
+            while process.isRunning {
+                try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+                // SCP doesn't provide real-time progress, so we just show indeterminate
+                progressCallback?(0.5)
+            }
+        }
+
+        process.waitUntilExit()
+
+        // Cancel the progress task to stop sending 0.5 updates
+        progressTask.cancel()
+
+        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
+
+        if process.terminationStatus != 0 {
+            print("DEBUG: SCP failed with status \(process.terminationStatus)")
+            print("DEBUG: SCP error output: \(errorOutput)")
+            throw NSError(domain: "SSHConnectionManager", code: Int(process.terminationStatus),
+                         userInfo: [NSLocalizedDescriptionKey: "SCP upload failed: \(errorOutput)"])
+        }
+
+        print("DEBUG: SCP upload completed successfully")
+        progressCallback?(1.0)
     }
 
     /// Delete a file or directory on the remote server
