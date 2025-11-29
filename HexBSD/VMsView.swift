@@ -14,6 +14,7 @@ struct VMBhyveInfo: Equatable {
     let isInstalled: Bool
     let serviceEnabled: Bool
     let vmDir: String
+    let templatesInstalled: Bool
 }
 
 struct VirtualSwitch: Identifiable, Hashable {
@@ -207,6 +208,30 @@ struct VMsContentView: View {
                                 }
                             }
 
+                            if viewModel.templatesInstalled {
+                                Text("•")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                HStack(spacing: 4) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.green)
+                                    Text("Templates installed")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            } else {
+                                Text("•")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                HStack(spacing: 4) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(.orange)
+                                    Text("Templates missing")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
                             if !viewModel.vmDir.isEmpty {
                                 Text("•")
                                     .font(.caption)
@@ -236,7 +261,7 @@ struct VMsContentView: View {
                             Label("New VM", systemImage: "plus.circle.fill")
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(!viewModel.isInstalled || !viewModel.serviceEnabled)
+                        .disabled(!viewModel.isInstalled || !viewModel.serviceEnabled || !viewModel.templatesInstalled)
 
                         // Network switches button
                         Button(action: {
@@ -519,7 +544,33 @@ struct VMsContentView: View {
                                         .help("Copy to clipboard")
                                     }
 
-                                    Text("4. Start the service:")
+                                    Text("4. Copy example templates:")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .padding(.top, 4)
+
+                                    let templateCmd = !viewModel.vmDir.isEmpty ? "cp /usr/local/share/examples/vm-bhyve/* \(viewModel.vmDir)/.templates/" : "cp /usr/local/share/examples/vm-bhyve/* /zroot/vm/.templates/"
+
+                                    HStack {
+                                        Text(templateCmd)
+                                            .font(.system(.caption, design: .monospaced))
+                                            .foregroundColor(.blue)
+                                            .textSelection(.enabled)
+                                            .padding(8)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .background(Color(nsColor: .controlBackgroundColor))
+                                            .cornerRadius(6)
+                                        Button(action: {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString(templateCmd, forType: .string)
+                                        }) {
+                                            Image(systemName: "doc.on.doc")
+                                        }
+                                        .buttonStyle(.borderless)
+                                        .help("Copy to clipboard")
+                                    }
+
+                                    Text("5. Start the service:")
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                         .padding(.top, 4)
@@ -541,6 +592,59 @@ struct VMsContentView: View {
                                         .buttonStyle(.borderless)
                                         .help("Copy to clipboard")
                                     }
+                                }
+                            }
+                            .padding(.horizontal, 40)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if !viewModel.templatesInstalled {
+                        VStack(spacing: 20) {
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 72))
+                                .foregroundColor(.orange)
+                            Text("VM Templates Not Installed")
+                                .font(.title)
+                                .foregroundColor(.secondary)
+                            Text("Copy the example templates to create virtual machines")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("Installation:")
+                                    .font(.headline)
+                                    .foregroundColor(.primary)
+
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("Copy example templates from vm-bhyve installation:")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+
+                                    let templateCmd = "cp /usr/local/share/examples/vm-bhyve/* \(viewModel.vmDir)/.templates/"
+
+                                    HStack {
+                                        Text(templateCmd)
+                                            .font(.system(.caption, design: .monospaced))
+                                            .foregroundColor(.blue)
+                                            .textSelection(.enabled)
+                                            .padding(8)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .background(Color(nsColor: .controlBackgroundColor))
+                                            .cornerRadius(6)
+                                        Button(action: {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString(templateCmd, forType: .string)
+                                        }) {
+                                            Image(systemName: "doc.on.doc")
+                                        }
+                                        .buttonStyle(.borderless)
+                                        .help("Copy to clipboard")
+                                    }
+
+                                    Text("Then refresh this page to continue.")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .padding(.top, 4)
                                 }
                             }
                             .padding(.horizontal, 40)
@@ -910,6 +1014,7 @@ class VMsViewModel: ObservableObject {
     @Published var isInstalled = false
     @Published var serviceEnabled = false
     @Published var vmDir = ""
+    @Published var templatesInstalled = false
 
     private let sshManager = SSHConnectionManager.shared
 
@@ -923,6 +1028,7 @@ class VMsViewModel: ObservableObject {
             isInstalled = info.isInstalled
             serviceEnabled = info.serviceEnabled
             vmDir = info.vmDir
+            templatesInstalled = info.templatesInstalled
 
             if isInstalled && serviceEnabled {
                 vms = try await sshManager.listVirtualMachines()

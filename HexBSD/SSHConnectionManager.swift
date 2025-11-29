@@ -2752,7 +2752,7 @@ extension SSHConnectionManager {
         let checkOutput = try await executeCommand(checkCommand)
 
         if checkOutput.trimmingCharacters(in: .whitespacesAndNewlines) != "installed" {
-            return VMBhyveInfo(isInstalled: false, serviceEnabled: false, vmDir: "")
+            return VMBhyveInfo(isInstalled: false, serviceEnabled: false, vmDir: "", templatesInstalled: false)
         }
 
         // Check if service is enabled in rc.conf
@@ -2761,13 +2761,20 @@ extension SSHConnectionManager {
         let serviceEnabled = serviceOutput.trimmingCharacters(in: .whitespacesAndNewlines) == "enabled"
 
         // Get VM directory from vm-bhyve config
-        let vmDirCommand = "vm info 2>/dev/null | grep 'Virtual Machine Directory:' | awk '{print $NF}' || echo '/vm'"
+        // Handle both ZFS format (zfs:zroot/vm) and regular paths (/vm)
+        let vmDirCommand = "sysrc -n vm_dir 2>/dev/null | sed 's/^zfs:\\(.*\\)/\\/\\1/' || echo '/vm'"
         let vmDir = try await executeCommand(vmDirCommand)
+
+        // Check if example templates are installed (more than just default.conf)
+        let templatesCheckCommand = "ls \(vmDir.trimmingCharacters(in: .whitespacesAndNewlines))/.templates/*.conf 2>/dev/null | wc -l"
+        let templatesCount = try await executeCommand(templatesCheckCommand)
+        let templatesInstalled = (Int(templatesCount.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) > 1
 
         return VMBhyveInfo(
             isInstalled: true,
             serviceEnabled: serviceEnabled,
-            vmDir: vmDir.trimmingCharacters(in: .whitespacesAndNewlines)
+            vmDir: vmDir.trimmingCharacters(in: .whitespacesAndNewlines),
+            templatesInstalled: templatesInstalled
         )
     }
 
