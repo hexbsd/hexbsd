@@ -10,6 +10,12 @@ import AppKit
 
 // MARK: - Data Models
 
+struct VMBhyveInfo: Equatable {
+    let isInstalled: Bool
+    let serviceEnabled: Bool
+    let vmDir: String
+}
+
 struct VirtualMachine: Identifiable, Hashable {
     var id: String { name } // Use VM name as ID (unique in vm-bhyve)
     let name: String
@@ -135,9 +141,58 @@ struct VMsContentView: View {
                 VStack(spacing: 0) {
                     // Toolbar
                     HStack {
-                        Text("\(viewModel.vms.count) virtual machine(s)")
-                            .font(.headline)
-                            .foregroundColor(.secondary)
+                        if viewModel.isInstalled {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                                Text("vm-bhyve installed")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+
+                            if viewModel.serviceEnabled {
+                                Text("•")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                HStack(spacing: 4) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.green)
+                                    Text("Service enabled")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            } else {
+                                Text("•")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                HStack(spacing: 4) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(.orange)
+                                    Text("Service not enabled")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
+                            if !viewModel.vmDir.isEmpty {
+                                Text("•")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text("VM Dir: \(viewModel.vmDir)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                        } else {
+                            HStack(spacing: 4) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.red)
+                                Text("vm-bhyve not found")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
 
                         Spacer()
 
@@ -148,6 +203,7 @@ struct VMsContentView: View {
                             Label("New VM", systemImage: "plus.circle.fill")
                         }
                         .buttonStyle(.borderedProminent)
+                        .disabled(!viewModel.isInstalled || !viewModel.serviceEnabled)
 
                         if let vm = selectedVM {
                             Divider()
@@ -264,6 +320,190 @@ struct VMsContentView: View {
                                 .foregroundColor(.secondary)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if !viewModel.isInstalled {
+                        VStack(spacing: 20) {
+                            Image(systemName: "shippingbox")
+                                .font(.system(size: 72))
+                                .foregroundColor(.secondary)
+                            Text("vm-bhyve Not Installed")
+                                .font(.title)
+                                .foregroundColor(.secondary)
+                            Text("Install vm-bhyve to manage virtual machines")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            HStack {
+                                Text("pkg install vm-bhyve")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundColor(.blue)
+                                    .textSelection(.enabled)
+                                    .padding(8)
+                                    .background(Color(nsColor: .controlBackgroundColor))
+                                    .cornerRadius(6)
+                                Button(action: {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString("pkg install vm-bhyve", forType: .string)
+                                }) {
+                                    Image(systemName: "doc.on.doc")
+                                }
+                                .buttonStyle(.borderless)
+                                .help("Copy to clipboard")
+                            }
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if !viewModel.serviceEnabled {
+                        VStack(spacing: 20) {
+                            Image(systemName: "exclamationmark.triangle")
+                                .font(.system(size: 72))
+                                .foregroundColor(.orange)
+                            Text("vm-bhyve Service Not Enabled")
+                                .font(.title)
+                                .foregroundColor(.secondary)
+                            Text("Setup and enable the vm-bhyve service to manage virtual machines")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("Setup Steps:")
+                                    .font(.headline)
+                                    .foregroundColor(.primary)
+
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("1. Create ZFS dataset and set VM directory:")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                    HStack {
+                                        Text("zfs create zroot/vm")
+                                            .font(.system(.caption, design: .monospaced))
+                                            .foregroundColor(.blue)
+                                            .textSelection(.enabled)
+                                            .padding(8)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .background(Color(nsColor: .controlBackgroundColor))
+                                            .cornerRadius(6)
+                                        Button(action: {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString("zfs create zroot/vm", forType: .string)
+                                        }) {
+                                            Image(systemName: "doc.on.doc")
+                                        }
+                                        .buttonStyle(.borderless)
+                                        .help("Copy to clipboard")
+                                    }
+                                    HStack {
+                                        Text("sysrc vm_dir=\"zfs:zroot/vm\"")
+                                            .font(.system(.caption, design: .monospaced))
+                                            .foregroundColor(.blue)
+                                            .textSelection(.enabled)
+                                            .padding(8)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .background(Color(nsColor: .controlBackgroundColor))
+                                            .cornerRadius(6)
+                                        Button(action: {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString("sysrc vm_dir=\"zfs:zroot/vm\"", forType: .string)
+                                        }) {
+                                            Image(systemName: "doc.on.doc")
+                                        }
+                                        .buttonStyle(.borderless)
+                                        .help("Copy to clipboard")
+                                    }
+                                    Text("Or for a regular directory:")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .padding(.leading, 8)
+                                    HStack {
+                                        Text("mkdir -p /vm && sysrc vm_dir=\"/vm\"")
+                                            .font(.system(.caption, design: .monospaced))
+                                            .foregroundColor(.blue)
+                                            .textSelection(.enabled)
+                                            .padding(8)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .background(Color(nsColor: .controlBackgroundColor))
+                                            .cornerRadius(6)
+                                        Button(action: {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString("mkdir -p /vm && sysrc vm_dir=\"/vm\"", forType: .string)
+                                        }) {
+                                            Image(systemName: "doc.on.doc")
+                                        }
+                                        .buttonStyle(.borderless)
+                                        .help("Copy to clipboard")
+                                    }
+
+                                    Text("2. Enable the service:")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .padding(.top, 4)
+                                    HStack {
+                                        Text("sysrc vm_enable=\"YES\"")
+                                            .font(.system(.caption, design: .monospaced))
+                                            .foregroundColor(.blue)
+                                            .textSelection(.enabled)
+                                            .padding(8)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .background(Color(nsColor: .controlBackgroundColor))
+                                            .cornerRadius(6)
+                                        Button(action: {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString("sysrc vm_enable=\"YES\"", forType: .string)
+                                        }) {
+                                            Image(systemName: "doc.on.doc")
+                                        }
+                                        .buttonStyle(.borderless)
+                                        .help("Copy to clipboard")
+                                    }
+
+                                    Text("3. Initialize vm-bhyve:")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .padding(.top, 4)
+                                    HStack {
+                                        Text("vm init")
+                                            .font(.system(.caption, design: .monospaced))
+                                            .foregroundColor(.blue)
+                                            .textSelection(.enabled)
+                                            .padding(8)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .background(Color(nsColor: .controlBackgroundColor))
+                                            .cornerRadius(6)
+                                        Button(action: {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString("vm init", forType: .string)
+                                        }) {
+                                            Image(systemName: "doc.on.doc")
+                                        }
+                                        .buttonStyle(.borderless)
+                                        .help("Copy to clipboard")
+                                    }
+
+                                    Text("4. Start the service:")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .padding(.top, 4)
+                                    HStack {
+                                        Text("service vm start")
+                                            .font(.system(.caption, design: .monospaced))
+                                            .foregroundColor(.blue)
+                                            .textSelection(.enabled)
+                                            .padding(8)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .background(Color(nsColor: .controlBackgroundColor))
+                                            .cornerRadius(6)
+                                        Button(action: {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString("service vm start", forType: .string)
+                                        }) {
+                                            Image(systemName: "doc.on.doc")
+                                        }
+                                        .buttonStyle(.borderless)
+                                        .help("Copy to clipboard")
+                                    }
+                                }
+                            }
+                            .padding(.horizontal, 40)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else if viewModel.vms.isEmpty {
                         VStack(spacing: 20) {
                             Image(systemName: "desktopcomputer")
@@ -272,7 +512,7 @@ struct VMsContentView: View {
                             Text("No Virtual Machines")
                                 .font(.title2)
                                 .foregroundColor(.secondary)
-                            Text("No running bhyve VMs detected on this server")
+                            Text("No bhyve VMs detected on this server")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                                 .multilineTextAlignment(.center)
@@ -622,6 +862,9 @@ class VMsViewModel: ObservableObject {
     @Published var vms: [VirtualMachine] = []
     @Published var isLoading = false
     @Published var error: String?
+    @Published var isInstalled = false
+    @Published var serviceEnabled = false
+    @Published var vmDir = ""
 
     private let sshManager = SSHConnectionManager.shared
 
@@ -630,7 +873,17 @@ class VMsViewModel: ObservableObject {
         error = nil
 
         do {
-            vms = try await sshManager.listVirtualMachines()
+            // First check if vm-bhyve is installed and enabled
+            let info = try await sshManager.checkVMBhyve()
+            isInstalled = info.isInstalled
+            serviceEnabled = info.serviceEnabled
+            vmDir = info.vmDir
+
+            if isInstalled && serviceEnabled {
+                vms = try await sshManager.listVirtualMachines()
+            } else {
+                vms = []
+            }
         } catch {
             self.error = "Failed to load virtual machines: \(error.localizedDescription)"
             vms = []

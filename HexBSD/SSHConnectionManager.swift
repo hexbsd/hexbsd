@@ -2740,6 +2740,37 @@ extension SSHConnectionManager {
 
     // MARK: - Virtual Machine Management
 
+    /// Check if vm-bhyve is installed and enabled
+    func checkVMBhyve() async throws -> VMBhyveInfo {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Check if vm-bhyve is installed
+        let checkCommand = "command -v vm >/dev/null 2>&1 && echo 'installed' || echo 'not-installed'"
+        let checkOutput = try await executeCommand(checkCommand)
+
+        if checkOutput.trimmingCharacters(in: .whitespacesAndNewlines) != "installed" {
+            return VMBhyveInfo(isInstalled: false, serviceEnabled: false, vmDir: "")
+        }
+
+        // Check if service is enabled in rc.conf
+        let serviceCheckCommand = "grep -q '^vm_enable=\"YES\"' /etc/rc.conf && echo 'enabled' || echo 'disabled'"
+        let serviceOutput = try await executeCommand(serviceCheckCommand)
+        let serviceEnabled = serviceOutput.trimmingCharacters(in: .whitespacesAndNewlines) == "enabled"
+
+        // Get VM directory from vm-bhyve config
+        let vmDirCommand = "vm info 2>/dev/null | grep 'Virtual Machine Directory:' | awk '{print $NF}' || echo '/vm'"
+        let vmDir = try await executeCommand(vmDirCommand)
+
+        return VMBhyveInfo(
+            isInstalled: true,
+            serviceEnabled: serviceEnabled,
+            vmDir: vmDir.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
     /// List all bhyve virtual machines using vm-bhyve
     func listVirtualMachines() async throws -> [VirtualMachine] {
         guard client != nil else {
