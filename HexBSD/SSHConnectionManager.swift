@@ -3283,4 +3283,328 @@ extension SSHConnectionManager {
         let output = try await executeCommand(command)
         print("DEBUG: Stopall output: \(output)")
     }
+
+    // MARK: - Package Management
+
+    /// List all installed packages
+    func listInstalledPackages() async throws -> [Package] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Use pkg query to get package information in a parseable format
+        let output = try await executeCommand("pkg query -a '%n\t%v\t%c\t%sh'")
+
+        var packages: [Package] = []
+
+        for line in output.split(separator: "\n") {
+            let components = line.split(separator: "\t", maxSplits: 3, omittingEmptySubsequences: false).map { String($0) }
+            guard components.count >= 4 else { continue }
+
+            let name = components[0]
+            let version = components[1]
+            let description = components[2]
+            let size = components[3]
+
+            packages.append(Package(
+                name: name,
+                version: version,
+                description: description,
+                size: size
+            ))
+        }
+
+        return packages
+    }
+
+    /// Get the current package repository type (quarterly or latest)
+    func getCurrentRepository() async throws -> RepositoryType {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Check if there's an override file
+        let confOutput = try await executeCommand("cat /usr/local/etc/pkg/repos/FreeBSD.conf 2>/dev/null || echo ''")
+
+        if !confOutput.isEmpty {
+            // Parse the override file
+            if confOutput.contains("/latest") {
+                return .latest
+            } else if confOutput.contains("/quarterly") {
+                return .quarterly
+            }
+        }
+
+        // No override file exists, so we're using system defaults
+        // System defaults in /etc/pkg/FreeBSD.conf are quarterly
+        // Check to confirm
+        let systemOutput = try await executeCommand("cat /etc/pkg/FreeBSD.conf 2>/dev/null | grep -A 2 'FreeBSD-ports:' | grep url || echo 'quarterly'")
+
+        if systemOutput.contains("/latest") {
+            return .latest
+        } else {
+            // Default to quarterly (system default)
+            return .quarterly
+        }
+    }
+
+    /// Check for available package updates
+    func checkPackageUpdates() async throws -> Int {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Update package repository first
+        _ = try await executeCommand("pkg update -f")
+
+        // Check for upgrades
+        let output = try await executeCommand("pkg upgrade -n | grep -c 'to be upgraded' || echo '0'")
+        let count = Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+
+        return count
+    }
+
+    /// Upgrade all packages
+    func upgradePackages() async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Perform the upgrade with -y to auto-confirm
+        let output = try await executeCommand("pkg upgrade -y")
+        return output
+    }
+
+    /// Switch package repository between quarterly and latest
+    func switchPackageRepository(to newRepo: RepositoryType) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var outputLog = ""
+
+        // Determine the repository URL based on the type
+        let repoPath = newRepo == .quarterly ? "quarterly" : "latest"
+        outputLog += "Switching to \(repoPath) repository...\n"
+
+        // Ensure the repos directory exists
+        _ = try await executeCommand("mkdir -p /usr/local/etc/pkg/repos")
+
+        // Remove ALL existing repository config files first
+        outputLog += "Removing old repository configurations...\n"
+        _ = try await executeCommand("rm -f /usr/local/etc/pkg/repos/*.conf")
+
+        if newRepo == .quarterly {
+            // For quarterly, just remove the override and use system defaults
+            // The system default in /etc/pkg/FreeBSD.conf already points to quarterly
+            outputLog += "Using system default quarterly repositories...\n"
+            outputLog += "No override file needed - using /etc/pkg/FreeBSD.conf defaults\n"
+        } else {
+            // For latest, create an override file
+            // We need to explicitly disable FreeBSD-ports and FreeBSD-ports-kmods
+            // which are defined in /etc/pkg/FreeBSD.conf as quarterly
+            // And enable the latest versions for both packages and kernel modules
+            let configContent = """
+# Disable the default quarterly repositories
+FreeBSD-ports: { enabled: no }
+FreeBSD-ports-kmods: { enabled: no }
+
+# Enable the latest repository for packages
+FreeBSD: {
+  url: "pkg+http://pkg.FreeBSD.org/${ABI}/latest",
+  mirror_type: "srv",
+  signature_type: "fingerprints",
+  fingerprints: "/usr/share/keys/pkg",
+  enabled: yes
+}
+
+# Enable the latest repository for kernel modules
+FreeBSD-kmods: {
+  url: "pkg+http://pkg.FreeBSD.org/${ABI}/kmods_latest_${VERSION_MINOR}",
+  mirror_type: "srv",
+  signature_type: "fingerprints",
+  fingerprints: "/usr/share/keys/pkg",
+  enabled: yes
+}
+"""
+
+            // Write the configuration to /usr/local/etc/pkg/repos/FreeBSD.conf
+            outputLog += "Writing latest repository configuration (packages + kernel modules)...\n"
+            let command = """
+cat > /usr/local/etc/pkg/repos/FreeBSD.conf << 'EOFPKG'
+\(configContent)
+EOFPKG
+"""
+
+            _ = try await executeCommand(command)
+        }
+
+        // Clear repository cache to force a clean switch
+        outputLog += "Clearing repository cache...\n"
+        _ = try await executeCommand("rm -rf /var/db/pkg/repos/*")
+
+        // Verify repository configuration
+        outputLog += "\nVerifying active repositories...\n"
+        let verifyOutput = try await executeCommand("pkg -vv 2>&1 | grep -A 10 'Repositories:' | head -15")
+        outputLog += verifyOutput + "\n"
+
+        outputLog += "\nRepository switch complete!\n"
+        outputLog += "Click 'Check Updates' to update the package catalog.\n"
+
+        return outputLog
+    }
+
+    /// List packages that have upgrades available
+    func listUpgradablePackages() async throws -> [UpgradablePackage] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Update package repository first
+        _ = try await executeCommand("pkg update -q")
+
+        // Get list of packages that can be upgraded
+        // Use a more direct approach: just get the full output and parse lines with ->
+        let output = try await executeCommand("pkg upgrade -n 2>&1")
+
+        var upgradablePackages: [UpgradablePackage] = []
+
+        for line in output.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Skip empty lines and header lines
+            guard !trimmed.isEmpty else { continue }
+            guard trimmed.contains("->") else { continue }
+
+            // Try to parse different possible formats:
+            // Format 1: "package-name: 1.0.0 -> 1.0.1"
+            // Format 2: "package-name-1.0.0 -> package-name-1.0.1"
+            // Format 3: Just has -> somewhere in it
+
+            if let colonIndex = trimmed.firstIndex(of: ":") {
+                // Format: "package-name: version -> version"
+                let name = String(trimmed[..<colonIndex]).trimmingCharacters(in: .whitespaces)
+                let versionPart = String(trimmed[trimmed.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
+
+                let versions = versionPart.split(separator: "->").map { String($0).trimmingCharacters(in: .whitespaces) }
+                guard versions.count == 2 else { continue }
+
+                let currentVersion = versions[0]
+                let newVersion = versions[1]
+
+                // Get description
+                let descOutput = try? await executeCommand("pkg query '%c' '\(name)' 2>/dev/null || echo ''")
+                let description = descOutput?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+                upgradablePackages.append(UpgradablePackage(
+                    name: name,
+                    currentVersion: currentVersion,
+                    newVersion: newVersion,
+                    description: description
+                ))
+            } else if trimmed.contains("->") {
+                // Format: "package-name-version -> package-name-newversion"
+                let parts = trimmed.split(separator: "->").map { String($0).trimmingCharacters(in: .whitespaces) }
+                guard parts.count == 2 else { continue }
+
+                let oldPkg = parts[0]
+                let newPkg = parts[1]
+
+                // Try to extract package name and versions
+                // This is tricky because version numbers can contain dashes
+                // We'll use the second part to get the package name
+                if let lastDash = newPkg.lastIndex(of: "-") {
+                    let name = String(newPkg[..<lastDash])
+                    let newVersion = String(newPkg[newPkg.index(after: lastDash)...])
+
+                    // Extract old version
+                    let currentVersion: String
+                    if let oldLastDash = oldPkg.lastIndex(of: "-") {
+                        currentVersion = String(oldPkg[oldPkg.index(after: oldLastDash)...])
+                    } else {
+                        currentVersion = oldPkg
+                    }
+
+                    // Get description
+                    let descOutput = try? await executeCommand("pkg query '%c' '\(name)' 2>/dev/null || echo ''")
+                    let description = descOutput?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+                    upgradablePackages.append(UpgradablePackage(
+                        name: name,
+                        currentVersion: currentVersion,
+                        newVersion: newVersion,
+                        description: description
+                    ))
+                }
+            }
+        }
+
+        return upgradablePackages
+    }
+
+    /// Search for available packages in the repository
+    func searchPackages(query: String) async throws -> [AvailablePackage] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Use pkg search with a simpler approach
+        // Format: "package-name-version     Description here"
+        let output = try await executeCommand("pkg search '\(query)' 2>&1 | head -100")
+
+        var availablePackages: [AvailablePackage] = []
+
+        for line in output.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+
+            // Skip error messages and info lines
+            if trimmed.starts(with: "pkg:") || trimmed.starts(with: "Updating") ||
+               trimmed.starts(with: "All repositories") || trimmed.starts(with: "Fetching") {
+                continue
+            }
+
+            // Format is typically: "package-name-version  Description"
+            // Split on whitespace to separate package name from description
+            let components = trimmed.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+            guard components.count >= 1 else { continue }
+
+            let packageWithVersion = String(components[0])
+            let description = components.count > 1 ? String(components[1]).trimmingCharacters(in: .whitespaces) : ""
+
+            // Extract package name and version
+            // Find the last dash which typically separates name from version
+            if let lastDash = packageWithVersion.lastIndex(of: "-") {
+                let name = String(packageWithVersion[..<lastDash])
+                let version = String(packageWithVersion[packageWithVersion.index(after: lastDash)...])
+
+                // Avoid duplicates
+                if !availablePackages.contains(where: { $0.name == name }) {
+                    availablePackages.append(AvailablePackage(
+                        name: name,
+                        version: version,
+                        description: description
+                    ))
+                }
+            } else {
+                // No version separator found, use the whole thing as name
+                if !availablePackages.contains(where: { $0.name == packageWithVersion }) {
+                    availablePackages.append(AvailablePackage(
+                        name: packageWithVersion,
+                        version: "",
+                        description: description
+                    ))
+                }
+            }
+        }
+
+        return availablePackages
+    }
 }
