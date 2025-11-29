@@ -596,6 +596,7 @@ struct SavedServer: Identifiable, Codable {
 enum SidebarSection: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"
     case files = "Files"
+    case gershwin = "Gershwin"
     case jails = "Jails"
     case logs = "Logs"
     case ports = "Ports"
@@ -614,6 +615,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         switch self {
         case .dashboard: return "chart.bar"
         case .files: return "folder"
+        case .gershwin: return "wrench.and.screwdriver"
         case .jails: return "building.2"
         case .logs: return "doc.text"
         case .ports: return "app.connected.to.app.below.fill"
@@ -959,6 +961,9 @@ struct DetailView: View {
             } else if section == .files {
                 // Files browser view
                 FilesContentView()
+            } else if section == .gershwin {
+                // Gershwin GNUstep setup wizard
+                GershwinSetupView()
             } else if section == .jails {
                 // Jails management
                 JailsContentView()
