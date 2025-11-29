@@ -112,12 +112,27 @@ struct NetworkDomainStatus {
     }
 }
 
+struct LocalUser: Identifiable, Hashable {
+    let id: Int // UID
+    let username: String
+    let fullName: String
+    let homeDirectory: String
+    let shell: String
+    let isSystemUser: Bool // UID < 1000
+
+    var displayName: String {
+        fullName.isEmpty ? username : "\(fullName) (\(username))"
+    }
+}
+
 struct GershwinSetupState {
     var zfsDatasets: [ZFSDatasetStatus] = []
     var userConfig: UserConfigStatus?
     var networkDomain: NetworkDomainStatus?
     var bootEnvironment: String?
     var zpoolRoot: String?
+    var localUsers: [LocalUser] = []
+    var networkUsers: [LocalUser] = []
 
     var overallProgress: Double {
         var completed = 0
@@ -159,7 +174,7 @@ class GershwinSetupViewModel: ObservableObject {
 
     private let sshManager = SSHConnectionManager.shared
 
-    func loadSetupState() async {
+    func loadSetupState(updateNetworkRole: Bool = true) async {
         isLoading = true
         error = nil
 
@@ -177,8 +192,10 @@ class GershwinSetupViewModel: ObservableObject {
             setupState.userConfig = user
             setupState.networkDomain = network
 
-            // Set initial network role based on detection
-            selectedNetworkRole = network.role
+            // Only set initial network role based on detection if requested (initial load)
+            if updateNetworkRole {
+                selectedNetworkRole = network.role
+            }
 
         } catch {
             self.error = "Failed to load setup state: \(error.localizedDescription)"
@@ -767,6 +784,253 @@ rpc: files
         """
         showingConfirmation = true
     }
+
+    // MARK: - User Management
+
+    func loadLocalUsers() async {
+        isLoading = true
+        error = nil
+
+        do {
+            // Get list of users from /etc/passwd
+            let passwdOutput = try await sshManager.executeCommand("cat /etc/passwd")
+            var users: [LocalUser] = []
+
+            for line in passwdOutput.split(separator: "\n") {
+                let parts = line.split(separator: ":")
+                guard parts.count >= 7 else { continue }
+
+                let username = String(parts[0])
+                let uid = Int(parts[2]) ?? 0
+                let fullName = String(parts[4])
+                let homeDirectory = String(parts[5])
+                let shell = String(parts[6])
+
+                // Only show users with UID >= 1001 (Gershwin uidstart) and < 60000 (exclude special high-UID system accounts like nobody)
+                guard uid >= 1001 && uid < 60000 else {
+                    continue
+                }
+
+                users.append(LocalUser(
+                    id: uid,
+                    username: username,
+                    fullName: fullName,
+                    homeDirectory: homeDirectory,
+                    shell: shell,
+                    isSystemUser: false
+                ))
+            }
+
+            setupState.localUsers = users.sorted { $0.username < $1.username }
+
+        } catch {
+            self.error = "Failed to load local users: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+
+    func createUser(username: String, fullName: String, password: String, addToWheel: Bool) async {
+        isLoading = true
+        error = nil
+
+        do {
+            // Get settings from adduser.conf (or use defaults)
+            let homePrefix = setupState.userConfig?.homePrefix ?? "/Local/Users"
+            let shell = setupState.userConfig?.defaultShell ?? "/usr/local/bin/zsh"
+
+            // Use pw command to create user non-interactively
+            // -n: username, -c: full name/comment, -d: home directory, -s: shell, -m: create home directory, -G: additional groups
+            var createCommand = "pw useradd \(username) -c '\(fullName)' -d \(homePrefix)/\(username) -s \(shell) -m"
+
+            if addToWheel {
+                createCommand += " -G wheel"
+            }
+
+            createCommand += " -h 0"
+
+            // Set the password by piping it to pw usermod
+            _ = try await sshManager.executeCommand("echo '\(password)' | \(createCommand)")
+
+            var message = "User '\(username)' created successfully!"
+            if addToWheel {
+                message += "\n\nUser has been added to the wheel group."
+            }
+            confirmationMessage = message
+            showingConfirmation = true
+
+            // Reload users list
+            await loadLocalUsers()
+
+        } catch {
+            self.error = "Failed to create user: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+
+    func removeUser(user: LocalUser, removeHomeDirectory: Bool) async {
+        isLoading = true
+        error = nil
+
+        do {
+            // Use rmuser command
+            let rmCommand = removeHomeDirectory ? "rmuser -y \(user.username)" : "rmuser -y -v \(user.username)"
+            _ = try await sshManager.executeCommand(rmCommand)
+
+            confirmationMessage = "User '\(user.username)' removed successfully!"
+            showingConfirmation = true
+
+            // Reload users list
+            await loadLocalUsers()
+
+        } catch {
+            self.error = "Failed to remove user: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+
+    // MARK: - Network User Management (NIS)
+
+    func loadNetworkUsers() async {
+        isLoading = true
+        error = nil
+
+        do {
+            // Check if /var/yp/master.passwd exists
+            let checkFile = try await sshManager.executeCommand("test -f /var/yp/master.passwd && echo 'exists' || echo 'missing'")
+            if checkFile.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+                setupState.networkUsers = []
+                isLoading = false
+                return
+            }
+
+            // Get list of network users from /var/yp/master.passwd
+            let passwdOutput = try await sshManager.executeCommand("cat /var/yp/master.passwd")
+            var users: [LocalUser] = []
+
+            for line in passwdOutput.split(separator: "\n") {
+                let parts = line.split(separator: ":")
+                guard parts.count >= 7 else { continue }
+
+                let username = String(parts[0])
+                let uid = Int(parts[2]) ?? 0
+                let fullName = String(parts[4])
+                let homeDirectory = String(parts[5])
+                let shell = String(parts[6])
+
+                // Only show users with UID >= 1001 (Gershwin uidstart) and < 60000
+                guard uid >= 1001 && uid < 60000 else {
+                    continue
+                }
+
+                users.append(LocalUser(
+                    id: uid,
+                    username: username,
+                    fullName: fullName,
+                    homeDirectory: homeDirectory,
+                    shell: shell,
+                    isSystemUser: false
+                ))
+            }
+
+            setupState.networkUsers = users.sorted { $0.username < $1.username }
+
+        } catch {
+            self.error = "Failed to load network users: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+
+    func createNetworkUser(username: String, fullName: String, password: String, addToWheel: Bool) async {
+        isLoading = true
+        error = nil
+
+        do {
+            // Check if /var/yp/master.passwd exists
+            let checkFile = try await sshManager.executeCommand("test -f /var/yp/master.passwd && echo 'exists' || echo 'missing'")
+            if checkFile.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+                throw NSError(domain: "GershwinSetup", code: 6, userInfo: [NSLocalizedDescriptionKey: "NIS not initialized. Please run 'ypinit -m' first."])
+            }
+
+            // Get settings from adduser.conf (or use defaults)
+            // For network users, use /Network/Users instead of /Local/Users
+            let homePrefix = "/Network/Users"
+            let shell = setupState.userConfig?.defaultShell ?? "/usr/local/bin/zsh"
+
+            // Use pw command to create user non-interactively in local system first
+            var createCommand = "pw useradd \(username) -c '\(fullName)' -d \(homePrefix)/\(username) -s \(shell) -m"
+
+            if addToWheel {
+                createCommand += " -G wheel"
+            }
+
+            createCommand += " -h 0"
+            _ = try await sshManager.executeCommand("echo '\(password)' | \(createCommand)")
+
+            // Get the user's entry from /etc/master.passwd
+            let userEntry = try await sshManager.executeCommand("grep '^\(username):' /etc/master.passwd")
+            let trimmedEntry = userEntry.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Append to /var/yp/master.passwd
+            _ = try await sshManager.executeCommand("echo '\(trimmedEntry)' >> /var/yp/master.passwd")
+
+            // Rebuild NIS maps
+            guard let domain = setupState.networkDomain?.domainName else {
+                throw NSError(domain: "GershwinSetup", code: 7, userInfo: [NSLocalizedDescriptionKey: "NIS domain name not found"])
+            }
+
+            _ = try await sshManager.executeCommand("cd /var/yp && make \(domain) 2>&1")
+
+            // Remove the user from local system (keep it only in NIS)
+            _ = try await sshManager.executeCommand("pw userdel \(username) 2>&1 || true")
+
+            var message = "Network user '\(username)' created successfully!\n\nNIS maps have been rebuilt. Clients should now see this user."
+            if addToWheel {
+                message += "\n\nUser has been added to the wheel group."
+            }
+            confirmationMessage = message
+            showingConfirmation = true
+
+            // Reload network users list
+            await loadNetworkUsers()
+
+        } catch {
+            self.error = "Failed to create network user: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+
+    func removeNetworkUser(user: LocalUser) async {
+        isLoading = true
+        error = nil
+
+        do {
+            // Remove user from /var/yp/master.passwd
+            _ = try await sshManager.executeCommand("sed -i '' '/^\(user.username):/d' /var/yp/master.passwd")
+
+            // Rebuild NIS maps
+            guard let domain = setupState.networkDomain?.domainName else {
+                throw NSError(domain: "GershwinSetup", code: 7, userInfo: [NSLocalizedDescriptionKey: "NIS domain name not found"])
+            }
+
+            _ = try await sshManager.executeCommand("cd /var/yp && make \(domain) 2>&1")
+
+            confirmationMessage = "Network user '\(user.username)' removed successfully!\n\nNIS maps have been rebuilt. Note: Home directory was not removed."
+            showingConfirmation = true
+
+            // Reload network users list
+            await loadNetworkUsers()
+
+        } catch {
+            self.error = "Failed to remove network user: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
 }
 
 // MARK: - Main View
@@ -781,6 +1045,46 @@ struct GershwinSetupContentView: View {
     @StateObject private var viewModel = GershwinSetupViewModel()
 
     var body: some View {
+        TabView {
+            // User Management Tab
+            UserManagementTab(viewModel: viewModel)
+                .tabItem {
+                    Label("User Management", systemImage: "person.2")
+                }
+
+            // System Setup Tab
+            SystemSetupTab(viewModel: viewModel)
+                .tabItem {
+                    Label("System Setup", systemImage: "wrench.and.screwdriver")
+                }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task {
+            await viewModel.loadSetupState()
+
+            // Load appropriate user list based on network role
+            if viewModel.setupState.networkDomain?.role == .none {
+                await viewModel.loadLocalUsers()
+            } else if viewModel.setupState.networkDomain?.role == .server {
+                await viewModel.loadNetworkUsers()
+            }
+        }
+        .alert("Configuration Complete", isPresented: $viewModel.showingConfirmation) {
+            Button("OK") {
+                viewModel.showingConfirmation = false
+            }
+        } message: {
+            Text(viewModel.confirmationMessage)
+        }
+    }
+}
+
+// MARK: - System Setup Tab
+
+struct SystemSetupTab: View {
+    @ObservedObject var viewModel: GershwinSetupViewModel
+
+    var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 // Refresh button
@@ -789,7 +1093,8 @@ struct GershwinSetupContentView: View {
 
                     Button(action: {
                         Task {
-                            await viewModel.loadSetupState()
+                            // Don't override user's network role selection when refreshing
+                            await viewModel.loadSetupState(updateNetworkRole: false)
                         }
                     }) {
                         Label("Refresh", systemImage: "arrow.clockwise")
@@ -843,16 +1148,98 @@ struct GershwinSetupContentView: View {
             }
             .padding()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task {
-            await viewModel.loadSetupState()
-        }
-        .alert("Configuration Complete", isPresented: $viewModel.showingConfirmation) {
-            Button("OK") {
-                viewModel.showingConfirmation = false
+    }
+}
+
+// MARK: - User Management Tab
+
+struct UserManagementTab: View {
+    @ObservedObject var viewModel: GershwinSetupViewModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                // Error message
+                if let error = viewModel.error {
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.red)
+                        Text(error)
+                            .foregroundColor(.red)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color.red.opacity(0.1))
+                    )
+                }
+
+                // Show appropriate user management based on selected network role
+                if viewModel.selectedNetworkRole == .none {
+                    // Local User Management
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Local User Management")
+                            .font(.title2)
+                            .bold()
+
+                        Text("Manage local user accounts on this system")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        Divider()
+
+                        UserManagementPhase(viewModel: viewModel)
+                    }
+                    .padding()
+                    .background(
+                        RoundedRectangle(cornerRadius: 16)
+                            .fill(Color(nsColor: .controlBackgroundColor))
+                            .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
+                    )
+                } else if viewModel.selectedNetworkRole == .server {
+                    // Network User Management
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Network User Management")
+                            .font(.title2)
+                            .bold()
+
+                        Text("Manage NIS network users shared across all clients")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        Divider()
+
+                        NetworkUserManagementPhase(viewModel: viewModel)
+                    }
+                    .padding()
+                    .background(
+                        RoundedRectangle(cornerRadius: 16)
+                            .fill(Color(nsColor: .controlBackgroundColor))
+                            .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
+                    )
+                } else if viewModel.selectedNetworkRole == .client {
+                    // Client - no user management
+                    VStack(spacing: 16) {
+                        Image(systemName: "person.2.slash")
+                            .font(.system(size: 60))
+                            .foregroundColor(.secondary)
+
+                        Text("User management not available")
+                            .font(.title3)
+                            .bold()
+
+                        Text("This system is configured as an NIS client. Users are managed on the NIS server.")
+                            .font(.body)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 40)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(60)
+                }
             }
-        } message: {
-            Text(viewModel.confirmationMessage)
+            .padding()
         }
     }
 }
@@ -1196,8 +1583,16 @@ struct NetworkDomainPhase: View {
                 .pickerStyle(.radioGroup)
                 .onChange(of: viewModel.selectedNetworkRole) { oldValue, newValue in
                     // Reload setup state when role changes to update ZFS dataset list
+                    // Don't update the network role from detection since user just changed it
                     Task {
-                        await viewModel.loadSetupState()
+                        await viewModel.loadSetupState(updateNetworkRole: false)
+
+                        // Reload appropriate user list based on new role
+                        if newValue == .none {
+                            await viewModel.loadLocalUsers()
+                        } else if newValue == .server {
+                            await viewModel.loadNetworkUsers()
+                        }
                     }
                 }
 
@@ -1222,6 +1617,534 @@ struct NetworkDomainPhase: View {
             .buttonStyle(.borderedProminent)
             .disabled(viewModel.isLoading || viewModel.selectedNetworkRole == .none)
         }
+    }
+}
+
+struct UserManagementPhase: View {
+    @ObservedObject var viewModel: GershwinSetupViewModel
+    @State private var showCreateUserSheet = false
+    @State private var showDeleteConfirmation = false
+    @State private var userToDelete: LocalUser?
+    @State private var removeHomeDirectory = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Manage local user accounts:")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                Spacer()
+
+                Button(action: {
+                    Task {
+                        await viewModel.loadLocalUsers()
+                    }
+                }) {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .disabled(viewModel.isLoading)
+            }
+
+            if viewModel.setupState.localUsers.isEmpty {
+                VStack(spacing: 8) {
+                    Text("No local users found")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("(Only showing users with UID 1001-59999)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding()
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+                )
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(viewModel.setupState.localUsers) { user in
+                            UserRow(
+                                user: user,
+                                onDelete: {
+                                    userToDelete = user
+                                    showDeleteConfirmation = true
+                                }
+                            )
+                        }
+                    }
+                }
+                .frame(maxHeight: 300)
+            }
+
+            Button(action: {
+                showCreateUserSheet = true
+            }) {
+                Label("Create New User", systemImage: "plus.circle.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(viewModel.isLoading)
+        }
+        .sheet(isPresented: $showCreateUserSheet) {
+            CreateUserSheet(viewModel: viewModel, isPresented: $showCreateUserSheet)
+        }
+        .alert("Delete User", isPresented: $showDeleteConfirmation) {
+            Button("Cancel", role: .cancel) {
+                userToDelete = nil
+                removeHomeDirectory = false
+            }
+            Button("Delete User Only", role: .destructive) {
+                if let user = userToDelete {
+                    Task {
+                        await viewModel.removeUser(user: user, removeHomeDirectory: false)
+                        userToDelete = nil
+                    }
+                }
+            }
+            Button("Delete User & Home", role: .destructive) {
+                if let user = userToDelete {
+                    Task {
+                        await viewModel.removeUser(user: user, removeHomeDirectory: true)
+                        userToDelete = nil
+                    }
+                }
+            }
+        } message: {
+            if let user = userToDelete {
+                Text("Are you sure you want to delete '\(user.username)'?\n\nHome directory: \(user.homeDirectory)")
+            }
+        }
+    }
+}
+
+struct UserRow: View {
+    let user: LocalUser
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(user.displayName)
+                    .font(.body)
+                    .fontWeight(.medium)
+
+                HStack(spacing: 12) {
+                    HStack(spacing: 4) {
+                        Text("UID:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text("\(user.id)")
+                            .font(.system(.caption, design: .monospaced))
+                    }
+
+                    HStack(spacing: 4) {
+                        Text("Home:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(user.homeDirectory)
+                            .font(.system(.caption, design: .monospaced))
+                    }
+
+                    HStack(spacing: 4) {
+                        Text("Shell:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(user.shell)
+                            .font(.system(.caption, design: .monospaced))
+                    }
+                }
+            }
+
+            Spacer()
+
+            Button(action: onDelete) {
+                Image(systemName: "trash")
+                    .foregroundColor(.red)
+            }
+            .buttonStyle(.borderless)
+            .help("Delete user")
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        )
+    }
+}
+
+struct CreateUserSheet: View {
+    @ObservedObject var viewModel: GershwinSetupViewModel
+    @Binding var isPresented: Bool
+
+    @State private var username = ""
+    @State private var fullName = ""
+    @State private var password = ""
+    @State private var confirmPassword = ""
+    @State private var addToWheel = false
+    @State private var showPasswordMismatchError = false
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Create New Local User")
+                .font(.title2)
+                .bold()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Username")
+                    .font(.caption)
+                TextField("Username (lowercase, no spaces)", text: $username)
+                    .textFieldStyle(.roundedBorder)
+
+                Text("Full Name")
+                    .font(.caption)
+                TextField("Full Name", text: $fullName)
+                    .textFieldStyle(.roundedBorder)
+
+                Text("Password")
+                    .font(.caption)
+                SecureField("Password", text: $password)
+                    .textFieldStyle(.roundedBorder)
+
+                Text("Confirm Password")
+                    .font(.caption)
+                SecureField("Confirm Password", text: $confirmPassword)
+                    .textFieldStyle(.roundedBorder)
+
+                if showPasswordMismatchError {
+                    Text("Passwords do not match")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+
+                Divider()
+
+                Toggle(isOn: $addToWheel) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Add to wheel group")
+                            .font(.body)
+                        Text("Grants sudo/administrative privileges")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .padding()
+
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "info.circle")
+                    .foregroundColor(.blue)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("User will be created with settings from adduser.conf")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                    Text("Home directory will be created automatically in \(viewModel.setupState.userConfig?.homePrefix ?? "/Local/Users")")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.blue.opacity(0.1))
+            )
+            .padding(.horizontal)
+
+            HStack {
+                Button("Cancel") {
+                    isPresented = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button("Create User") {
+                    if password != confirmPassword {
+                        showPasswordMismatchError = true
+                        return
+                    }
+
+                    Task {
+                        await viewModel.createUser(username: username, fullName: fullName, password: password, addToWheel: addToWheel)
+                        isPresented = false
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(username.isEmpty || password.isEmpty || confirmPassword.isEmpty || viewModel.isLoading)
+            }
+        }
+        .padding()
+        .frame(width: 450)
+    }
+}
+
+struct NetworkUserManagementPhase: View {
+    @ObservedObject var viewModel: GershwinSetupViewModel
+    @State private var showCreateUserSheet = false
+    @State private var showDeleteConfirmation = false
+    @State private var userToDelete: LocalUser?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Manage network user accounts (NIS):")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                Spacer()
+
+                Button(action: {
+                    Task {
+                        await viewModel.loadNetworkUsers()
+                    }
+                }) {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .disabled(viewModel.isLoading)
+            }
+
+            if viewModel.setupState.networkUsers.isEmpty {
+                VStack(spacing: 8) {
+                    Text("No network users found")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("(Only showing users with UID 1001-59999)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding()
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+                )
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(viewModel.setupState.networkUsers) { user in
+                            NetworkUserRow(
+                                user: user,
+                                onDelete: {
+                                    userToDelete = user
+                                    showDeleteConfirmation = true
+                                }
+                            )
+                        }
+                    }
+                }
+                .frame(maxHeight: 300)
+            }
+
+            Button(action: {
+                showCreateUserSheet = true
+            }) {
+                Label("Create New Network User", systemImage: "plus.circle.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(viewModel.isLoading)
+
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "info.circle")
+                    .foregroundColor(.blue)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Network users are shared across all NIS clients")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                    Text("Home directories should be in /Network/Users for NFS access")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.blue.opacity(0.1))
+            )
+        }
+        .sheet(isPresented: $showCreateUserSheet) {
+            CreateNetworkUserSheet(viewModel: viewModel, isPresented: $showCreateUserSheet)
+        }
+        .alert("Delete Network User", isPresented: $showDeleteConfirmation) {
+            Button("Cancel", role: .cancel) {
+                userToDelete = nil
+            }
+            Button("Delete User", role: .destructive) {
+                if let user = userToDelete {
+                    Task {
+                        await viewModel.removeNetworkUser(user: user)
+                        userToDelete = nil
+                    }
+                }
+            }
+        } message: {
+            if let user = userToDelete {
+                Text("Are you sure you want to delete network user '\(user.username)'?\n\nThis will remove the user from NIS and rebuild the maps. Home directory will not be removed.")
+            }
+        }
+    }
+}
+
+struct NetworkUserRow: View {
+    let user: LocalUser
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack {
+            Image(systemName: "network")
+                .foregroundColor(.blue)
+                .font(.caption)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(user.displayName)
+                    .font(.body)
+                    .fontWeight(.medium)
+
+                HStack(spacing: 12) {
+                    HStack(spacing: 4) {
+                        Text("UID:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text("\(user.id)")
+                            .font(.system(.caption, design: .monospaced))
+                    }
+
+                    HStack(spacing: 4) {
+                        Text("Home:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(user.homeDirectory)
+                            .font(.system(.caption, design: .monospaced))
+                    }
+
+                    HStack(spacing: 4) {
+                        Text("Shell:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(user.shell)
+                            .font(.system(.caption, design: .monospaced))
+                    }
+                }
+            }
+
+            Spacer()
+
+            Button(action: onDelete) {
+                Image(systemName: "trash")
+                    .foregroundColor(.red)
+            }
+            .buttonStyle(.borderless)
+            .help("Delete network user")
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        )
+    }
+}
+
+struct CreateNetworkUserSheet: View {
+    @ObservedObject var viewModel: GershwinSetupViewModel
+    @Binding var isPresented: Bool
+
+    @State private var username = ""
+    @State private var fullName = ""
+    @State private var password = ""
+    @State private var confirmPassword = ""
+    @State private var addToWheel = false
+    @State private var showPasswordMismatchError = false
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Create New Network User")
+                .font(.title2)
+                .bold()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Username")
+                    .font(.caption)
+                TextField("Username (lowercase, no spaces)", text: $username)
+                    .textFieldStyle(.roundedBorder)
+
+                Text("Full Name")
+                    .font(.caption)
+                TextField("Full Name", text: $fullName)
+                    .textFieldStyle(.roundedBorder)
+
+                Text("Password")
+                    .font(.caption)
+                SecureField("Password", text: $password)
+                    .textFieldStyle(.roundedBorder)
+
+                Text("Confirm Password")
+                    .font(.caption)
+                SecureField("Confirm Password", text: $confirmPassword)
+                    .textFieldStyle(.roundedBorder)
+
+                if showPasswordMismatchError {
+                    Text("Passwords do not match")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+
+                Divider()
+
+                Toggle(isOn: $addToWheel) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Add to wheel group")
+                            .font(.body)
+                        Text("Grants sudo/administrative privileges")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .padding()
+
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "info.circle")
+                    .foregroundColor(.blue)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Network user will be added to NIS database")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                    Text("Home directory will be created in /Network/Users and NIS maps will be rebuilt.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.blue.opacity(0.1))
+            )
+            .padding(.horizontal)
+
+            HStack {
+                Button("Cancel") {
+                    isPresented = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button("Create Network User") {
+                    if password != confirmPassword {
+                        showPasswordMismatchError = true
+                        return
+                    }
+
+                    Task {
+                        await viewModel.createNetworkUser(username: username, fullName: fullName, password: password, addToWheel: addToWheel)
+                        isPresented = false
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(username.isEmpty || password.isEmpty || confirmPassword.isEmpty || viewModel.isLoading)
+            }
+        }
+        .padding()
+        .frame(width: 450)
     }
 }
 

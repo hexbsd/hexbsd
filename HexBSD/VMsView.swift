@@ -16,6 +16,38 @@ struct VMBhyveInfo: Equatable {
     let vmDir: String
 }
 
+struct VirtualSwitch: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let type: String
+    let interface: String?
+    let address: String?
+
+    init(name: String, type: String, interface: String? = nil, address: String? = nil) {
+        self.id = name
+        self.name = name
+        self.type = type
+        self.interface = interface
+        self.address = address
+    }
+}
+
+struct VMNetworkInterface: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let description: String
+    let isUp: Bool
+    let hasIPv4: Bool
+
+    init(name: String, description: String = "", isUp: Bool = false, hasIPv4: Bool = false) {
+        self.id = name
+        self.name = name
+        self.description = description
+        self.isUp = isUp
+        self.hasIPv4 = hasIPv4
+    }
+}
+
 struct VirtualMachine: Identifiable, Hashable {
     var id: String { name } // Use VM name as ID (unique in vm-bhyve)
     let name: String
@@ -96,6 +128,7 @@ struct VMsContentView: View {
     @State private var showVMInfo = false
     @State private var showSnapshot = false
     @State private var embeddedVNCVM: VirtualMachine?
+    @State private var showNetworkSwitches = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -203,6 +236,15 @@ struct VMsContentView: View {
                             Label("New VM", systemImage: "plus.circle.fill")
                         }
                         .buttonStyle(.borderedProminent)
+                        .disabled(!viewModel.isInstalled || !viewModel.serviceEnabled)
+
+                        // Network switches button
+                        Button(action: {
+                            showNetworkSwitches = true
+                        }) {
+                            Label("Network Switches", systemImage: "network")
+                        }
+                        .buttonStyle(.bordered)
                         .disabled(!viewModel.isInstalled || !viewModel.serviceEnabled)
 
                         if let vm = selectedVM {
@@ -557,6 +599,9 @@ struct VMsContentView: View {
             if let vm = selectedVM, let console = vm.console {
                 VMConsoleSheet(vmName: vm.name, consolePath: console)
             }
+        }
+        .sheet(isPresented: $showNetworkSwitches) {
+            NetworkSwitchesSheet(viewModel: viewModel)
         }
         .onAppear {
             Task {
@@ -984,6 +1029,99 @@ class VMsViewModel: ObservableObject {
             return nil
         }
     }
+
+    func listNetworkInterfaces() async -> [VMNetworkInterface] {
+        do {
+            let output = try await sshManager.executeCommand("ifconfig -l")
+            let interfaceNames = output.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+
+            var interfaces: [VMNetworkInterface] = []
+            for name in interfaceNames {
+                let ifName = String(name)
+                // Get detailed info for each interface
+                let detailOutput = try await sshManager.executeCommand("ifconfig \(ifName)")
+                let isUp = detailOutput.contains("status: active") || detailOutput.contains("UP")
+                let hasIPv4 = detailOutput.contains("inet ")
+
+                // Skip loopback
+                guard ifName != "lo0" else { continue }
+
+                interfaces.append(VMNetworkInterface(
+                    name: ifName,
+                    description: ifName,
+                    isUp: isUp,
+                    hasIPv4: hasIPv4
+                ))
+            }
+
+            return interfaces.sorted { $0.name < $1.name }
+        } catch {
+            self.error = "Failed to list network interfaces: \(error.localizedDescription)"
+            return []
+        }
+    }
+
+    func listVirtualSwitches() async -> [VirtualSwitch] {
+        do {
+            let output = try await sshManager.listVirtualSwitches()
+            return parseVirtualSwitches(output)
+        } catch {
+            self.error = "Failed to list virtual switches: \(error.localizedDescription)"
+            return []
+        }
+    }
+
+    private func parseVirtualSwitches(_ output: String) -> [VirtualSwitch] {
+        var switches: [VirtualSwitch] = []
+        let lines = output.split(separator: "\n")
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+
+            // Parse vm switch list output
+            // Format: NAME TYPE IFACE ADDRESS
+            let parts = trimmed.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
+            guard parts.count >= 2 else { continue }
+
+            let name = String(parts[0])
+            let type = String(parts[1])
+            let interface = parts.count > 2 ? String(parts[2]) : nil
+            let address = parts.count > 3 ? String(parts[3]) : nil
+
+            // Skip header line
+            guard name.lowercased() != "name" else { continue }
+
+            switches.append(VirtualSwitch(
+                name: name,
+                type: type,
+                interface: interface != "-" ? interface : nil,
+                address: address != "-" ? address : nil
+            ))
+        }
+
+        return switches
+    }
+
+    func createVirtualSwitch(name: String, type: String, interface: String?) async {
+        error = nil
+
+        do {
+            try await sshManager.createVirtualSwitch(name: name, type: type, interface: interface)
+        } catch {
+            self.error = "Failed to create virtual switch: \(error.localizedDescription)"
+        }
+    }
+
+    func destroyVirtualSwitch(name: String) async {
+        error = nil
+
+        do {
+            try await sshManager.destroyVirtualSwitch(name: name)
+        } catch {
+            self.error = "Failed to destroy virtual switch: \(error.localizedDescription)"
+        }
+    }
 }
 
 // MARK: - VM Info Sheet
@@ -1240,5 +1378,350 @@ struct VMSnapshotSheet: View {
         }
 
         isCreating = false
+    }
+}
+
+// MARK: - Network Switches Sheet
+
+struct NetworkSwitchesSheet: View {
+    let viewModel: VMsViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var switches: [VirtualSwitch] = []
+    @State private var isLoading = false
+    @State private var showCreateSwitch = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                VStack(alignment: .leading) {
+                    Text("Network Switches")
+                        .font(.title2)
+                        .bold()
+                    Text("Manage virtual network switches for VMs")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                Button("Close") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+            .padding()
+
+            Divider()
+
+            // Toolbar
+            HStack {
+                Button(action: {
+                    Task {
+                        await loadSwitches()
+                    }
+                }) {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                .disabled(isLoading)
+
+                Spacer()
+
+                Button(action: {
+                    showCreateSwitch = true
+                }) {
+                    Label("Create Switch", systemImage: "plus.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isLoading)
+            }
+            .padding()
+
+            Divider()
+
+            // Switches list
+            if isLoading {
+                VStack(spacing: 20) {
+                    ProgressView()
+                        .scaleEffect(1.5)
+                    Text("Loading network switches...")
+                        .font(.headline)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if switches.isEmpty {
+                VStack(spacing: 20) {
+                    Image(systemName: "network")
+                        .font(.system(size: 72))
+                        .foregroundColor(.secondary)
+                    Text("No Virtual Switches")
+                        .font(.title2)
+                        .foregroundColor(.secondary)
+                    Text("Create a virtual switch to enable VM networking")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List {
+                    ForEach(switches) { switch_ in
+                        VirtualSwitchRow(switch_: switch_, onDelete: {
+                            Task {
+                                await deleteSwitch(switch_)
+                            }
+                        })
+                    }
+                }
+                .listStyle(.inset)
+            }
+        }
+        .frame(width: 700, height: 500)
+        .sheet(isPresented: $showCreateSwitch) {
+            CreateSwitchSheet(viewModel: viewModel) {
+                Task {
+                    await loadSwitches()
+                }
+            }
+        }
+        .onAppear {
+            Task {
+                await loadSwitches()
+            }
+        }
+    }
+
+    private func loadSwitches() async {
+        isLoading = true
+        switches = await viewModel.listVirtualSwitches()
+        isLoading = false
+    }
+
+    private func deleteSwitch(_ switch_: VirtualSwitch) async {
+        // Confirm deletion
+        let alert = NSAlert()
+        alert.messageText = "Delete Virtual Switch?"
+        alert.informativeText = "Are you sure you want to delete the switch '\(switch_.name)'? VMs using this switch may lose network connectivity."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+
+        await viewModel.destroyVirtualSwitch(name: switch_.name)
+        await loadSwitches()
+    }
+}
+
+struct VirtualSwitchRow: View {
+    let switch_: VirtualSwitch
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "network")
+                .font(.title2)
+                .foregroundColor(.blue)
+                .frame(width: 30)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(switch_.name)
+                    .font(.headline)
+
+                HStack(spacing: 12) {
+                    Label(switch_.type, systemImage: "")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    if let interface = switch_.interface {
+                        Label(interface, systemImage: "cable.connector")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    if let address = switch_.address {
+                        Label(address, systemImage: "number")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+
+            Spacer()
+
+            Button(action: onDelete) {
+                Image(systemName: "trash")
+                    .foregroundColor(.red)
+            }
+            .buttonStyle(.borderless)
+            .help("Delete switch")
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+struct CreateSwitchSheet: View {
+    let viewModel: VMsViewModel
+    let onCreated: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var switchName = ""
+    @State private var selectedInterface: VMNetworkInterface?
+    @State private var interfaces: [VMNetworkInterface] = []
+    @State private var isLoading = false
+    @State private var isCreating = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                VStack(alignment: .leading) {
+                    Text("Create Virtual Switch")
+                        .font(.title2)
+                        .bold()
+                    Text("Create a new virtual network switch")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                Button("Cancel") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+            .padding()
+
+            Divider()
+
+            // Form
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // Switch name
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Switch Name")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        TextField("Switch name (e.g., public, private)", text: $switchName)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    // Network adapter selection
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Network Adapter (Optional)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        if isLoading {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                        } else if interfaces.isEmpty {
+                            Text("No network interfaces found")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        } else {
+                            Picker("Adapter", selection: $selectedInterface) {
+                                Text("None").tag(nil as VMNetworkInterface?)
+                                ForEach(interfaces) { interface in
+                                    HStack {
+                                        Text(interface.name)
+                                        if interface.isUp {
+                                            Image(systemName: "checkmark.circle.fill")
+                                                .foregroundColor(.green)
+                                        }
+                                        if interface.hasIPv4 {
+                                            Text("(IPv4)")
+                                                .font(.caption2)
+                                        }
+                                    }
+                                    .tag(interface as VMNetworkInterface?)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                        }
+
+                        Text("Select a physical network adapter to bridge to this switch")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+
+                    // Info box
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "info.circle")
+                            .foregroundColor(.blue)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Network Switch Configuration")
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                            Text("Virtual switches allow VMs to communicate with each other and optionally with external networks through a bridged physical adapter.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.blue.opacity(0.1))
+                    )
+                }
+                .padding()
+            }
+
+            Divider()
+
+            // Footer
+            HStack {
+                Spacer()
+
+                if isCreating {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                        .padding(.trailing, 8)
+                }
+
+                Button("Create") {
+                    Task {
+                        await createSwitch()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(switchName.isEmpty || isCreating)
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding()
+        }
+        .frame(width: 500, height: 550)
+        .onAppear {
+            Task {
+                await loadInterfaces()
+            }
+        }
+    }
+
+    private func loadInterfaces() async {
+        isLoading = true
+        interfaces = await viewModel.listNetworkInterfaces()
+        isLoading = false
+    }
+
+    private func createSwitch() async {
+        isCreating = true
+
+        await viewModel.createVirtualSwitch(
+            name: switchName,
+            type: "standard",
+            interface: selectedInterface?.name
+        )
+
+        isCreating = false
+
+        if viewModel.error == nil {
+            onCreated()
+            dismiss()
+        }
     }
 }
