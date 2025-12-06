@@ -1233,26 +1233,16 @@ struct SystemSetupTab: View {
                     )
                 }
 
-                // Phase 1: ZFS Datasets
+                // Local Domain (ZFS Datasets + User Configuration)
                 SetupPhaseCard(
-                    title: "ZFS Datasets",
-                    icon: "cylinder.split.1x2",
-                    status: viewModel.setupState.zfsDatasets.allSatisfy({ $0.status == .configured }) ? .configured :
-                            viewModel.setupState.zfsDatasets.isEmpty ? .pending : .partiallyConfigured
+                    title: "Local Domain",
+                    icon: "internaldrive",
+                    status: localDomainStatus(viewModel: viewModel)
                 ) {
-                    ZFSDatasetsPhase(viewModel: viewModel)
+                    LocalDomainPhase(viewModel: viewModel)
                 }
 
-                // Phase 2: User Configuration
-                SetupPhaseCard(
-                    title: "User Configuration",
-                    icon: "person.circle",
-                    status: viewModel.setupState.userConfig?.status ?? .pending
-                ) {
-                    UserConfigPhase(viewModel: viewModel)
-                }
-
-                // Phase 3: Network Domain
+                // Network Domain
                 SetupPhaseCard(
                     title: "Network Domain",
                     icon: "network",
@@ -1271,6 +1261,199 @@ struct SystemSetupTab: View {
                 // Update network role from server to reflect actual configuration
                 await viewModel.loadSetupState(updateNetworkRole: true)
             }
+        }
+    }
+
+    private func localDomainStatus(viewModel: GershwinSetupViewModel) -> SetupStatus {
+        let zfsConfigured = viewModel.setupState.zfsDatasets.allSatisfy { $0.status == .configured }
+        let userConfigured = viewModel.setupState.userConfig?.status == .configured
+
+        if zfsConfigured && userConfigured {
+            return .configured
+        } else if viewModel.setupState.zfsDatasets.isEmpty && viewModel.setupState.userConfig == nil {
+            return .pending
+        } else {
+            return .partiallyConfigured
+        }
+    }
+}
+
+// MARK: - Local Domain Phase (Combined ZFS + User Config)
+
+struct LocalDomainPhase: View {
+    @ObservedObject var viewModel: GershwinSetupViewModel
+    @State private var packagesExpanded = false
+    @State private var userConfigExpanded = false
+
+    private var packagesConfigured: Bool {
+        guard let config = viewModel.setupState.userConfig else { return false }
+        return config.zshInstalled && config.zshAutosuggestionsInstalled &&
+               config.zshCompletionsInstalled
+    }
+
+    private var userConfigConfigured: Bool {
+        guard let config = viewModel.setupState.userConfig else { return false }
+        let zfsConfigured = viewModel.setupState.zfsDatasets.allSatisfy { $0.status == .configured }
+        return zfsConfigured && config.isConfigured && config.zshrcConfigured
+    }
+
+    private var allConfigured: Bool {
+        packagesConfigured && userConfigConfigured
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Required Packages Section
+            ExpandableConfigSection(
+                title: "Required Packages",
+                isConfigured: packagesConfigured,
+                isExpanded: $packagesExpanded
+            ) {
+                if let config = viewModel.setupState.userConfig {
+                    ConfigDetailRow(label: "zsh", isConfigured: config.zshInstalled)
+                    ConfigDetailRow(label: "zsh-autosuggestions", isConfigured: config.zshAutosuggestionsInstalled)
+                    ConfigDetailRow(label: "zsh-completions", isConfigured: config.zshCompletionsInstalled)
+                }
+            }
+
+            // User Configuration Section
+            ExpandableConfigSection(
+                title: "User Configuration",
+                isConfigured: userConfigConfigured,
+                isExpanded: $userConfigExpanded
+            ) {
+                // ZFS Datasets
+                Text("ZFS Datasets")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .padding(.top, 4)
+
+                ForEach(viewModel.setupState.zfsDatasets, id: \.name) { dataset in
+                    ConfigDetailRow(
+                        label: dataset.name,
+                        isConfigured: dataset.status == .configured,
+                        detail: dataset.exists ? (dataset.correctLocation ? nil : "Wrong location") : "Missing"
+                    )
+                }
+
+                // User templates
+                if let config = viewModel.setupState.userConfig {
+                    Text("User Templates")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .padding(.top, 8)
+
+                    ConfigDetailRow(label: ".zshrc", isConfigured: config.zshrcConfigured)
+                }
+
+                // adduser.conf settings
+                if let config = viewModel.setupState.userConfig {
+                    Text("adduser.conf")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .padding(.top, 8)
+
+                    ConfigDetailRow(
+                        label: "Home prefix",
+                        isConfigured: config.homePrefix == "/Local/Users",
+                        detail: config.homePrefix.isEmpty ? nil : config.homePrefix
+                    )
+                    ConfigDetailRow(
+                        label: "Default shell",
+                        isConfigured: config.defaultShell == "/usr/local/bin/zsh",
+                        detail: config.defaultShell.isEmpty ? nil : config.defaultShell
+                    )
+                    ConfigDetailRow(
+                        label: "UID start",
+                        isConfigured: config.uidStart == "1001",
+                        detail: config.uidStart.isEmpty ? nil : config.uidStart
+                    )
+                }
+            }
+
+            // Configure button - only show if not fully configured
+            if !allConfigured {
+                Divider()
+
+                Button(action: {
+                    Task {
+                        await viewModel.setupUserConfig()
+                    }
+                }) {
+                    Label("Configure Local Domain", systemImage: "gear")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.isLoading)
+            }
+        }
+        .sheet(isPresented: $viewModel.isConfiguringUser) {
+            UserConfigProgressSheet(step: viewModel.userConfigStep)
+        }
+    }
+}
+
+struct ExpandableConfigSection<Content: View>: View {
+    let title: String
+    let isConfigured: Bool
+    @Binding var isExpanded: Bool
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button(action: { isExpanded.toggle() }) {
+                HStack {
+                    Image(systemName: isConfigured ? "checkmark.circle.fill" : "circle")
+                        .foregroundColor(isConfigured ? .green : .secondary)
+                    Text(title)
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundColor(.primary)
+                    Spacer()
+                    if isConfigured {
+                        Text("Configured")
+                            .font(.caption)
+                            .foregroundColor(.green)
+                    } else {
+                        Text("Not configured")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 4) {
+                    content
+                }
+                .padding(.leading, 24)
+            }
+        }
+    }
+}
+
+struct ConfigDetailRow: View {
+    let label: String
+    let isConfigured: Bool
+    var detail: String? = nil
+
+    var body: some View {
+        HStack {
+            Image(systemName: isConfigured ? "checkmark.circle.fill" : "xmark.circle")
+                .foregroundColor(isConfigured ? .green : .secondary)
+                .font(.caption)
+            Text(label)
+                .font(.caption)
+            if let detail = detail {
+                Text("(\(detail))")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
         }
     }
 }
@@ -1431,175 +1614,6 @@ struct SetupPhaseCard<Content: View>: View {
     }
 }
 
-struct ZFSDatasetsPhase: View {
-    @ObservedObject var viewModel: GershwinSetupViewModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Gershwin requires three ZFS datasets with specific mountpoints:")
-                .font(.caption)
-                .foregroundColor(.secondary)
-
-            if let bootEnv = viewModel.setupState.bootEnvironment {
-                Text("Boot Environment: \(bootEnv)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            VStack(alignment: .leading, spacing: 12) {
-                ForEach(viewModel.setupState.zfsDatasets, id: \.name) { dataset in
-                    DatasetRow(dataset: dataset)
-                }
-            }
-
-            Button(action: {
-                Task {
-                    await viewModel.setupZFSDatasets()
-                }
-            }) {
-                Label("Create Missing Datasets", systemImage: "plus.circle.fill")
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(viewModel.isLoading || viewModel.setupState.zfsDatasets.allSatisfy { $0.status == .configured })
-
-            // Info about /Network dataset - only show if role is selected
-            if viewModel.selectedNetworkRole == .server {
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: "info.circle")
-                        .foregroundColor(.blue)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Note: The /Network dataset is for servers only.")
-                            .font(.caption)
-                            .fontWeight(.semibold)
-                        Text("This dataset will be used to share applications and user data with client machines via NFS.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .padding(8)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.blue.opacity(0.1))
-                )
-            } else if viewModel.selectedNetworkRole == .client {
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: "info.circle")
-                        .foregroundColor(.blue)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Note: /Network dataset is not created for client machines.")
-                            .font(.caption)
-                            .fontWeight(.semibold)
-                        Text("Client machines will mount /Network from the server via NFS after configuring the Network Domain.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .padding(8)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.blue.opacity(0.1))
-                )
-            }
-        }
-    }
-}
-
-struct DatasetRow: View {
-    let dataset: ZFSDatasetStatus
-
-    var body: some View {
-        HStack {
-            Image(systemName: dataset.status.icon)
-                .foregroundColor(dataset.status.color)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(dataset.name)
-                    .font(.system(.body, design: .monospaced))
-                Text(dataset.path)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            Spacer()
-
-            if dataset.exists {
-                if dataset.correctLocation {
-                    Text("Configured")
-                        .font(.caption)
-                        .foregroundColor(.green)
-                } else {
-                    Text("Wrong Location")
-                        .font(.caption)
-                        .foregroundColor(.orange)
-                }
-            } else {
-                Text("Missing")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-struct UserConfigPhase: View {
-    @ObservedObject var viewModel: GershwinSetupViewModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Configure user account settings with zsh and Gershwin defaults:")
-                .font(.caption)
-                .foregroundColor(.secondary)
-
-            if let config = viewModel.setupState.userConfig {
-                // Prerequisites section
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Prerequisites:")
-                        .font(.caption)
-                        .fontWeight(.semibold)
-
-                    PackageRow(label: "zsh", installed: config.zshInstalled)
-                    PackageRow(label: "zsh-autosuggestions", installed: config.zshAutosuggestionsInstalled)
-                    PackageRow(label: "zsh-completions", installed: config.zshCompletionsInstalled)
-                    PackageRow(label: ".zshrc config", installed: config.zshrcConfigured)
-                }
-                .padding(8)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.5))
-                )
-
-                // Configuration section
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("adduser.conf Settings:")
-                        .font(.caption)
-                        .fontWeight(.semibold)
-
-                    ConfigRow(label: "Home Prefix", value: config.homePrefix, expected: "/Local/Users")
-                    ConfigRow(label: "Default Shell", value: config.defaultShell, expected: "/usr/local/bin/zsh")
-                    ConfigRow(label: "UID Start", value: config.uidStart, expected: "1001")
-                }
-            }
-
-            Button(action: {
-                Task {
-                    await viewModel.setupUserConfig()
-                }
-            }) {
-                if let config = viewModel.setupState.userConfig, !config.hasAllPrerequisites {
-                    Label("Install Packages & Configure", systemImage: "arrow.down.circle.fill")
-                } else {
-                    Label(viewModel.setupState.userConfig?.status == .configured ? "Reconfigure" : "Configure User Settings", systemImage: "gear")
-                }
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(viewModel.isLoading)
-        }
-        .sheet(isPresented: $viewModel.isConfiguringUser) {
-            UserConfigProgressSheet(step: viewModel.userConfigStep)
-        }
-    }
-}
 
 struct UserConfigProgressSheet: View {
     let step: String
@@ -1627,59 +1641,6 @@ struct UserConfigProgressSheet: View {
         .padding(40)
         .frame(minWidth: 350)
         .interactiveDismissDisabled()
-    }
-}
-
-struct PackageRow: View {
-    let label: String
-    let installed: Bool
-
-    var body: some View {
-        HStack {
-            Image(systemName: installed ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .foregroundColor(installed ? .green : .red)
-                .font(.caption)
-
-            Text(label)
-                .font(.caption)
-
-            Spacer()
-
-            Text(installed ? "Installed" : "Missing")
-                .font(.caption)
-                .foregroundColor(installed ? .green : .red)
-        }
-    }
-}
-
-struct ConfigRow: View {
-    let label: String
-    let value: String
-    let expected: String
-
-    var isCorrect: Bool {
-        value == expected
-    }
-
-    var body: some View {
-        HStack {
-            Text(label)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .frame(width: 100, alignment: .leading)
-
-            Text(value.isEmpty ? "(not set)" : value)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundColor(isCorrect ? .green : (value.isEmpty ? .secondary : .orange))
-
-            Spacer()
-
-            if !value.isEmpty {
-                Image(systemName: isCorrect ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                    .foregroundColor(isCorrect ? .green : .orange)
-                    .font(.caption)
-            }
-        }
     }
 }
 
