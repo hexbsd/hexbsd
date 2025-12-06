@@ -1241,6 +1241,16 @@ struct UserManagementTab: View {
             }
             .padding()
         }
+        .onAppear {
+            // Auto-load users when navigating to User Management tab
+            Task {
+                if viewModel.selectedNetworkRole == .none {
+                    await viewModel.loadLocalUsers()
+                } else if viewModel.selectedNetworkRole == .server {
+                    await viewModel.loadNetworkUsers()
+                }
+            }
+        }
     }
 }
 
@@ -1629,24 +1639,9 @@ struct UserManagementPhase: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("Manage local user accounts:")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                Spacer()
-
-                Button(action: {
-                    Task {
-                        await viewModel.loadLocalUsers()
-                    }
-                }) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .disabled(viewModel.isLoading)
-            }
+            Text("Manage local user accounts:")
+                .font(.caption)
+                .foregroundColor(.secondary)
 
             if viewModel.setupState.localUsers.isEmpty {
                 VStack(spacing: 8) {
@@ -1886,24 +1881,9 @@ struct NetworkUserManagementPhase: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("Manage network user accounts (NIS):")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                Spacer()
-
-                Button(action: {
-                    Task {
-                        await viewModel.loadNetworkUsers()
-                    }
-                }) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .disabled(viewModel.isLoading)
-            }
+            Text("Manage network user accounts (NIS):")
+                .font(.caption)
+                .foregroundColor(.secondary)
 
             if viewModel.setupState.networkUsers.isEmpty {
                 VStack(spacing: 8) {

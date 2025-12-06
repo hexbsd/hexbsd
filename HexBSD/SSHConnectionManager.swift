@@ -2851,7 +2851,7 @@ extension SSHConnectionManager {
         let checkOutput = try await executeCommand(checkCommand)
 
         if checkOutput.trimmingCharacters(in: .whitespacesAndNewlines) != "installed" {
-            return VMBhyveInfo(isInstalled: false, serviceEnabled: false, vmDir: "", templatesInstalled: false)
+            return VMBhyveInfo(isInstalled: false, serviceEnabled: false, vmDir: "", templatesInstalled: false, firmwareInstalled: false)
         }
 
         // Check if service is enabled in rc.conf
@@ -2869,11 +2869,17 @@ extension SSHConnectionManager {
         let templatesCount = try await executeCommand(templatesCheckCommand)
         let templatesInstalled = (Int(templatesCount.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) > 1
 
+        // Check if bhyve-firmware is installed (required for UEFI support)
+        let firmwareCheckCommand = "test -f /usr/local/share/uefi-firmware/BHYVE_UEFI.fd && echo 'installed' || echo 'not-installed'"
+        let firmwareOutput = try await executeCommand(firmwareCheckCommand)
+        let firmwareInstalled = firmwareOutput.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
+
         return VMBhyveInfo(
             isInstalled: true,
             serviceEnabled: serviceEnabled,
             vmDir: vmDir.trimmingCharacters(in: .whitespacesAndNewlines),
-            templatesInstalled: templatesInstalled
+            templatesInstalled: templatesInstalled,
+            firmwareInstalled: firmwareInstalled
         )
     }
 

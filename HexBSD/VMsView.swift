@@ -21,6 +21,7 @@ struct VMBhyveInfo: Equatable {
     let serviceEnabled: Bool
     let vmDir: String
     let templatesInstalled: Bool
+    let firmwareInstalled: Bool
 }
 
 struct VirtualSwitch: Identifiable, Hashable {
@@ -194,78 +195,36 @@ struct VMsContentView: View {
                 VStack(spacing: 0) {
                     // Toolbar
                     HStack {
-                        if viewModel.isInstalled {
-                            HStack(spacing: 4) {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundColor(.green)
-                                Text("vm-bhyve installed")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-
-                            if viewModel.serviceEnabled {
-                                Text("•")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                HStack(spacing: 4) {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundColor(.green)
-                                    Text("Service enabled")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            } else {
-                                Text("•")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                HStack(spacing: 4) {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .foregroundColor(.orange)
-                                    Text("Service not enabled")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-
-                            if viewModel.templatesInstalled {
-                                Text("•")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                HStack(spacing: 4) {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundColor(.green)
-                                    Text("Templates installed")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            } else {
-                                Text("•")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                HStack(spacing: 4) {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .foregroundColor(.orange)
-                                    Text("Templates missing")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-
-                            if !viewModel.vmDir.isEmpty {
-                                Text("•")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                Text("VM Dir: \(viewModel.vmDir)")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                        } else {
+                        // Only show status indicators if there are issues
+                        if !viewModel.isInstalled {
                             HStack(spacing: 4) {
                                 Image(systemName: "xmark.circle.fill")
                                     .foregroundColor(.red)
                                 Text("vm-bhyve not found")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        } else if !viewModel.serviceEnabled {
+                            HStack(spacing: 4) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.orange)
+                                Text("Service not enabled")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        } else if !viewModel.templatesInstalled {
+                            HStack(spacing: 4) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.orange)
+                                Text("Templates missing")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        } else if !viewModel.firmwareInstalled {
+                            HStack(spacing: 4) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.orange)
+                                Text("UEFI firmware missing")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -280,7 +239,7 @@ struct VMsContentView: View {
                             Label("New VM", systemImage: "plus.circle.fill")
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(!viewModel.isInstalled || !viewModel.serviceEnabled || !viewModel.templatesInstalled)
+                        .disabled(!viewModel.isInstalled || !viewModel.serviceEnabled || !viewModel.templatesInstalled || !viewModel.firmwareInstalled)
 
                         // Network switches button
                         Button(action: {
@@ -340,6 +299,18 @@ struct VMsContentView: View {
                                 Label("Snapshot", systemImage: "camera")
                             }
                             .buttonStyle(.bordered)
+
+                            // Delete button (only enabled when VM is stopped)
+                            Button(action: {
+                                Task {
+                                    await viewModel.deleteVM(name: vm.name)
+                                }
+                            }) {
+                                Label("Delete", systemImage: "trash")
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.red)
+                            .disabled(vm.state != .stopped)
 
                             Divider()
                                 .frame(height: 20)
@@ -423,11 +394,11 @@ struct VMsContentView: View {
                             Text("vm-bhyve Not Installed")
                                 .font(.title)
                                 .foregroundColor(.secondary)
-                            Text("Install vm-bhyve to manage virtual machines")
+                            Text("Install vm-bhyve and bhyve-firmware to manage virtual machines")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                             HStack {
-                                Text("pkg install vm-bhyve")
+                                Text("pkg install vm-bhyve bhyve-firmware")
                                     .font(.system(.caption, design: .monospaced))
                                     .foregroundColor(.blue)
                                     .textSelection(.enabled)
@@ -436,7 +407,7 @@ struct VMsContentView: View {
                                     .cornerRadius(6)
                                 Button(action: {
                                     NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString("pkg install vm-bhyve", forType: .string)
+                                    NSPasteboard.general.setString("pkg install vm-bhyve bhyve-firmware", forType: .string)
                                 }) {
                                     Image(systemName: "doc.on.doc")
                                 }
@@ -620,6 +591,29 @@ struct VMsContentView: View {
                                         .buttonStyle(.borderless)
                                         .help("Copy to clipboard")
                                     }
+
+                                    Text("6. Install UEFI firmware (required for modern VMs):")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .padding(.top, 4)
+                                    HStack {
+                                        Text("pkg install bhyve-firmware")
+                                            .font(.system(.caption, design: .monospaced))
+                                            .foregroundColor(.blue)
+                                            .textSelection(.enabled)
+                                            .padding(8)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .background(Color(nsColor: .controlBackgroundColor))
+                                            .cornerRadius(6)
+                                        Button(action: {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString("pkg install bhyve-firmware", forType: .string)
+                                        }) {
+                                            Image(systemName: "doc.on.doc")
+                                        }
+                                        .buttonStyle(.borderless)
+                                        .help("Copy to clipboard")
+                                    }
                                 }
                             }
                             .padding(.horizontal, 40)
@@ -668,6 +662,61 @@ struct VMsContentView: View {
                                         .buttonStyle(.borderless)
                                         .help("Copy to clipboard")
                                     }
+
+                                    Text("Then refresh this page to continue.")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .padding(.top, 4)
+                                }
+                            }
+                            .padding(.horizontal, 40)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if !viewModel.firmwareInstalled {
+                        VStack(spacing: 20) {
+                            Image(systemName: "cpu")
+                                .font(.system(size: 72))
+                                .foregroundColor(.orange)
+                            Text("UEFI Firmware Not Installed")
+                                .font(.title)
+                                .foregroundColor(.secondary)
+                            Text("Install bhyve-firmware package for UEFI support")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("Installation:")
+                                    .font(.headline)
+                                    .foregroundColor(.primary)
+
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("Install the bhyve-firmware package:")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+
+                                    HStack {
+                                        Text("pkg install bhyve-firmware")
+                                            .font(.system(.caption, design: .monospaced))
+                                            .foregroundColor(.blue)
+                                            .textSelection(.enabled)
+                                            .padding(8)
+                                            .background(Color(nsColor: .controlBackgroundColor))
+                                            .cornerRadius(6)
+                                        Button(action: {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString("pkg install bhyve-firmware", forType: .string)
+                                        }) {
+                                            Image(systemName: "doc.on.doc")
+                                        }
+                                        .buttonStyle(.borderless)
+                                        .help("Copy to clipboard")
+                                    }
+
+                                    Text("This package provides UEFI firmware required for modern operating systems.")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .padding(.top, 4)
 
                                     Text("Then refresh this page to continue.")
                                         .font(.caption)
@@ -1066,6 +1115,7 @@ class VMsViewModel: ObservableObject {
     @Published var serviceEnabled = false
     @Published var vmDir = ""
     @Published var templatesInstalled = false
+    @Published var firmwareInstalled = false
 
     private let sshManager = SSHConnectionManager.shared
 
@@ -1080,6 +1130,7 @@ class VMsViewModel: ObservableObject {
             serviceEnabled = info.serviceEnabled
             vmDir = info.vmDir
             templatesInstalled = info.templatesInstalled
+            firmwareInstalled = info.firmwareInstalled
 
             if isInstalled && serviceEnabled {
                 vms = try await sshManager.listVirtualMachines()
@@ -1175,6 +1226,29 @@ class VMsViewModel: ObservableObject {
             await loadVMs()
         } catch {
             self.error = "Failed to poweroff virtual machine: \(error.localizedDescription)"
+        }
+    }
+
+    func deleteVM(name: String) async {
+        // Confirm deletion
+        let alert = NSAlert()
+        alert.messageText = "Delete Virtual Machine?"
+        alert.informativeText = "This will permanently delete the VM '\(name)' and all its data. This action cannot be undone."
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+
+        error = nil
+
+        do {
+            try await sshManager.destroyVirtualMachine(name: name, force: true)
+            await loadVMs()
+        } catch {
+            self.error = "Failed to delete virtual machine: \(error.localizedDescription)"
         }
     }
 
@@ -1467,11 +1541,9 @@ struct VMCreateSheet: View {
     @State private var cpuCount: String = "2"
     @State private var memory: String = "2G"
     @State private var isCreating = false
-    @State private var installFromISO: Bool = false
     @State private var selectedISO: ISOImage?
     @State private var availableISOs: [ISOImage] = []
     @State private var isLoadingISOs = false
-    @State private var autoStartVNC: Bool = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1516,38 +1588,31 @@ struct VMCreateSheet: View {
                 }
 
                 Section("OS Installation") {
-                    Toggle("Install from ISO", isOn: $installFromISO)
-
-                    if installFromISO {
-                        if isLoadingISOs {
-                            HStack {
-                                ProgressView()
-                                    .scaleEffect(0.7)
-                                Text("Loading ISOs...")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        } else if availableISOs.isEmpty {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("No ISOs available")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                Text("Upload or download an ISO first")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            }
-                        } else {
-                            Picker("ISO Image:", selection: $selectedISO) {
-                                Text("Select ISO...").tag(nil as ISOImage?)
-                                ForEach(availableISOs) { iso in
-                                    Text(iso.name).tag(iso as ISOImage?)
-                                }
-                            }
-                            .pickerStyle(.menu)
+                    if isLoadingISOs {
+                        HStack {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                            Text("Loading ISOs...")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
                         }
-
-                        Toggle("Auto-launch VNC after creation", isOn: $autoStartVNC)
-                            .disabled(selectedISO == nil)
+                    } else if availableISOs.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("No ISOs available")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text("Upload or download an ISO first")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    } else {
+                        Picker("ISO Image:", selection: $selectedISO) {
+                            Text("Select ISO...").tag(nil as ISOImage?)
+                            ForEach(availableISOs) { iso in
+                                Text(iso.name).tag(iso as ISOImage?)
+                            }
+                        }
+                        .pickerStyle(.menu)
                     }
                 }
             }
@@ -1572,11 +1637,11 @@ struct VMCreateSheet: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(vmName.isEmpty || isCreating || (installFromISO && selectedISO == nil))
+                .disabled(vmName.isEmpty || isCreating || selectedISO == nil)
             }
             .padding()
         }
-        .frame(width: 500, height: installFromISO ? 600 : 450)
+        .frame(width: 500, height: 600)
         .onAppear {
             Task {
                 await loadISOs()
@@ -1604,25 +1669,22 @@ struct VMCreateSheet: View {
                 memory: memory
             )
 
-            // Step 2: If installing from ISO, run the install command
-            if installFromISO, let iso = selectedISO {
-                try await SSHConnectionManager.shared.installVirtualMachine(
-                    name: vmName,
-                    iso: iso.name,
-                    foreground: false
-                )
+            // Step 2: Install from ISO and auto-launch VNC
+            if let iso = selectedISO {
+                // Run vm install in background so it doesn't block the UI
+                // Use nohup and & to run the command in background on the server
+                let installCommand = "nohup vm install -f \(vmName) \(iso.name) > /dev/null 2>&1 &"
+                try await SSHConnectionManager.shared.executeCommand(installCommand)
 
                 // Wait a moment for the VM to start
-                try await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
+                try await Task.sleep(nanoseconds: 3_000_000_000) // 3 seconds
 
-                // If auto-launch VNC is enabled, post notification to launch VNC
-                if autoStartVNC {
-                    NotificationCenter.default.post(
-                        name: .launchVNCForVM,
-                        object: nil,
-                        userInfo: ["vmName": vmName]
-                    )
-                }
+                // Auto-launch VNC viewer
+                NotificationCenter.default.post(
+                    name: .launchVNCForVM,
+                    object: nil,
+                    userInfo: ["vmName": vmName]
+                )
             }
 
             await viewModel.loadVMs()
