@@ -172,6 +172,14 @@ class GershwinSetupViewModel: ObservableObject {
     @Published var confirmationMessage = ""
     @Published var confirmationAction: (() -> Void)?
 
+    // User Configuration progress tracking
+    @Published var isConfiguringUser = false
+    @Published var userConfigStep = ""
+
+    // Network Domain progress tracking
+    @Published var isConfiguringNetwork = false
+    @Published var networkConfigStep = ""
+
     private let sshManager = SSHConnectionManager.shared
 
     func loadSetupState(updateNetworkRole: Bool = true) async {
@@ -439,6 +447,7 @@ class GershwinSetupViewModel: ObservableObject {
 
     func setupUserConfig() async {
         isLoading = true
+        isConfiguringUser = true
         error = nil
 
         do {
@@ -447,23 +456,33 @@ class GershwinSetupViewModel: ObservableObject {
                 throw NSError(domain: "GershwinSetup", code: 1, userInfo: [NSLocalizedDescriptionKey: "User config status not loaded"])
             }
 
+            // Run pkg update first if any packages need to be installed
+            if !userConfig.zshInstalled || !userConfig.zshAutosuggestionsInstalled || !userConfig.zshCompletionsInstalled {
+                userConfigStep = "Updating package repository..."
+                _ = try await sshManager.executeCommand("pkg update")
+            }
+
             // Install zsh if not present
             if !userConfig.zshInstalled {
+                userConfigStep = "Installing zsh..."
                 _ = try await sshManager.executeCommand("pkg install -y zsh")
             }
 
             // Install zsh-autosuggestions if not present
             if !userConfig.zshAutosuggestionsInstalled {
+                userConfigStep = "Installing zsh-autosuggestions..."
                 _ = try await sshManager.executeCommand("pkg install -y zsh-autosuggestions")
             }
 
             // Install zsh-completions if not present
             if !userConfig.zshCompletionsInstalled {
+                userConfigStep = "Installing zsh-completions..."
                 _ = try await sshManager.executeCommand("pkg install -y zsh-completions")
             }
 
             // Create .zshrc configuration in /usr/share/skel if not present
             if !userConfig.zshrcConfigured {
+                userConfigStep = "Creating zsh configuration..."
                 let zshrcContent = """
 # Gershwin GNUstep zsh configuration
 
@@ -580,6 +599,7 @@ fi
             }
 
             // Create /etc/adduser.conf with Gershwin settings
+            userConfigStep = "Configuring adduser.conf..."
             let config = """
 defaultHomePerm=0700
 defaultLgroup=
@@ -597,6 +617,8 @@ uidstart=1001
             // Write configuration using heredoc to avoid escaping issues
             _ = try await sshManager.executeCommand("cat > /etc/adduser.conf << 'ADDUSER_EOF'\n\(config)\nADDUSER_EOF")
 
+            userConfigStep = "Refreshing status..."
+
             // Reload state
             await loadSetupState()
 
@@ -604,11 +626,14 @@ uidstart=1001
             self.error = "Failed to configure user settings: \(error.localizedDescription)"
         }
 
+        isConfiguringUser = false
+        userConfigStep = ""
         isLoading = false
     }
 
     func setupNetworkDomain() async {
         isLoading = true
+        isConfiguringNetwork = true
         error = nil
 
         do {
@@ -621,6 +646,8 @@ uidstart=1001
                 throw NSError(domain: "GershwinSetup", code: 2, userInfo: [NSLocalizedDescriptionKey: "Please select Server or Client role"])
             }
 
+            networkConfigStep = "Refreshing status..."
+
             // Reload state
             await loadSetupState()
 
@@ -628,22 +655,27 @@ uidstart=1001
             self.error = "Failed to configure network domain: \(error.localizedDescription)"
         }
 
+        isConfiguringNetwork = false
+        networkConfigStep = ""
         isLoading = false
     }
 
     private func setupNetworkServer() async throws {
         // Configure NIS server
+        networkConfigStep = "Configuring NIS server..."
         _ = try await sshManager.executeCommand("sysrc nisdomainname=\"\(nisDomainName)\"")
         _ = try await sshManager.executeCommand("sysrc nis_server_enable=\"YES\"")
         _ = try await sshManager.executeCommand("sysrc nis_yppasswdd_enable=\"YES\"")
 
         // Configure NFS server
+        networkConfigStep = "Configuring NFS server..."
         _ = try await sshManager.executeCommand("sysrc rpcbind_enable=\"YES\"")
         _ = try await sshManager.executeCommand("sysrc nfs_server_enable=\"YES\"")
         _ = try await sshManager.executeCommand("sysrc mountd_enable=\"YES\"")
         _ = try await sshManager.executeCommand("sysrc rpc_lockd_enable=\"YES\"")
 
         // Create /etc/exports if it doesn't exist
+        networkConfigStep = "Configuring /etc/exports..."
         _ = try await sshManager.executeCommand("touch /etc/exports")
 
         // Check if /Network export already exists
@@ -691,33 +723,40 @@ uidstart=1001
         }
 
         // Check if /Network is a ZFS dataset (clients should not have this)
+        networkConfigStep = "Checking for local /Network dataset..."
         let zfsCheck = try await sshManager.executeCommand("zfs list -H -o name /Network 2>/dev/null || echo 'none'")
         let networkDataset = zfsCheck.trimmingCharacters(in: .whitespacesAndNewlines)
         var removedLocalDataset = false
 
         if networkDataset != "none" && !networkDataset.isEmpty {
             // /Network is a ZFS dataset - need to unmount and destroy it for NFS client
+            networkConfigStep = "Removing local /Network dataset..."
             _ = try await sshManager.executeCommand("zfs unmount /Network 2>&1 || true")
             _ = try await sshManager.executeCommand("zfs destroy \(networkDataset) 2>&1 || true")
             removedLocalDataset = true
         }
 
         // Configure NIS client
+        networkConfigStep = "Configuring NIS client..."
         _ = try await sshManager.executeCommand("sysrc nisdomainname=\"\(nisDomainName)\"")
+        _ = try await sshManager.executeCommand("sysrc rpcbind_enable=\"YES\"")
         _ = try await sshManager.executeCommand("sysrc nis_client_enable=\"YES\"")
 
         // Configure NFS client
+        networkConfigStep = "Configuring NFS client..."
         _ = try await sshManager.executeCommand("sysrc nfs_client_enable=\"YES\"")
         _ = try await sshManager.executeCommand("sysrc rpc_lockd_enable=\"YES\"")
 
         // Update /etc/nsswitch.conf
+        // Use "files nis" order so local users (like root) always work even if NIS is down
+        networkConfigStep = "Configuring nsswitch.conf..."
         let nsswitchContent = """
-group: nis files
+group: files nis
 group_compat: nis
 hosts: files dns
 netgroup: compat
 networks: files
-passwd: nis files
+passwd: files nis
 passwd_compat: nis
 shells: files
 services: compat
@@ -729,6 +768,7 @@ rpc: files
         _ = try await sshManager.executeCommand("cat > /etc/nsswitch.conf << 'NSSWITCH_EOF'\n\(nsswitchContent)\nNSSWITCH_EOF")
 
         // Check if /Network mount already exists in /etc/fstab
+        networkConfigStep = "Configuring /etc/fstab..."
         let fstabContent = try await sshManager.executeCommand("cat /etc/fstab 2>/dev/null || echo ''")
         if !fstabContent.contains("/Network") {
             let fstabEntry = "\(nisServerAddress):/Network         /Network        nfs     rw              0       0"
@@ -739,17 +779,24 @@ rpc: files
         _ = try await sshManager.executeCommand("mkdir -p /Network")
 
         // Start NIS client service
-        _ = try await sshManager.executeCommand("/etc/netstart")
-        _ = try await sshManager.executeCommand("service ypbind start 2>&1 || true")
+        networkConfigStep = "Starting NIS client service..."
+        // Set the NIS domain name directly (faster than /etc/netstart)
+        _ = try await sshManager.executeCommand("domainname \(nisDomainName)")
+        // Start rpcbind if not running (required for NIS/NFS)
+        _ = try await sshManager.executeCommand("service rpcbind onestart 2>&1 || true")
+        _ = try await sshManager.executeCommand("service ypbind onestart 2>&1 || true")
 
         // Start NFS client services
-        _ = try await sshManager.executeCommand("service nfsclient start 2>&1 || true")
-        _ = try await sshManager.executeCommand("service lockd start 2>&1 || true")
+        networkConfigStep = "Starting NFS client services..."
+        _ = try await sshManager.executeCommand("service nfsclient onestart 2>&1 || true")
+        _ = try await sshManager.executeCommand("service lockd onestart 2>&1 || true")
 
         // Mount the network share
+        networkConfigStep = "Mounting /Network..."
         _ = try await sshManager.executeCommand("mount /Network 2>&1 || true")
 
         // Verify NIS connectivity
+        networkConfigStep = "Verifying NIS connectivity..."
         let ypcatResult = try await sshManager.executeCommand("ypcat passwd 2>&1 || echo 'NIS not responding'")
         let getentResult = try await sshManager.executeCommand("getent passwd 2>&1 | grep -v '^root:' | head -5 || echo 'No network users found'")
 
@@ -783,6 +830,89 @@ rpc: files
         You can now create network users on the server or login with existing network accounts.
         """
         showingConfirmation = true
+    }
+
+    func leaveNetworkDomain() async {
+        isLoading = true
+        isConfiguringNetwork = true
+        error = nil
+
+        do {
+            // Stop NIS client service
+            networkConfigStep = "Stopping NIS client service..."
+            _ = try await sshManager.executeCommand("service ypbind stop 2>&1 || true")
+
+            // Stop NFS client services
+            networkConfigStep = "Stopping NFS client services..."
+            _ = try await sshManager.executeCommand("service lockd stop 2>&1 || true")
+            _ = try await sshManager.executeCommand("service nfsclient stop 2>&1 || true")
+
+            // Unmount /Network
+            networkConfigStep = "Unmounting /Network..."
+            _ = try await sshManager.executeCommand("umount /Network 2>&1 || true")
+
+            // Remove /Network from /etc/fstab
+            networkConfigStep = "Removing /Network from fstab..."
+            _ = try await sshManager.executeCommand("sed -i '' '/\\/Network/d' /etc/fstab")
+
+            // Disable NIS client in rc.conf
+            networkConfigStep = "Disabling NIS client..."
+            _ = try await sshManager.executeCommand("sysrc -x nis_client_enable 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("sysrc -x nisdomainname 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("sysrc -x rpcbind_enable 2>/dev/null || true")
+
+            // Disable NFS client in rc.conf
+            networkConfigStep = "Disabling NFS client..."
+            _ = try await sshManager.executeCommand("sysrc -x nfs_client_enable 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("sysrc -x rpc_lockd_enable 2>/dev/null || true")
+
+            // Restore default nsswitch.conf
+            networkConfigStep = "Restoring nsswitch.conf..."
+            let defaultNsswitchContent = """
+group: compat
+group_compat: nis
+hosts: files dns
+netgroup: compat
+networks: files
+passwd: compat
+passwd_compat: nis
+shells: files
+services: compat
+services_compat: nis
+protocols: files
+rpc: files
+"""
+            _ = try await sshManager.executeCommand("cat > /etc/nsswitch.conf << 'NSSWITCH_EOF'\n\(defaultNsswitchContent)\nNSSWITCH_EOF")
+
+            // Remove /Network directory
+            networkConfigStep = "Removing /Network directory..."
+            _ = try await sshManager.executeCommand("rmdir /Network 2>&1 || true")
+
+            networkConfigStep = "Refreshing status..."
+
+            // Reload state
+            await loadSetupState()
+
+            confirmationMessage = """
+            Successfully left the network domain.
+
+            Configuration removed:
+            ✓ NIS client disabled
+            ✓ NFS client disabled
+            ✓ /Network unmounted and removed from fstab
+            ✓ nsswitch.conf restored to defaults
+
+            This system is now configured as a standalone machine.
+            """
+            showingConfirmation = true
+
+        } catch {
+            self.error = "Failed to leave network domain: \(error.localizedDescription)"
+        }
+
+        isConfiguringNetwork = false
+        networkConfigStep = ""
+        isLoading = false
     }
 
     // MARK: - User Management
@@ -1087,21 +1217,6 @@ struct SystemSetupTab: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                // Refresh button
-                HStack {
-                    Spacer()
-
-                    Button(action: {
-                        Task {
-                            // Don't override user's network role selection when refreshing
-                            await viewModel.loadSetupState(updateNetworkRole: false)
-                        }
-                    }) {
-                        Label("Refresh", systemImage: "arrow.clockwise")
-                    }
-                    .disabled(viewModel.isLoading)
-                }
-
                 // Error message
                 if let error = viewModel.error {
                     HStack {
@@ -1147,6 +1262,15 @@ struct SystemSetupTab: View {
                 }
             }
             .padding()
+        }
+        .onAppear {
+            // Auto-refresh setup state when navigating to System Setup tab
+            // Skip if a configuration is in progress
+            guard !viewModel.isConfiguringUser && !viewModel.isConfiguringNetwork else { return }
+            Task {
+                // Update network role from server to reflect actual configuration
+                await viewModel.loadSetupState(updateNetworkRole: true)
+            }
         }
     }
 }
@@ -1471,6 +1595,38 @@ struct UserConfigPhase: View {
             .buttonStyle(.borderedProminent)
             .disabled(viewModel.isLoading)
         }
+        .sheet(isPresented: $viewModel.isConfiguringUser) {
+            UserConfigProgressSheet(step: viewModel.userConfigStep)
+        }
+    }
+}
+
+struct UserConfigProgressSheet: View {
+    let step: String
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Configuring User Settings")
+                .font(.title2)
+                .bold()
+
+            ProgressView()
+                .scaleEffect(1.5)
+                .padding()
+
+            Text(step)
+                .font(.body)
+                .foregroundColor(.secondary)
+                .frame(minWidth: 250)
+                .multilineTextAlignment(.center)
+
+            Text("Please wait...")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding(40)
+        .frame(minWidth: 350)
+        .interactiveDismissDisabled()
     }
 }
 
@@ -1579,54 +1735,126 @@ struct NetworkDomainPhase: View {
                 }
             }
 
-            Divider()
+            // Check if already configured as server or client
+            let isConfiguredAsServer = viewModel.setupState.networkDomain?.role == .server
+            let isConfiguredAsClient = viewModel.setupState.networkDomain?.role == .client &&
+                                       viewModel.setupState.networkDomain?.nisConfigured == true
 
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Setup Role:")
-                    .font(.headline)
+            // Only show role picker and text fields when not configured
+            if !isConfiguredAsServer && !isConfiguredAsClient {
+                Divider()
 
-                Picker("Role", selection: $viewModel.selectedNetworkRole) {
-                    Text("Not Configured").tag(NetworkRole.none)
-                    Text("Server (Share users/apps)").tag(NetworkRole.server)
-                    Text("Client (Mount from server)").tag(NetworkRole.client)
-                }
-                .pickerStyle(.radioGroup)
-                .onChange(of: viewModel.selectedNetworkRole) { oldValue, newValue in
-                    // Reload setup state when role changes to update ZFS dataset list
-                    // Don't update the network role from detection since user just changed it
-                    Task {
-                        await viewModel.loadSetupState(updateNetworkRole: false)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Setup Role:")
+                        .font(.headline)
 
-                        // Reload appropriate user list based on new role
-                        if newValue == .none {
-                            await viewModel.loadLocalUsers()
-                        } else if newValue == .server {
-                            await viewModel.loadNetworkUsers()
+                    Picker("Role", selection: $viewModel.selectedNetworkRole) {
+                        Text("Not Configured").tag(NetworkRole.none)
+                        Text("Server (Share users/apps)").tag(NetworkRole.server)
+                        Text("Client (Mount from server)").tag(NetworkRole.client)
+                    }
+                    .pickerStyle(.radioGroup)
+                    .onChange(of: viewModel.selectedNetworkRole) { oldValue, newValue in
+                        // Reload setup state when role changes to update ZFS dataset list
+                        // Don't update the network role from detection since user just changed it
+                        Task {
+                            await viewModel.loadSetupState(updateNetworkRole: false)
+
+                            // Reload appropriate user list based on new role
+                            if newValue == .none {
+                                await viewModel.loadLocalUsers()
+                            } else if newValue == .server {
+                                await viewModel.loadNetworkUsers()
+                            }
                         }
                     }
-                }
 
-                if viewModel.selectedNetworkRole == .server || viewModel.selectedNetworkRole == .client {
-                    TextField("NIS Domain Name", text: $viewModel.nisDomainName)
-                        .textFieldStyle(.roundedBorder)
-                }
+                    if viewModel.selectedNetworkRole == .server || viewModel.selectedNetworkRole == .client {
+                        TextField("NIS Domain Name", text: $viewModel.nisDomainName)
+                            .textFieldStyle(.roundedBorder)
+                    }
 
-                if viewModel.selectedNetworkRole == .client {
-                    TextField("NIS Server Address (hostname or IP)", text: $viewModel.nisServerAddress)
-                        .textFieldStyle(.roundedBorder)
+                    if viewModel.selectedNetworkRole == .client {
+                        TextField("NIS Server Address (hostname or IP)", text: $viewModel.nisServerAddress)
+                            .textFieldStyle(.roundedBorder)
+                    }
                 }
             }
 
-            Button(action: {
-                Task {
-                    await viewModel.setupNetworkDomain()
+            // Show appropriate button based on role and current state
+            let isServerConfigured = viewModel.setupState.networkDomain?.role == .server
+            let isClientJoined = viewModel.setupState.networkDomain?.role == .client &&
+                                 viewModel.setupState.networkDomain?.nisConfigured == true
+
+            if viewModel.selectedNetworkRole == .server && !isServerConfigured {
+                // Server selected but not yet configured
+                Button(action: {
+                    Task {
+                        await viewModel.setupNetworkDomain()
+                    }
+                }) {
+                    Label("Configure Network Domain", systemImage: "network")
                 }
-            }) {
-                Label("Configure Network Domain", systemImage: "network")
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.isLoading)
+            } else if isClientJoined {
+                // Client is joined - show leave button
+                Button(action: {
+                    Task {
+                        await viewModel.leaveNetworkDomain()
+                    }
+                }) {
+                    Label("Leave Network Domain", systemImage: "network.slash")
+                }
+                .buttonStyle(.bordered)
+                .tint(.red)
+                .disabled(viewModel.isLoading)
+            } else if viewModel.selectedNetworkRole == .client && !isClientJoined {
+                // Client selected but not yet joined
+                Button(action: {
+                    Task {
+                        await viewModel.setupNetworkDomain()
+                    }
+                }) {
+                    Label("Join Network Domain", systemImage: "network.badge.shield.half.filled")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.isLoading || viewModel.nisServerAddress.isEmpty)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(viewModel.isLoading || viewModel.selectedNetworkRole == .none)
+            // No button shown when selectedNetworkRole == .none or server already configured
         }
+        .sheet(isPresented: $viewModel.isConfiguringNetwork) {
+            NetworkConfigProgressSheet(step: viewModel.networkConfigStep)
+        }
+    }
+}
+
+struct NetworkConfigProgressSheet: View {
+    let step: String
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Configuring Network Domain")
+                .font(.title2)
+                .bold()
+
+            ProgressView()
+                .scaleEffect(1.5)
+                .padding()
+
+            Text(step)
+                .font(.body)
+                .foregroundColor(.secondary)
+                .frame(minWidth: 250)
+                .multilineTextAlignment(.center)
+
+            Text("Please wait...")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding(40)
+        .frame(minWidth: 350)
+        .interactiveDismissDisabled()
     }
 }
 
