@@ -63,7 +63,7 @@ struct UserConfigStatus {
     let zshrcConfigured: Bool
 
     var isConfigured: Bool {
-        homePrefix == "/Local/Users" &&
+        (homePrefix == "/Local/Users" || homePrefix == "/Network/Users") &&
         defaultShell == "/usr/local/bin/zsh" &&
         uidStart == "1001" &&
         zshInstalled
@@ -280,33 +280,31 @@ class GershwinSetupViewModel: ObservableObject {
             ))
         }
 
-        // Check /Network (should be in zpool root) - only if server role is selected
-        if selectedNetworkRole == .server {
-            let networkDataset = lines.first { line in
-                let parts = line.split(separator: "\t")
-                return parts.count >= 2 && parts[1] == "/Network"
-            }
+        // Check /Network (should be in zpool root) - for all roles
+        let networkDataset = lines.first { line in
+            let parts = line.split(separator: "\t")
+            return parts.count >= 2 && parts[1] == "/Network"
+        }
 
-            if let networkLine = networkDataset {
-                let parts = networkLine.split(separator: "\t")
-                let name = String(parts[0])
-                let expectedName = "\(zpoolRoot)/Network"
-                datasets.append(ZFSDatasetStatus(
-                    name: "/Network",
-                    path: name,
-                    exists: true,
-                    correctLocation: name == expectedName,
-                    mountpoint: "/Network"
-                ))
-            } else {
-                datasets.append(ZFSDatasetStatus(
-                    name: "/Network",
-                    path: "\(zpoolRoot)/Network",
-                    exists: false,
-                    correctLocation: false,
-                    mountpoint: nil
-                ))
-            }
+        if let networkLine = networkDataset {
+            let parts = networkLine.split(separator: "\t")
+            let name = String(parts[0])
+            let expectedName = "\(zpoolRoot)/Network"
+            datasets.append(ZFSDatasetStatus(
+                name: "/Network",
+                path: name,
+                exists: true,
+                correctLocation: name == expectedName,
+                mountpoint: "/Network"
+            ))
+        } else {
+            datasets.append(ZFSDatasetStatus(
+                name: "/Network",
+                path: "\(zpoolRoot)/Network",
+                exists: false,
+                correctLocation: false,
+                mountpoint: nil
+            ))
         }
 
         return (datasets, bootEnv, zpoolRoot)
@@ -427,12 +425,10 @@ class GershwinSetupViewModel: ObservableObject {
                 _ = try await sshManager.executeCommand("zfs create -o mountpoint=/Local \(zpoolRoot)/Local")
             }
 
-            // Create /Network dataset in zpool root - only if server role is selected
-            if selectedNetworkRole == .server {
-                let networkDataset = setupState.zfsDatasets.first { $0.name == "/Network" }
-                if let network = networkDataset, !network.exists {
-                    _ = try await sshManager.executeCommand("zfs create -o mountpoint=/Network \(zpoolRoot)/Network")
-                }
+            // Create /Network dataset in zpool root for all roles
+            let networkDataset = setupState.zfsDatasets.first { $0.name == "/Network" }
+            if let network = networkDataset, !network.exists {
+                _ = try await sshManager.executeCommand("zfs create -o mountpoint=/Network \(zpoolRoot)/Network")
             }
 
             // Reload state
@@ -599,14 +595,16 @@ fi
             }
 
             // Create /etc/adduser.conf with Gershwin settings
+            // Use /Network/Users for Server/Client roles, /Local/Users for Standalone
             userConfigStep = "Configuring adduser.conf..."
+            let homePrefix = (selectedNetworkRole == .server || selectedNetworkRole == .client) ? "/Network/Users" : "/Local/Users"
             let config = """
 defaultHomePerm=0700
 defaultLgroup=
 defaultclass=
 defaultgroups=
 passwdtype=yes
-homeprefix=/Local/Users
+homeprefix=\(homePrefix)
 defaultshell=/usr/local/bin/zsh
 udotdir=/usr/share/skel
 msgfile=/etc/adduser.msg
@@ -684,35 +682,70 @@ uidstart=1001
             _ = try await sshManager.executeCommand("echo '/Network -maproot=root -alldirs' >> /etc/exports")
         }
 
+        // Set up NIS database directory
+        networkConfigStep = "Setting up NIS database..."
+        _ = try await sshManager.executeCommand("mkdir -p /var/yp")
+
+        // Create initial master.passwd for NIS with only network users (empty initially)
+        // We create a minimal file that ypinit can use
+        networkConfigStep = "Creating NIS user database..."
+        let ypmasterPasswd = try await sshManager.executeCommand("cat /var/yp/master.passwd 2>/dev/null || echo ''")
+        if ypmasterPasswd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Create empty master.passwd - users will be added via the Users tab
+            _ = try await sshManager.executeCommand("touch /var/yp/master.passwd")
+            _ = try await sshManager.executeCommand("chmod 600 /var/yp/master.passwd")
+        }
+
+        // Create /var/yp/Makefile if it doesn't exist (copy from default)
+        let makefileExists = try await sshManager.executeCommand("test -f /var/yp/Makefile && echo 'exists' || echo 'missing'")
+        if makefileExists.contains("missing") {
+            _ = try await sshManager.executeCommand("cp /var/yp/Makefile.dist /var/yp/Makefile 2>/dev/null || true")
+        }
+
+        // Set the NIS domain name
+        networkConfigStep = "Setting NIS domain..."
+        _ = try await sshManager.executeCommand("domainname \(nisDomainName)")
+
+        // Start rpcbind (required for NIS/NFS)
+        networkConfigStep = "Starting rpcbind..."
+        _ = try await sshManager.executeCommand("service rpcbind onestart 2>&1 || true")
+
+        // Initialize NIS maps
+        networkConfigStep = "Initializing NIS maps..."
+        // Use yes to auto-confirm the ypinit prompts, redirect stderr to capture any errors
+        _ = try await sshManager.executeCommand("cd /var/yp && yes '' | ypinit -m \(nisDomainName) 2>&1 || true")
+
+        // Start NIS server
+        networkConfigStep = "Starting NIS server..."
+        _ = try await sshManager.executeCommand("service ypserv start 2>&1 || true")
+        _ = try await sshManager.executeCommand("service yppasswdd start 2>&1 || true")
+
+        // Start NFS server
+        networkConfigStep = "Starting NFS server..."
+        _ = try await sshManager.executeCommand("service nfsd start 2>&1 || true")
+        _ = try await sshManager.executeCommand("service mountd start 2>&1 || true")
+        _ = try await sshManager.executeCommand("service lockd start 2>&1 || true")
+
+        // Verify services are running
+        networkConfigStep = "Verifying services..."
+        let ypservStatus = try await sshManager.executeCommand("service ypserv status 2>&1 || echo 'not running'")
+        let nfsdStatus = try await sshManager.executeCommand("service nfsd status 2>&1 || echo 'not running'")
+
         confirmationMessage = """
-        NIS/NFS server configuration files created successfully!
+        NIS/NFS server configured and started successfully!
 
-        Automatic configuration completed:
+        Configuration completed:
         ✓ NIS domain: \(nisDomainName)
-        ✓ rc.conf updated for NIS/NFS server
-        ✓ /etc/exports configured to share /Network
+        ✓ NIS server configured and started
+        ✓ NFS server configured and started
+        ✓ /Network exported for clients
 
-        Manual steps required to complete setup:
+        Service status:
+        ypserv: \(ypservStatus.contains("running") ? "running" : "check status")
+        nfsd: \(nfsdStatus.contains("running") ? "running" : "check status")
 
-        1. Create NIS user database:
-           cp /etc/master.passwd /var/yp/master.passwd
-           vi /var/yp/master.passwd
-           (Remove all users except those you want to share)
-
-        2. Initialize NIS maps:
-           cd /var/yp
-           ypinit -m \(nisDomainName)
-
-        3. Start services:
-           service ypserv restart
-           service nfsd start
-           service lockd start
-
-        4. After adding users in the future:
-           cd /var/yp
-           make \(nisDomainName)
-
-        See NETWORK.md for detailed instructions.
+        You can now add network users in the Users tab.
+        After adding users, the NIS database will be updated automatically.
         """
         showingConfirmation = true
     }
@@ -1233,22 +1266,13 @@ struct SystemSetupTab: View {
                     )
                 }
 
-                // Local Domain (ZFS Datasets + User Configuration)
+                // Domain (combined Local + Network)
                 SetupPhaseCard(
-                    title: "Local Domain",
-                    icon: "internaldrive",
-                    status: localDomainStatus(viewModel: viewModel)
+                    title: "Domain",
+                    icon: "externaldrive.connected.to.line.below",
+                    status: domainStatus(viewModel: viewModel)
                 ) {
-                    LocalDomainPhase(viewModel: viewModel)
-                }
-
-                // Network Domain
-                SetupPhaseCard(
-                    title: "Network Domain",
-                    icon: "network",
-                    status: viewModel.setupState.networkDomain?.status ?? .pending
-                ) {
-                    NetworkDomainPhase(viewModel: viewModel)
+                    DomainPhase(viewModel: viewModel)
                 }
             }
             .padding()
@@ -1264,11 +1288,25 @@ struct SystemSetupTab: View {
         }
     }
 
-    private func localDomainStatus(viewModel: GershwinSetupViewModel) -> SetupStatus {
+    private func domainStatus(viewModel: GershwinSetupViewModel) -> SetupStatus {
         let zfsConfigured = viewModel.setupState.zfsDatasets.allSatisfy { $0.status == .configured }
         let userConfigured = viewModel.setupState.userConfig?.status == .configured
+        let networkRole = viewModel.selectedNetworkRole
 
-        if zfsConfigured && userConfigured {
+        // For Standalone, check ZFS + user config
+        if networkRole == .none {
+            if zfsConfigured && userConfigured {
+                return .configured
+            } else if viewModel.setupState.zfsDatasets.isEmpty && viewModel.setupState.userConfig == nil {
+                return .pending
+            } else {
+                return .partiallyConfigured
+            }
+        }
+
+        // For Server/Client, also check network domain status
+        let networkConfigured = viewModel.setupState.networkDomain?.status == .configured
+        if zfsConfigured && userConfigured && networkConfigured {
             return .configured
         } else if viewModel.setupState.zfsDatasets.isEmpty && viewModel.setupState.userConfig == nil {
             return .pending
@@ -1278,9 +1316,10 @@ struct SystemSetupTab: View {
     }
 }
 
-// MARK: - Local Domain Phase (Combined ZFS + User Config)
 
-struct LocalDomainPhase: View {
+// MARK: - Domain Phase (Combined Local + Network)
+
+struct DomainPhase: View {
     @ObservedObject var viewModel: GershwinSetupViewModel
     @State private var packagesExpanded = false
     @State private var userConfigExpanded = false
@@ -1297,12 +1336,93 @@ struct LocalDomainPhase: View {
         return zfsConfigured && config.isConfigured && config.zshrcConfigured
     }
 
-    private var allConfigured: Bool {
+    private var localConfigured: Bool {
         packagesConfigured && userConfigConfigured
+    }
+
+    private var isConfiguredAsServer: Bool {
+        viewModel.setupState.networkDomain?.role == .server
+    }
+
+    private var isConfiguredAsClient: Bool {
+        viewModel.setupState.networkDomain?.role == .client &&
+        viewModel.setupState.networkDomain?.nisConfigured == true
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            // Role picker - always show at top unless already configured as server/client
+            if !isConfiguredAsServer && !isConfiguredAsClient {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Role:")
+                        .font(.headline)
+
+                    Picker("Role", selection: $viewModel.selectedNetworkRole) {
+                        Text("Standalone").tag(NetworkRole.none)
+                        Text("Server (Share users/apps)").tag(NetworkRole.server)
+                        Text("Client (Mount from server)").tag(NetworkRole.client)
+                    }
+                    .pickerStyle(.radioGroup)
+                    .onChange(of: viewModel.selectedNetworkRole) { oldValue, newValue in
+                        Task {
+                            await viewModel.loadSetupState(updateNetworkRole: false)
+
+                            if newValue == .none {
+                                await viewModel.loadLocalUsers()
+                            } else if newValue == .server {
+                                await viewModel.loadNetworkUsers()
+                            }
+                        }
+                    }
+                }
+
+                Divider()
+            }
+
+            // Show current role info if already configured
+            if let network = viewModel.setupState.networkDomain, network.role != .none {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Role:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(network.role == .server ? "Server" : "Client")
+                            .font(.caption)
+                            .bold()
+                    }
+
+                    if let domain = network.domainName {
+                        HStack {
+                            Text("Domain:")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text(domain)
+                                .font(.system(.caption, design: .monospaced))
+                        }
+                    }
+
+                    HStack {
+                        Text("NIS:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Image(systemName: network.nisConfigured ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundColor(network.nisConfigured ? .green : .red)
+                            .font(.caption)
+                    }
+
+                    HStack {
+                        Text("NFS:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Image(systemName: network.nfsConfigured ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundColor(network.nfsConfigured ? .green : .red)
+                            .font(.caption)
+                    }
+                }
+
+                Divider()
+            }
+
             // Required Packages Section
             ExpandableConfigSection(
                 title: "Required Packages",
@@ -1346,17 +1466,18 @@ struct LocalDomainPhase: View {
                     ConfigDetailRow(label: ".zshrc", isConfigured: config.zshrcConfigured)
                 }
 
-                // adduser.conf settings
+                // User settings (adduser.conf)
                 if let config = viewModel.setupState.userConfig {
-                    Text("adduser.conf")
+                    Text("User Settings")
                         .font(.caption)
                         .fontWeight(.medium)
                         .padding(.top, 8)
 
+                    let expectedHomePrefix = (viewModel.selectedNetworkRole == .server || viewModel.selectedNetworkRole == .client) ? "/Network/Users" : "/Local/Users"
                     ConfigDetailRow(
                         label: "Home prefix",
-                        isConfigured: config.homePrefix == "/Local/Users",
-                        detail: config.homePrefix.isEmpty ? nil : config.homePrefix
+                        isConfigured: config.homePrefix == expectedHomePrefix,
+                        detail: expectedHomePrefix
                     )
                     ConfigDetailRow(
                         label: "Default shell",
@@ -1371,23 +1492,81 @@ struct LocalDomainPhase: View {
                 }
             }
 
-            // Configure button - only show if not fully configured
-            if !allConfigured {
-                Divider()
+            // Server/Client specific fields
+            if !isConfiguredAsServer && !isConfiguredAsClient {
+                if viewModel.selectedNetworkRole == .server || viewModel.selectedNetworkRole == .client {
+                    TextField("NIS Domain Name", text: $viewModel.nisDomainName)
+                        .textFieldStyle(.roundedBorder)
+                }
 
+                if viewModel.selectedNetworkRole == .client {
+                    TextField("NIS Server Address (hostname or IP)", text: $viewModel.nisServerAddress)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+
+            // Buttons based on role and state
+            if viewModel.selectedNetworkRole == .none && !localConfigured {
+                // Standalone - Initialize button
+                Divider()
                 Button(action: {
                     Task {
+                        await viewModel.setupZFSDatasets()
                         await viewModel.setupUserConfig()
                     }
                 }) {
-                    Label("Configure Local Domain", systemImage: "gear")
+                    Label("Initialize", systemImage: "gear")
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(viewModel.isLoading)
+            } else if viewModel.selectedNetworkRole == .server && !isConfiguredAsServer {
+                // Server selected but not configured
+                Divider()
+                Button(action: {
+                    Task {
+                        await viewModel.setupZFSDatasets()
+                        await viewModel.setupUserConfig()
+                        await viewModel.setupNetworkDomain()
+                    }
+                }) {
+                    Label("Initialize Server", systemImage: "server.rack")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.isLoading)
+            } else if viewModel.selectedNetworkRole == .client && !isConfiguredAsClient {
+                // Client selected but not joined
+                Divider()
+                Button(action: {
+                    Task {
+                        await viewModel.setupZFSDatasets()
+                        await viewModel.setupUserConfig()
+                        await viewModel.setupNetworkDomain()
+                    }
+                }) {
+                    Label("Join Domain", systemImage: "network.badge.shield.half.filled")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.isLoading || viewModel.nisServerAddress.isEmpty)
+            } else if isConfiguredAsClient {
+                // Client is joined - show leave button
+                Divider()
+                Button(action: {
+                    Task {
+                        await viewModel.leaveNetworkDomain()
+                    }
+                }) {
+                    Label("Leave Domain", systemImage: "network.slash")
+                }
+                .buttonStyle(.bordered)
+                .tint(.red)
                 .disabled(viewModel.isLoading)
             }
         }
         .sheet(isPresented: $viewModel.isConfiguringUser) {
             UserConfigProgressSheet(step: viewModel.userConfigStep)
+        }
+        .sheet(isPresented: $viewModel.isConfiguringNetwork) {
+            NetworkConfigProgressSheet(step: viewModel.networkConfigStep)
         }
     }
 }
@@ -1641,152 +1820,6 @@ struct UserConfigProgressSheet: View {
         .padding(40)
         .frame(minWidth: 350)
         .interactiveDismissDisabled()
-    }
-}
-
-struct NetworkDomainPhase: View {
-    @ObservedObject var viewModel: GershwinSetupViewModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Configure NIS/NFS for network-wide user accounts and shared applications:")
-                .font(.caption)
-                .foregroundColor(.secondary)
-
-            if let network = viewModel.setupState.networkDomain {
-                if network.role != .none {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Role:")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Text(network.role == .server ? "Server" : "Client")
-                                .font(.caption)
-                                .bold()
-                        }
-
-                        if let domain = network.domainName {
-                            HStack {
-                                Text("Domain:")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                Text(domain)
-                                    .font(.system(.caption, design: .monospaced))
-                            }
-                        }
-
-                        HStack {
-                            Text("NIS:")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Image(systemName: network.nisConfigured ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                .foregroundColor(network.nisConfigured ? .green : .red)
-                                .font(.caption)
-                        }
-
-                        HStack {
-                            Text("NFS:")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Image(systemName: network.nfsConfigured ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                .foregroundColor(network.nfsConfigured ? .green : .red)
-                                .font(.caption)
-                        }
-                    }
-                }
-            }
-
-            // Check if already configured as server or client
-            let isConfiguredAsServer = viewModel.setupState.networkDomain?.role == .server
-            let isConfiguredAsClient = viewModel.setupState.networkDomain?.role == .client &&
-                                       viewModel.setupState.networkDomain?.nisConfigured == true
-
-            // Only show role picker and text fields when not configured
-            if !isConfiguredAsServer && !isConfiguredAsClient {
-                Divider()
-
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Setup Role:")
-                        .font(.headline)
-
-                    Picker("Role", selection: $viewModel.selectedNetworkRole) {
-                        Text("Not Configured").tag(NetworkRole.none)
-                        Text("Server (Share users/apps)").tag(NetworkRole.server)
-                        Text("Client (Mount from server)").tag(NetworkRole.client)
-                    }
-                    .pickerStyle(.radioGroup)
-                    .onChange(of: viewModel.selectedNetworkRole) { oldValue, newValue in
-                        // Reload setup state when role changes to update ZFS dataset list
-                        // Don't update the network role from detection since user just changed it
-                        Task {
-                            await viewModel.loadSetupState(updateNetworkRole: false)
-
-                            // Reload appropriate user list based on new role
-                            if newValue == .none {
-                                await viewModel.loadLocalUsers()
-                            } else if newValue == .server {
-                                await viewModel.loadNetworkUsers()
-                            }
-                        }
-                    }
-
-                    if viewModel.selectedNetworkRole == .server || viewModel.selectedNetworkRole == .client {
-                        TextField("NIS Domain Name", text: $viewModel.nisDomainName)
-                            .textFieldStyle(.roundedBorder)
-                    }
-
-                    if viewModel.selectedNetworkRole == .client {
-                        TextField("NIS Server Address (hostname or IP)", text: $viewModel.nisServerAddress)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                }
-            }
-
-            // Show appropriate button based on role and current state
-            let isServerConfigured = viewModel.setupState.networkDomain?.role == .server
-            let isClientJoined = viewModel.setupState.networkDomain?.role == .client &&
-                                 viewModel.setupState.networkDomain?.nisConfigured == true
-
-            if viewModel.selectedNetworkRole == .server && !isServerConfigured {
-                // Server selected but not yet configured
-                Button(action: {
-                    Task {
-                        await viewModel.setupNetworkDomain()
-                    }
-                }) {
-                    Label("Configure Network Domain", systemImage: "network")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(viewModel.isLoading)
-            } else if isClientJoined {
-                // Client is joined - show leave button
-                Button(action: {
-                    Task {
-                        await viewModel.leaveNetworkDomain()
-                    }
-                }) {
-                    Label("Leave Network Domain", systemImage: "network.slash")
-                }
-                .buttonStyle(.bordered)
-                .tint(.red)
-                .disabled(viewModel.isLoading)
-            } else if viewModel.selectedNetworkRole == .client && !isClientJoined {
-                // Client selected but not yet joined
-                Button(action: {
-                    Task {
-                        await viewModel.setupNetworkDomain()
-                    }
-                }) {
-                    Label("Join Network Domain", systemImage: "network.badge.shield.half.filled")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(viewModel.isLoading || viewModel.nisServerAddress.isEmpty)
-            }
-            // No button shown when selectedNetworkRole == .none or server already configured
-        }
-        .sheet(isPresented: $viewModel.isConfiguringNetwork) {
-            NetworkConfigProgressSheet(step: viewModel.networkConfigStep)
-        }
     }
 }
 
