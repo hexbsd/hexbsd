@@ -5048,4 +5048,261 @@ EOFPKG
 
         return info
     }
+
+    // MARK: - Service Management
+
+    /// List all services from base system and ports
+    func listServices() async throws -> [FreeBSDService] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var services: [FreeBSDService] = []
+
+        // Get list of enabled services from rc.conf
+        let rcConfOutput = try await executeCommand("sysrc -a 2>/dev/null | grep '_enable=' || echo ''")
+        var enabledServices: Set<String> = []
+        for line in rcConfOutput.split(separator: "\n") {
+            let lineStr = String(line).trimmingCharacters(in: .whitespaces)
+            if lineStr.contains("_enable=") {
+                let parts = lineStr.split(separator: "=")
+                if parts.count >= 2 {
+                    let varName = String(parts[0]).trimmingCharacters(in: .whitespaces)
+                    let value = String(parts[1]).trimmingCharacters(in: .whitespaces).lowercased()
+                    if value.contains("yes") || value.contains("true") || value == "\"yes\"" || value == "'yes'" {
+                        // Extract service name from variable (e.g., "sshd_enable" -> "sshd")
+                        let serviceName = varName.replacingOccurrences(of: "_enable", with: "")
+                        enabledServices.insert(serviceName)
+                    }
+                }
+            }
+        }
+
+        // Get list of running services
+        let runningOutput = try await executeCommand("service -e 2>/dev/null || echo ''")
+        var runningServices: Set<String> = []
+        for line in runningOutput.split(separator: "\n") {
+            let path = String(line).trimmingCharacters(in: .whitespaces)
+            if !path.isEmpty {
+                // Extract service name from path (e.g., "/etc/rc.d/sshd" -> "sshd")
+                let name = (path as NSString).lastPathComponent
+                runningServices.insert(name)
+            }
+        }
+
+        // Get base system services from /etc/rc.d
+        let baseServicesOutput = try await executeCommand("ls /etc/rc.d 2>/dev/null || echo ''")
+        for line in baseServicesOutput.split(separator: "\n") {
+            let name = String(line).trimmingCharacters(in: .whitespaces)
+            if !name.isEmpty && !name.hasPrefix(".") {
+                // Get service description from script (PROVIDE line)
+                let description = try await getServiceDescription(name: name, source: .base)
+                let rcVar = "\(name)_enable"
+                let configPath = try await findServiceConfigPath(name: name, source: .base)
+
+                let service = FreeBSDService(
+                    name: name,
+                    source: .base,
+                    status: runningServices.contains(name) ? .running : .stopped,
+                    enabled: enabledServices.contains(name),
+                    description: description,
+                    rcVar: rcVar,
+                    configPath: configPath
+                )
+                services.append(service)
+            }
+        }
+
+        // Get ports services from /usr/local/etc/rc.d
+        let portsServicesOutput = try await executeCommand("ls /usr/local/etc/rc.d 2>/dev/null || echo ''")
+        for line in portsServicesOutput.split(separator: "\n") {
+            let name = String(line).trimmingCharacters(in: .whitespaces)
+            if !name.isEmpty && !name.hasPrefix(".") {
+                // Get service description from script
+                let description = try await getServiceDescription(name: name, source: .ports)
+                let rcVar = "\(name)_enable"
+                let configPath = try await findServiceConfigPath(name: name, source: .ports)
+
+                let service = FreeBSDService(
+                    name: name,
+                    source: .ports,
+                    status: runningServices.contains(name) ? .running : .stopped,
+                    enabled: enabledServices.contains(name),
+                    description: description,
+                    rcVar: rcVar,
+                    configPath: configPath
+                )
+                services.append(service)
+            }
+        }
+
+        // Sort by name
+        services.sort { $0.name.lowercased() < $1.name.lowercased() }
+
+        return services
+    }
+
+    /// Get the description of a service from its rc script
+    private func getServiceDescription(name: String, source: ServiceSource) async throws -> String {
+        let scriptPath = "\(source.path)/\(name)"
+        // Try to extract description from PROVIDE or DESC line in the script
+        let output = try await executeCommand("head -30 \(scriptPath) 2>/dev/null | grep -E '^# (PROVIDE|DESC):' | head -1 || echo ''")
+        let description = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "# PROVIDE:", with: "")
+            .replacingOccurrences(of: "# DESC:", with: "")
+            .trimmingCharacters(in: .whitespaces)
+        return description
+    }
+
+    /// Find the configuration file path for a service
+    private func findServiceConfigPath(name: String, source: ServiceSource) async throws -> String? {
+        // Common config file locations to check
+        var pathsToCheck: [String] = []
+
+        if source == .base {
+            // Base system services typically use /etc/<name>.conf or /etc/<name>/<name>.conf
+            pathsToCheck = [
+                "/etc/\(name).conf",
+                "/etc/\(name)/\(name).conf",
+                "/etc/\(name).cfg"
+            ]
+        } else {
+            // Ports services use /usr/local/etc/<name>.conf or /usr/local/etc/<name>/<name>.conf
+            pathsToCheck = [
+                "/usr/local/etc/\(name).conf",
+                "/usr/local/etc/\(name)/\(name).conf",
+                "/usr/local/etc/\(name).cfg",
+                "/usr/local/etc/\(name)/config",
+                "/usr/local/etc/\(name).d/\(name).conf"
+            ]
+        }
+
+        // Check each path
+        for path in pathsToCheck {
+            let result = try await executeCommand("test -f '\(path)' && echo 'exists' || echo 'no'")
+            if result.trimmingCharacters(in: .whitespacesAndNewlines) == "exists" {
+                return path
+            }
+        }
+
+        return nil
+    }
+
+    /// Get the content of a service configuration file
+    func getServiceConfigFile(path: String) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        return try await executeCommand("cat '\(path)' 2>/dev/null")
+    }
+
+    /// Save content to a service configuration file
+    func saveServiceConfigFile(path: String, content: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Escape single quotes in content for the shell
+        let escapedContent = content.replacingOccurrences(of: "'", with: "'\"'\"'")
+
+        // Write content using cat with heredoc
+        _ = try await executeCommand("cat > '\(path)' << 'CONFIGEOF'\n\(content)\nCONFIGEOF")
+    }
+
+    /// Start a service
+    func startService(name: String, source: ServiceSource) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let result = try await executeCommand("service \(name) onestart 2>&1")
+        // Check if the command failed
+        if result.lowercased().contains("does not exist") || result.lowercased().contains("not found") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Failed to start service: \(result)"])
+        }
+    }
+
+    /// Stop a service
+    func stopService(name: String, source: ServiceSource) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let result = try await executeCommand("service \(name) onestop 2>&1")
+        if result.lowercased().contains("does not exist") || result.lowercased().contains("not found") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Failed to stop service: \(result)"])
+        }
+    }
+
+    /// Restart a service
+    func restartService(name: String, source: ServiceSource) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let result = try await executeCommand("service \(name) onerestart 2>&1")
+        if result.lowercased().contains("does not exist") || result.lowercased().contains("not found") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Failed to restart service: \(result)"])
+        }
+    }
+
+    /// Enable a service in rc.conf
+    func enableService(name: String, rcVar: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        _ = try await executeCommand("sysrc \(rcVar)=YES")
+    }
+
+    /// Disable a service in rc.conf
+    func disableService(name: String, rcVar: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        _ = try await executeCommand("sysrc \(rcVar)=NO")
+    }
+
+    /// Get the rc script content for a service
+    func getServiceScript(name: String, source: ServiceSource) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let scriptPath = "\(source.path)/\(name)"
+        return try await executeCommand("cat \(scriptPath) 2>/dev/null || echo 'Script not found'")
+    }
+
+    /// Get service status
+    func getServiceStatus(name: String) async throws -> ServiceStatus {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let output = try await executeCommand("service \(name) onestatus 2>&1; echo \"EXIT:$?\"")
+
+        // Check exit code embedded in output
+        if output.contains("EXIT:0") {
+            return .running
+        } else if output.contains("is not running") || output.contains("EXIT:1") {
+            return .stopped
+        } else {
+            return .unknown
+        }
+    }
 }

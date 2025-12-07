@@ -602,6 +602,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case ports = "Ports"
     case poudriere = "Poudriere"
     case security = "Security"
+    case services = "Services"
     case tasks = "Tasks"
     case terminal = "Terminal"
     case usersAndGroups = "Users & Groups"
@@ -620,6 +621,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .ports: return "app.connected.to.app.below.fill"
         case .poudriere: return "shippingbox"
         case .security: return "shield.lefthalf.filled"
+        case .services: return "gearshape.2"
         case .tasks: return "clock"
         case .terminal: return "terminal"
         case .usersAndGroups: return "person.2"
@@ -980,6 +982,9 @@ struct DetailView: View {
             } else if section == .security {
                 // Security vulnerability scanner
                 SecurityContentView()
+            } else if section == .services {
+                // FreeBSD service management
+                ServicesContentView()
             } else if section == .tasks {
                 // Cron task scheduler and viewer
                 TasksContentView()
