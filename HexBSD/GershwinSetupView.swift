@@ -53,37 +53,23 @@ struct ZFSDatasetStatus {
 }
 
 struct UserConfigStatus {
-    let adduserConfExists: Bool
-    let homePrefix: String
-    let defaultShell: String
-    let uidStart: String
     let zshInstalled: Bool
     let zshAutosuggestionsInstalled: Bool
     let zshCompletionsInstalled: Bool
+    let sudoInstalled: Bool
     let zshrcConfigured: Bool
 
-    var isConfigured: Bool {
-        (homePrefix == "/Local/Users" || homePrefix == "/Network/Users") &&
-        defaultShell == "/usr/local/bin/zsh" &&
-        uidStart == "1001" &&
-        zshInstalled
-    }
-
     var hasAllPrerequisites: Bool {
-        zshInstalled && zshAutosuggestionsInstalled && zshCompletionsInstalled
+        zshInstalled && zshAutosuggestionsInstalled && zshCompletionsInstalled && sudoInstalled
     }
 
     var status: SetupStatus {
-        if !zshInstalled {
-            return .error
-        } else if !adduserConfExists {
-            return .pending
-        } else if isConfigured && hasAllPrerequisites && zshrcConfigured {
+        if hasAllPrerequisites && zshrcConfigured {
             return .configured
-        } else if isConfigured {
+        } else if zshInstalled {
             return .partiallyConfigured
         } else {
-            return .partiallyConfigured
+            return .pending
         }
     }
 }
@@ -312,10 +298,6 @@ class GershwinSetupViewModel: ObservableObject {
     }
 
     private func detectUserConfig() async throws -> UserConfigStatus {
-        // Check if /etc/adduser.conf exists and read its settings
-        let checkExists = try await sshManager.executeCommand("test -f /etc/adduser.conf && echo 'exists' || echo 'missing'")
-        let exists = checkExists.trimmingCharacters(in: .whitespacesAndNewlines) == "exists"
-
         // Check for zsh installation
         let zshCheck = try await sshManager.executeCommand("test -f /usr/local/bin/zsh && echo 'installed' || echo 'missing'")
         let zshInstalled = zshCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
@@ -328,39 +310,19 @@ class GershwinSetupViewModel: ObservableObject {
         let completionsCheck = try await sshManager.executeCommand("pkg info -e zsh-completions && echo 'installed' || echo 'missing'")
         let zshCompletionsInstalled = completionsCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
 
-        // Check if .zshrc exists in /usr/share/skel
-        let zshrcCheck = try await sshManager.executeCommand("test -f /usr/share/skel/.zshrc && echo 'configured' || echo 'missing'")
+        // Check for sudo installation
+        let sudoCheck = try await sshManager.executeCommand("test -f /usr/local/bin/sudo && echo 'installed' || echo 'missing'")
+        let sudoInstalled = sudoCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
+
+        // Check if global zshrc exists in /usr/local/etc
+        let zshrcCheck = try await sshManager.executeCommand("test -f /usr/local/etc/zshrc && echo 'configured' || echo 'missing'")
         let zshrcConfigured = zshrcCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "configured"
 
-        var homePrefix = ""
-        var defaultShell = ""
-        var uidStart = ""
-
-        if exists {
-            // Read the configuration
-            let content = try await sshManager.executeCommand("cat /etc/adduser.conf")
-
-            // Parse key values
-            for line in content.split(separator: "\n") {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed.hasPrefix("homeprefix=") {
-                    homePrefix = trimmed.replacingOccurrences(of: "homeprefix=", with: "")
-                } else if trimmed.hasPrefix("defaultshell=") {
-                    defaultShell = trimmed.replacingOccurrences(of: "defaultshell=", with: "")
-                } else if trimmed.hasPrefix("uidstart=") {
-                    uidStart = trimmed.replacingOccurrences(of: "uidstart=", with: "")
-                }
-            }
-        }
-
         return UserConfigStatus(
-            adduserConfExists: exists,
-            homePrefix: homePrefix,
-            defaultShell: defaultShell,
-            uidStart: uidStart,
             zshInstalled: zshInstalled,
             zshAutosuggestionsInstalled: zshAutosuggestionsInstalled,
             zshCompletionsInstalled: zshCompletionsInstalled,
+            sudoInstalled: sudoInstalled,
             zshrcConfigured: zshrcConfigured
         )
     }
@@ -493,9 +455,9 @@ class GershwinSetupViewModel: ObservableObject {
             let sudoInstalled = sudoCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
             print("DEBUG: sudo installed: \(sudoInstalled)")
 
-            let zshrcCheck = try await sshManager.executeCommand("test -f /usr/share/skel/.zshrc && echo 'configured' || echo 'missing'")
+            let zshrcCheck = try await sshManager.executeCommand("test -f /usr/local/etc/zshrc && echo 'configured' || echo 'missing'")
             let zshrcConfigured = zshrcCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "configured"
-            print("DEBUG: .zshrc configured: \(zshrcConfigured)")
+            print("DEBUG: global zshrc configured: \(zshrcConfigured)")
 
             // Run pkg update if any packages need to be installed
             if !zshInstalled || !zshAutosuggestionsInstalled || !zshCompletionsInstalled || !sudoInstalled {
@@ -549,28 +511,30 @@ class GershwinSetupViewModel: ObservableObject {
                 print("DEBUG: Created /usr/local/etc/sudoers.d/wheel")
             }
 
-            // Create .zshrc configuration in /usr/share/skel if not present
+            // Create global zshrc in /usr/local/etc if not present
             if !zshrcConfigured {
                 userConfigStep = "Creating zsh configuration..."
-                let zshrcContent = """
-# Gershwin GNUstep zsh configuration
 
-# Path to zsh-completions (adjust if needed)
+                // Global zshrc with system-wide configuration
+                let globalZshrcContent = """
+#
+# /usr/local/etc/zshrc - system-wide zsh configuration
+#
+# This file is sourced by all interactive zsh shells.
+# See also zsh(1), zshrc(4).
+#
+
+# Path to zsh-completions
 fpath=(/usr/local/share/zsh-completions $fpath)
 
 # Initialize completion system
 autoload -Uz compinit && compinit
 
+# Autosuggestions configuration
 ZSH_AUTOSUGGEST_STRATEGY=(match_prev_cmd history completion)
-
 source /usr/local/share/zsh-autosuggestions/zsh-autosuggestions.zsh
 
-# Use fish-style command history
-HISTFILE=~/.zsh_history      # Location of history file
-HISTSIZE=10000               # Number of lines kept in memory
-SAVEHIST=10000               # Number of lines saved to file
-
-# Options for fish-like behavior
+# History options
 setopt hist_ignore_dups      # Don't record duplicate lines
 setopt hist_reduce_blanks    # Remove unnecessary blanks
 setopt inc_append_history    # Save each command as soon as it's run
@@ -578,7 +542,7 @@ setopt share_history         # Share history across all zsh sessions
 setopt extended_history      # Add timestamps to history
 setopt hist_find_no_dups     # Skip duplicate entries during search
 
-# Fish-style up-arrow history search (per command line input)
+# Fish-style up-arrow history search
 autoload -Uz up-line-or-beginning-search
 autoload -Uz down-line-or-beginning-search
 zle -N up-line-or-beginning-search
@@ -586,107 +550,74 @@ zle -N down-line-or-beginning-search
 bindkey "^[[A" up-line-or-beginning-search     # Up arrow
 bindkey "^[[B" down-line-or-beginning-search   # Down arrow
 
-# Load color module
+# Load color module and enable prompt substitution
 autoload -U colors && colors
-
-# Enable prompt substitution
 setopt PROMPT_SUBST
 
 # Function to abbreviate path like Fish
 function fish_like_path() {
   local dir_path=$PWD
-  # Handle home directory and subdirectories
   if [[ $dir_path == $HOME ]]; then
     echo "~"
   elif [[ $dir_path == $HOME/* ]]; then
     local sub_path=${dir_path#$HOME/}
     local components=(${(s:/:)sub_path})
     local abbreviated=()
-    # Abbreviate all but the last component
     for ((i=1; i<${#components}; i++)); do
       [[ -n $components[$i] ]] && abbreviated+=${components[$i][1]}
     done
-    # Add the last component fully
     [[ -n $components[-1] ]] && abbreviated+=$components[-1]
     echo "~/${(j:/:)abbreviated}"
   else
-    # Abbreviate non-home paths
     local components=(${(s:/:)dir_path})
     local abbreviated=()
-    # Abbreviate all but the last component
     for ((i=1; i<${#components}; i++)); do
       [[ -n $components[$i] ]] && abbreviated+=${components[$i][1]}
     done
-    # Add the last component fully
     [[ -n $components[-1] ]] && abbreviated+=$components[-1]
     echo "/${(j:/:)abbreviated}"
   fi
 }
 
-# Use Terminator's 3rd palette color (ANSI 2) for user and path, terminal foreground for host
-local user_color='2'      # ANSI 2 (Terminator's 3rd color, green)
-local host_color='fg'     # Terminal's default foreground
-local path_color='2'      # ANSI 2 (Terminator's 3rd color, green)
-
-# Git info function to show branch info in prompt, with fallback if Git is not installed
+# Git info function for prompt
 function git_info() {
-  # Check if Git is installed
-  if ! command -v git &>/dev/null; then
-    return 1  # Return 1 if Git is not installed
-  fi
-
-  # Check if inside a Git repository
-  if ! git rev-parse --is-inside-work-tree &>/dev/null; then
-    return 1  # Return 1 if not inside a Git repository
-  fi
-
-  # Get the current Git branch or fallback to describe if in detached HEAD
+  command -v git &>/dev/null || return 1
+  git rev-parse --is-inside-work-tree &>/dev/null || return 1
   local branch=$(git symbolic-ref --short HEAD 2>/dev/null)
-  if [[ -z "$branch" ]]; then
-    branch=$(git describe --tags --always 2>/dev/null)
-  fi
-
-  # Return the Git info with the branch or fallback name
-  echo "%F{$host_color}($branch)%f"
+  [[ -z "$branch" ]] && branch=$(git describe --tags --always 2>/dev/null)
+  echo "%F{fg}($branch)%f"
 }
 
-# Check for 256-color support
-if [[ "$TERM" == *256color* ]]; then
-  # Use ANSI 2 and terminal foreground with Fish-like path
-  PROMPT="%F{$user_color}%n%f@%F{$host_color}%m%f %F{$path_color}\\$(fish_like_path)\\$(git_info)%f %# "
-else
-  # Fallback to ANSI 2 and terminal foreground with Fish-like path
-  PROMPT="%F{$user_color}%n%f@%F{$host_color}%m%f %F{$path_color}\\$(fish_like_path)\\$(git_info)%f %# "
-fi
+# Prompt colors
+local user_color='2'      # ANSI green
+local host_color='fg'     # Terminal foreground
+local path_color='2'      # ANSI green
+
+PROMPT="%F{$user_color}%n%f@%F{$host_color}%m%f %F{$path_color}\\$(fish_like_path)\\$(git_info)%f %# "
 """
 
-                // Create /usr/share/skel if it doesn't exist
+                // Minimal skeleton .zshrc following FreeBSD conventions
+                let skelZshrcContent = """
+#
+# .zshrc - zsh resource script, read at beginning of execution by each shell
+#
+# see also zsh(1), zshrc(5).
+#
+
+# User-specific history settings (override system defaults if desired)
+HISTFILE=~/.zsh_history
+HISTSIZE=10000
+SAVEHIST=10000
+"""
+
+                // Write global zshrc
+                _ = try await sshManager.executeCommand("mkdir -p /usr/local/etc")
+                _ = try await sshManager.executeCommand("cat > /usr/local/etc/zshrc << 'ZSHRC_EOF'\n\(globalZshrcContent)\nZSHRC_EOF")
+
+                // Write skeleton .zshrc
                 _ = try await sshManager.executeCommand("mkdir -p /usr/share/skel")
-
-                // Write .zshrc to skeleton directory using heredoc to avoid escaping issues
-                _ = try await sshManager.executeCommand("cat > /usr/share/skel/.zshrc << 'ZSHRC_EOF'\n\(zshrcContent)\nZSHRC_EOF")
+                _ = try await sshManager.executeCommand("cat > /usr/share/skel/dot.zshrc << 'ZSHRC_EOF'\n\(skelZshrcContent)\nZSHRC_EOF")
             }
-
-            // Create /etc/adduser.conf with Gershwin settings
-            // Use /Network/Users for Server/Client roles, /Local/Users for Standalone
-            userConfigStep = "Configuring adduser.conf..."
-            let homePrefix = (selectedNetworkRole == .server || selectedNetworkRole == .client) ? "/Network/Users" : "/Local/Users"
-            let config = """
-defaultHomePerm=0700
-defaultLgroup=
-defaultclass=
-defaultgroups=
-passwdtype=yes
-homeprefix=\(homePrefix)
-defaultshell=/usr/local/bin/zsh
-udotdir=/usr/share/skel
-msgfile=/etc/adduser.msg
-disableflag=
-uidstart=1001
-"""
-
-            // Write configuration using heredoc to avoid escaping issues
-            _ = try await sshManager.executeCommand("cat > /etc/adduser.conf << 'ADDUSER_EOF'\n\(config)\nADDUSER_EOF")
 
             userConfigStep = "Refreshing status..."
 
@@ -1180,11 +1111,14 @@ uidstart=1001
         error = nil
 
         do {
+            // Stop NIS client first (server runs as its own client)
+            networkConfigStep = "Stopping NIS client services..."
+            _ = try await sshManager.executeCommand("service ypbind stop 2>&1 || true")
+
             // Stop NIS server services
             networkConfigStep = "Stopping NIS server services..."
-            _ = try await sshManager.executeCommand("service ypserv stop 2>&1 || true")
-            _ = try await sshManager.executeCommand("service ypbind stop 2>&1 || true")
             _ = try await sshManager.executeCommand("service yppasswdd stop 2>&1 || true")
+            _ = try await sshManager.executeCommand("service ypserv stop 2>&1 || true")
 
             // Stop NFS server services
             networkConfigStep = "Stopping NFS server services..."
@@ -1310,9 +1244,9 @@ uidstart=1001
         error = nil
 
         do {
-            // Get settings from adduser.conf (or use defaults)
-            let homePrefix = setupState.userConfig?.homePrefix ?? "/Local/Users"
-            let shell = setupState.userConfig?.defaultShell ?? "/usr/local/bin/zsh"
+            // Hardcoded settings for local users
+            let homePrefix = "/Local/Users"
+            let shell = "/usr/local/bin/zsh"
 
             // Use pw command to create user non-interactively
             // -n: username, -c: full name/comment, -d: home directory, -s: shell, -m: create home directory, -G: additional groups
@@ -1467,10 +1401,9 @@ uidstart=1001
                 throw NSError(domain: "GershwinSetup", code: 6, userInfo: [NSLocalizedDescriptionKey: "NIS not initialized. Please run 'ypinit -m' first."])
             }
 
-            // Get settings from adduser.conf (or use defaults)
-            // For network users, use /Network/Users instead of /Local/Users
+            // Hardcoded settings for network users
             let homePrefix = "/Network/Users"
-            let shell = setupState.userConfig?.defaultShell ?? "/usr/local/bin/zsh"
+            let shell = "/usr/local/bin/zsh"
 
             // Get the next available UID (starting from 1001 for network users)
             let uidResult = try await sshManager.executeCommand("awk -F: 'BEGIN{max=1000} $3>max && $3<60000 {max=$3} END{print max+1}' /var/yp/master.passwd /etc/master.passwd 2>/dev/null | sort -n | tail -1")
@@ -1846,7 +1779,7 @@ struct DomainPhase: View {
     private var userConfigConfigured: Bool {
         guard let config = viewModel.setupState.userConfig else { return false }
         let zfsConfigured = viewModel.setupState.zfsDatasets.allSatisfy { $0.status == .configured }
-        return zfsConfigured && config.isConfigured && config.zshrcConfigured
+        return zfsConfigured && config.status == .configured
     }
 
     private var localConfigured: Bool {
@@ -1969,39 +1902,15 @@ struct DomainPhase: View {
                     )
                 }
 
-                // User templates
+                // ZSH configuration
                 if let config = viewModel.setupState.userConfig {
-                    Text("User Templates")
+                    Text("ZSH Configuration")
                         .font(.caption)
                         .fontWeight(.medium)
                         .padding(.top, 8)
 
-                    ConfigDetailRow(label: ".zshrc", isConfigured: config.zshrcConfigured)
-                }
-
-                // User settings (adduser.conf)
-                if let config = viewModel.setupState.userConfig {
-                    Text("User Settings")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .padding(.top, 8)
-
-                    let expectedHomePrefix = (viewModel.selectedNetworkRole == .server || viewModel.selectedNetworkRole == .client) ? "/Network/Users" : "/Local/Users"
-                    ConfigDetailRow(
-                        label: "Home prefix",
-                        isConfigured: config.homePrefix == expectedHomePrefix,
-                        detail: expectedHomePrefix
-                    )
-                    ConfigDetailRow(
-                        label: "Default shell",
-                        isConfigured: config.defaultShell == "/usr/local/bin/zsh",
-                        detail: config.defaultShell.isEmpty ? nil : config.defaultShell
-                    )
-                    ConfigDetailRow(
-                        label: "UID start",
-                        isConfigured: config.uidStart == "1001",
-                        detail: config.uidStart.isEmpty ? nil : config.uidStart
-                    )
+                    ConfigDetailRow(label: "/usr/local/etc/zshrc", isConfigured: config.zshrcConfigured)
+                    ConfigDetailRow(label: "/usr/share/skel/dot.zshrc", isConfigured: config.zshrcConfigured)
                 }
             }
 
@@ -2118,7 +2027,7 @@ struct DomainPhase: View {
             UserConfigProgressSheet(step: viewModel.userConfigStep)
         }
         .sheet(isPresented: $viewModel.isConfiguringNetwork) {
-            NetworkConfigProgressSheet(step: viewModel.networkConfigStep)
+            NetworkConfigProgressSheet(step: viewModel.networkConfigStep, role: viewModel.selectedNetworkRole)
         }
     }
 }
@@ -2353,7 +2262,7 @@ struct UserConfigProgressSheet: View {
 
     var body: some View {
         VStack(spacing: 20) {
-            Text("Configuring User Settings")
+            Text("Configuring Standalone Installation")
                 .font(.title2)
                 .bold()
 
@@ -2379,10 +2288,22 @@ struct UserConfigProgressSheet: View {
 
 struct NetworkConfigProgressSheet: View {
     let step: String
+    let role: NetworkRole
+
+    var title: String {
+        switch role {
+        case .server:
+            return "Configuring Network Server"
+        case .client:
+            return "Configuring Network Client"
+        default:
+            return "Configuring Network Domain"
+        }
+    }
 
     var body: some View {
         VStack(spacing: 20) {
-            Text("Configuring Network Domain")
+            Text(title)
                 .font(.title2)
                 .bold()
 
@@ -2660,10 +2581,7 @@ struct CreateUserSheet: View {
                 Image(systemName: "info.circle")
                     .foregroundColor(.blue)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("User will be created with settings from adduser.conf")
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                    Text("Home directory will be created automatically in \(viewModel.setupState.userConfig?.homePrefix ?? "/Local/Users")")
+                    Text("Home directory will be created automatically in /Local/Users")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
