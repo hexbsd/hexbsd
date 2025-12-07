@@ -3781,4 +3781,129 @@ EOFPKG
 
         return availablePackages
     }
+
+    /// Get detailed information about a package
+    func getPackageInfo(name: String) async throws -> PackageInfo {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Get comprehensive package info using pkg info
+        let output = try await executeCommand("pkg info '\(name)' 2>&1")
+
+        var info = PackageInfo(name: name)
+
+        for line in output.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if trimmed.hasPrefix("Name") && trimmed.contains(":") {
+                info.name = String(trimmed.split(separator: ":", maxSplits: 1).last ?? "").trimmingCharacters(in: .whitespaces)
+            } else if trimmed.hasPrefix("Version") && trimmed.contains(":") {
+                info.version = String(trimmed.split(separator: ":", maxSplits: 1).last ?? "").trimmingCharacters(in: .whitespaces)
+            } else if trimmed.hasPrefix("Origin") && trimmed.contains(":") {
+                info.origin = String(trimmed.split(separator: ":", maxSplits: 1).last ?? "").trimmingCharacters(in: .whitespaces)
+            } else if trimmed.hasPrefix("Comment") && trimmed.contains(":") {
+                info.comment = String(trimmed.split(separator: ":", maxSplits: 1).last ?? "").trimmingCharacters(in: .whitespaces)
+            } else if trimmed.hasPrefix("Maintainer") && trimmed.contains(":") {
+                info.maintainer = String(trimmed.split(separator: ":", maxSplits: 1).last ?? "").trimmingCharacters(in: .whitespaces)
+            } else if trimmed.hasPrefix("WWW") && trimmed.contains(":") {
+                info.website = String(trimmed.split(separator: ":", maxSplits: 1).last ?? "").trimmingCharacters(in: .whitespaces)
+                // Fix URL if it was split
+                if info.website.hasPrefix("//") {
+                    info.website = "https:" + info.website
+                }
+            } else if trimmed.hasPrefix("Flat size") && trimmed.contains(":") {
+                info.flatSize = String(trimmed.split(separator: ":", maxSplits: 1).last ?? "").trimmingCharacters(in: .whitespaces)
+            } else if trimmed.hasPrefix("Licenses") && trimmed.contains(":") {
+                info.license = String(trimmed.split(separator: ":", maxSplits: 1).last ?? "").trimmingCharacters(in: .whitespaces)
+            }
+        }
+
+        // Get the full description
+        let descOutput = try await executeCommand("pkg query '%e' '\(name)' 2>/dev/null || echo ''")
+        info.description = descOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Get dependencies
+        let depsOutput = try await executeCommand("pkg info -d '\(name)' 2>/dev/null | grep -v '^\(name)' | head -20")
+        info.dependencies = depsOutput.split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.contains("depends on") }
+
+        // Get required by (reverse dependencies)
+        let reqByOutput = try await executeCommand("pkg info -r '\(name)' 2>/dev/null | grep -v '^\(name)' | head -20")
+        info.requiredBy = reqByOutput.split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.contains("required by") }
+
+        // Check if package is vital (%V = 1 if vital, 0 otherwise)
+        let vitalOutput = try await executeCommand("pkg query '%V' '\(name)' 2>/dev/null || echo '0'")
+        info.isVital = vitalOutput.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
+
+        // Check if package is locked (%k = 1 if locked, 0 otherwise)
+        let lockedOutput = try await executeCommand("pkg query '%k' '\(name)' 2>/dev/null || echo '0'")
+        info.isLocked = lockedOutput.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
+
+        return info
+    }
+
+    /// Remove an installed package
+    func removePackage(name: String, force: Bool = false) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let forceFlag = force ? "-f" : ""
+        let output = try await executeCommand("pkg delete -y \(forceFlag) '\(name)' 2>&1")
+        return output
+    }
+
+    /// Install a package from the repository
+    func installPackage(name: String) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let output = try await executeCommand("pkg install -y '\(name)' 2>&1")
+        return output
+    }
+
+    /// Get info about an available (not installed) package
+    func getAvailablePackageInfo(name: String) async throws -> PackageInfo {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Use pkg rquery for remote package info
+        var info = PackageInfo(name: name)
+
+        // Get basic info
+        let queryOutput = try await executeCommand("pkg rquery '%n\t%v\t%c\t%sh\t%w\t%L\t%o' '\(name)' 2>/dev/null | head -1")
+        let components = queryOutput.split(separator: "\t").map { String($0) }
+
+        if components.count >= 7 {
+            info.name = components[0]
+            info.version = components[1]
+            info.comment = components[2]
+            info.flatSize = components[3]
+            info.website = components[4]
+            info.license = components[5]
+            info.origin = components[6]
+        }
+
+        // Get full description
+        let descOutput = try await executeCommand("pkg rquery '%e' '\(name)' 2>/dev/null || echo ''")
+        info.description = descOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Get dependencies
+        let depsOutput = try await executeCommand("pkg rquery '%dn-%dv' '\(name)' 2>/dev/null | head -20")
+        info.dependencies = depsOutput.split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
+        return info
+    }
 }

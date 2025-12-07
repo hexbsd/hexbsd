@@ -54,6 +54,22 @@ struct AvailablePackage: Identifiable, Hashable {
     let description: String
 }
 
+struct PackageInfo {
+    var name: String
+    var version: String = ""
+    var origin: String = ""
+    var comment: String = ""
+    var description: String = ""
+    var maintainer: String = ""
+    var website: String = ""
+    var flatSize: String = ""
+    var license: String = ""
+    var dependencies: [String] = []
+    var requiredBy: [String] = []
+    var isVital: Bool = false  // Vital packages cannot be removed
+    var isLocked: Bool = false // Locked packages are protected from removal/modification
+}
+
 enum RepositoryType: String, CaseIterable {
     case quarterly = "quarterly"
     case latest = "latest"
@@ -411,51 +427,80 @@ struct PackagesContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                // Tab-specific content
-                switch selectedTab {
-                case .installed:
-                    if viewModel.packages.isEmpty {
-                        emptyStateView(
-                            icon: "shippingbox",
-                            title: "No Packages Installed",
-                            message: "Install packages using pkg install"
-                        )
-                    } else if filteredPackages.isEmpty {
-                        searchEmptyView()
-                    } else {
-                        List(filteredPackages, selection: $selectedPackage) { pkg in
-                            InstalledPackageRow(package: pkg)
+                // Tab-specific content with optional detail panel
+                HSplitView {
+                    // Package list
+                    VStack(spacing: 0) {
+                        switch selectedTab {
+                        case .installed:
+                            if viewModel.packages.isEmpty {
+                                emptyStateView(
+                                    icon: "shippingbox",
+                                    title: "No Packages Installed",
+                                    message: "Install packages using pkg install"
+                                )
+                            } else if filteredPackages.isEmpty {
+                                searchEmptyView()
+                            } else {
+                                List(filteredPackages, selection: $selectedPackage) { pkg in
+                                    InstalledPackageRow(package: pkg)
+                                        .contentShape(Rectangle())
+                                        .onTapGesture {
+                                            selectedPackage = pkg
+                                        }
+                                }
+                            }
+
+                        case .upgradable:
+                            if viewModel.upgradablePackages.isEmpty {
+                                emptyStateView(
+                                    icon: "checkmark.circle",
+                                    title: "No Updates Available",
+                                    message: "All packages are up to date"
+                                )
+                            } else if filteredUpgradablePackages.isEmpty {
+                                searchEmptyView()
+                            } else {
+                                List(filteredUpgradablePackages, selection: $selectedUpgradablePackage) { pkg in
+                                    UpgradablePackageRow(package: pkg)
+                                }
+                            }
+
+                        case .available:
+                            if viewModel.availablePackages.isEmpty && !viewModel.isLoading {
+                                emptyStateView(
+                                    icon: "square.and.arrow.down",
+                                    title: "Search for Packages",
+                                    message: "Enter a search term to find available packages"
+                                )
+                            } else if filteredAvailablePackages.isEmpty {
+                                searchEmptyView()
+                            } else {
+                                List(filteredAvailablePackages, selection: $selectedAvailablePackage) { pkg in
+                                    AvailablePackageRow(package: pkg)
+                                        .contentShape(Rectangle())
+                                        .onTapGesture {
+                                            selectedAvailablePackage = pkg
+                                        }
+                                }
+                            }
                         }
                     }
+                    .frame(minWidth: 300)
 
-                case .upgradable:
-                    if viewModel.upgradablePackages.isEmpty {
-                        emptyStateView(
-                            icon: "checkmark.circle",
-                            title: "No Updates Available",
-                            message: "All packages are up to date"
+                    // Detail panel
+                    if selectedTab == .installed, let pkg = selectedPackage {
+                        InstalledPackageDetailView(
+                            package: pkg,
+                            viewModel: viewModel,
+                            onDismiss: { selectedPackage = nil }
                         )
-                    } else if filteredUpgradablePackages.isEmpty {
-                        searchEmptyView()
-                    } else {
-                        List(filteredUpgradablePackages, selection: $selectedUpgradablePackage) { pkg in
-                            UpgradablePackageRow(package: pkg)
-                        }
-                    }
-
-                case .available:
-                    if viewModel.availablePackages.isEmpty && !viewModel.isLoading {
-                        emptyStateView(
-                            icon: "square.and.arrow.down",
-                            title: "Search for Packages",
-                            message: "Enter a search term to find available packages"
+                    } else if selectedTab == .available, let pkg = selectedAvailablePackage {
+                        AvailablePackageDetailView(
+                            package: pkg,
+                            viewModel: viewModel,
+                            onDismiss: { selectedAvailablePackage = nil }
                         )
-                    } else if filteredAvailablePackages.isEmpty {
-                        searchEmptyView()
-                    } else {
-                        List(filteredAvailablePackages, selection: $selectedAvailablePackage) { pkg in
-                            AvailablePackageRow(package: pkg)
-                        }
                     }
                 }
             }
@@ -698,6 +743,399 @@ struct AvailablePackageRow: View {
             Spacer()
         }
         .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Package Detail View (Installed)
+
+struct InstalledPackageDetailView: View {
+    let package: Package
+    @ObservedObject var viewModel: PackagesViewModel
+    let onDismiss: () -> Void
+
+    @State private var packageInfo: PackageInfo?
+    @State private var isLoadingInfo = true
+
+    // Base packages should never be removable through the UI
+    private var isBasePackage: Bool {
+        package.repository.lowercased().contains("base")
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(package.name)
+                        .font(.title2)
+                        .bold()
+
+                    HStack(spacing: 8) {
+                        Label(package.version, systemImage: "number")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        Text(package.repository)
+                            .font(.caption)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.blue.opacity(0.15))
+                            .foregroundColor(.blue)
+                            .cornerRadius(4)
+                    }
+                }
+
+                Spacer()
+
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title2)
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding()
+            .background(Color.secondary.opacity(0.05))
+
+            Divider()
+
+            if isLoadingInfo {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("Loading package details...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let info = packageInfo {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        // Description
+                        if !info.description.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Description")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text(info.description)
+                                    .font(.body)
+                            }
+                        }
+
+                        Divider()
+
+                        // Details Grid
+                        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 12) {
+                            if !info.flatSize.isEmpty {
+                                DetailItem(label: "Size", value: info.flatSize)
+                            }
+                            if !info.origin.isEmpty {
+                                DetailItem(label: "Origin", value: info.origin)
+                            }
+                            if !info.license.isEmpty {
+                                DetailItem(label: "License", value: info.license)
+                            }
+                            if !info.maintainer.isEmpty {
+                                DetailItem(label: "Maintainer", value: info.maintainer)
+                            }
+                        }
+
+                        if !info.website.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Website")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Link(info.website, destination: URL(string: info.website) ?? URL(string: "https://freshports.org")!)
+                                    .font(.body)
+                            }
+                        }
+
+                        // Dependencies
+                        if !info.dependencies.isEmpty {
+                            Divider()
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Dependencies (\(info.dependencies.count))")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                ForEach(info.dependencies.prefix(10), id: \.self) { dep in
+                                    Text(dep)
+                                        .font(.system(.caption, design: .monospaced))
+                                        .foregroundColor(.primary)
+                                }
+                                if info.dependencies.count > 10 {
+                                    Text("... and \(info.dependencies.count - 10) more")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+
+                        // Required By
+                        if !info.requiredBy.isEmpty {
+                            Divider()
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Required By (\(info.requiredBy.count))")
+                                    .font(.caption)
+                                    .foregroundColor(.orange)
+                                ForEach(info.requiredBy.prefix(10), id: \.self) { req in
+                                    Text(req)
+                                        .font(.system(.caption, design: .monospaced))
+                                        .foregroundColor(.primary)
+                                }
+                                if info.requiredBy.count > 10 {
+                                    Text("... and \(info.requiredBy.count - 10) more")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                    }
+                    .padding()
+                }
+            } else {
+                VStack(spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.largeTitle)
+                        .foregroundColor(.orange)
+                    Text("Could not load package details")
+                        .font(.headline)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            Divider()
+
+            // Action buttons
+            HStack {
+                // Show warning if other packages depend on this one (only for non-base packages)
+                if !isBasePackage, let info = packageInfo, !info.requiredBy.isEmpty {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                        Text("\(info.requiredBy.count) package(s) depend on this")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
+                }
+
+                Spacer()
+
+                if isBasePackage {
+                    // No remove button for base packages
+                    Text("Base system package")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    Button(action: {
+                        Task {
+                            let success = await viewModel.removePackage(name: package.name)
+                            if success {
+                                onDismiss()
+                            }
+                        }
+                    }) {
+                        Label("Remove", systemImage: "trash")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .disabled(viewModel.isLoading)
+                }
+            }
+            .padding()
+            .background(Color.secondary.opacity(0.05))
+        }
+        .frame(minWidth: 350)
+        .id(package.id)  // Force view recreation when package changes
+        .task(id: package.id) {
+            isLoadingInfo = true
+            packageInfo = nil
+            packageInfo = await viewModel.getPackageInfo(name: package.name)
+            isLoadingInfo = false
+        }
+    }
+}
+
+// MARK: - Package Detail View (Available)
+
+struct AvailablePackageDetailView: View {
+    let package: AvailablePackage
+    @ObservedObject var viewModel: PackagesViewModel
+    let onDismiss: () -> Void
+
+    @State private var packageInfo: PackageInfo?
+    @State private var isLoadingInfo = true
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(package.name)
+                        .font(.title2)
+                        .bold()
+
+                    Label(package.version, systemImage: "number")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title2)
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding()
+            .background(Color.green.opacity(0.05))
+
+            Divider()
+
+            if isLoadingInfo {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("Loading package details...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let info = packageInfo {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        // Description
+                        if !info.description.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Description")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text(info.description)
+                                    .font(.body)
+                            }
+                        } else if !info.comment.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Description")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text(info.comment)
+                                    .font(.body)
+                            }
+                        }
+
+                        Divider()
+
+                        // Details Grid
+                        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 12) {
+                            if !info.flatSize.isEmpty {
+                                DetailItem(label: "Size", value: info.flatSize)
+                            }
+                            if !info.origin.isEmpty {
+                                DetailItem(label: "Origin", value: info.origin)
+                            }
+                            if !info.license.isEmpty {
+                                DetailItem(label: "License", value: info.license)
+                            }
+                        }
+
+                        if !info.website.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Website")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Link(info.website, destination: URL(string: info.website) ?? URL(string: "https://freshports.org")!)
+                                    .font(.body)
+                            }
+                        }
+
+                        // Dependencies
+                        if !info.dependencies.isEmpty {
+                            Divider()
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Will install dependencies (\(info.dependencies.count))")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                ForEach(info.dependencies.prefix(10), id: \.self) { dep in
+                                    Text(dep)
+                                        .font(.system(.caption, design: .monospaced))
+                                        .foregroundColor(.primary)
+                                }
+                                if info.dependencies.count > 10 {
+                                    Text("... and \(info.dependencies.count - 10) more")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                    }
+                    .padding()
+                }
+            } else {
+                // Fallback to basic info from AvailablePackage
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        if !package.description.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Description")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text(package.description)
+                                    .font(.body)
+                            }
+                        }
+                    }
+                    .padding()
+                }
+            }
+
+            Divider()
+
+            // Action buttons
+            HStack {
+                Spacer()
+
+                Button(action: {
+                    Task {
+                        let success = await viewModel.installPackage(name: package.name)
+                        if success {
+                            onDismiss()
+                        }
+                    }
+                }) {
+                    Label("Install", systemImage: "square.and.arrow.down")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+                .disabled(viewModel.isLoading)
+            }
+            .padding()
+            .background(Color.green.opacity(0.05))
+        }
+        .frame(minWidth: 350)
+        .onAppear {
+            Task {
+                packageInfo = await viewModel.getAvailablePackageInfo(name: package.name)
+                isLoadingInfo = false
+            }
+        }
+    }
+}
+
+// MARK: - Detail Item Helper
+
+struct DetailItem: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Text(value)
+                .font(.callout)
+                .lineLimit(2)
+        }
     }
 }
 
@@ -993,5 +1431,147 @@ class PackagesViewModel: ObservableObject {
         }
 
         isLoading = false
+    }
+
+    // MARK: - Package Details and Operations
+
+    func getPackageInfo(name: String) async -> PackageInfo? {
+        do {
+            return try await sshManager.getPackageInfo(name: name)
+        } catch {
+            self.error = "Failed to get package info: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    func getAvailablePackageInfo(name: String) async -> PackageInfo? {
+        do {
+            return try await sshManager.getAvailablePackageInfo(name: name)
+        } catch {
+            self.error = "Failed to get package info: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    func removePackage(name: String, force: Bool = false) async -> Bool {
+        // First check if the package is vital or locked
+        if let info = await getPackageInfo(name: name) {
+            if info.isVital {
+                let alert = NSAlert()
+                alert.messageText = "Cannot Remove Package"
+                alert.informativeText = "'\(name)' is a vital system package and cannot be removed."
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+                return false
+            }
+            if info.isLocked {
+                let alert = NSAlert()
+                alert.messageText = "Cannot Remove Package"
+                alert.informativeText = "'\(name)' is locked and cannot be removed. Use 'pkg unlock \(name)' to unlock it first."
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+                return false
+            }
+        }
+
+        // Confirm removal
+        let alert = NSAlert()
+        alert.messageText = "Remove Package?"
+        alert.informativeText = "Are you sure you want to remove '\(name)'? This action cannot be undone."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return false
+        }
+
+        isLoading = true
+        error = nil
+
+        do {
+            let output = try await sshManager.removePackage(name: name, force: force)
+
+            // Check for vital package error in output
+            if output.contains("vital") || output.contains("Cannot delete") {
+                let errorAlert = NSAlert()
+                errorAlert.messageText = "Cannot Remove Package"
+                errorAlert.informativeText = "'\(name)' is a vital system package and cannot be removed."
+                errorAlert.alertStyle = .warning
+                errorAlert.addButton(withTitle: "OK")
+                errorAlert.runModal()
+                isLoading = false
+                return false
+            }
+
+            // Check if removal was successful
+            if output.contains("Deinstalling") || output.contains("Deleting") {
+                let successAlert = NSAlert()
+                successAlert.messageText = "Package Removed"
+                successAlert.informativeText = "'\(name)' has been successfully removed."
+                successAlert.alertStyle = .informational
+                successAlert.addButton(withTitle: "OK")
+                successAlert.runModal()
+
+                // Reload packages
+                await loadPackages()
+                isLoading = false
+                return true
+            } else {
+                self.error = "Package removal may have failed: \(output)"
+                isLoading = false
+                return false
+            }
+        } catch {
+            self.error = "Failed to remove package: \(error.localizedDescription)"
+            isLoading = false
+            return false
+        }
+    }
+
+    func installPackage(name: String) async -> Bool {
+        // Confirm installation
+        let alert = NSAlert()
+        alert.messageText = "Install Package?"
+        alert.informativeText = "Do you want to install '\(name)'?"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Install")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return false
+        }
+
+        isLoading = true
+        error = nil
+
+        do {
+            let output = try await sshManager.installPackage(name: name)
+
+            // Check if installation was successful
+            if output.contains("Installing") || output.contains("already installed") || output.contains("Extracting") {
+                let successAlert = NSAlert()
+                successAlert.messageText = "Package Installed"
+                successAlert.informativeText = "'\(name)' has been successfully installed."
+                successAlert.alertStyle = .informational
+                successAlert.addButton(withTitle: "OK")
+                successAlert.runModal()
+
+                // Reload packages
+                await loadPackages()
+                isLoading = false
+                return true
+            } else {
+                self.error = "Package installation may have failed: \(output)"
+                isLoading = false
+                return false
+            }
+        } catch {
+            self.error = "Failed to install package: \(error.localizedDescription)"
+            isLoading = false
+            return false
+        }
     }
 }
