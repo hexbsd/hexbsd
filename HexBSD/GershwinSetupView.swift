@@ -2343,6 +2343,12 @@ struct CreateUserSheet: View {
         }
     }
 
+    // Check if username already exists
+    private var usernameExists: Bool {
+        let existingUsernames = viewModel.setupState.localUsers.map { $0.username }
+        return existingUsernames.contains(username)
+    }
+
     var body: some View {
         VStack(spacing: 20) {
             Text("Create New Local User")
@@ -2370,6 +2376,12 @@ struct CreateUserSheet: View {
                             usernameManuallyEdited = true
                         }
                     }
+
+                if usernameExists && !username.isEmpty {
+                    Text("Username '\(username)' already exists")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
 
                 Text("Password")
                     .font(.caption)
@@ -2438,7 +2450,7 @@ struct CreateUserSheet: View {
                     }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(username.isEmpty || password.isEmpty || confirmPassword.isEmpty || viewModel.isLoading)
+                .disabled(username.isEmpty || password.isEmpty || confirmPassword.isEmpty || viewModel.isLoading || usernameExists)
             }
         }
         .padding()
@@ -2626,6 +2638,12 @@ struct CreateNetworkUserSheet: View {
         }
     }
 
+    // Check if username already exists in network users
+    private var usernameExists: Bool {
+        let existingUsernames = viewModel.setupState.networkUsers.map { $0.username }
+        return existingUsernames.contains(username)
+    }
+
     var body: some View {
         VStack(spacing: 20) {
             Text("Create New Network User")
@@ -2653,6 +2671,12 @@ struct CreateNetworkUserSheet: View {
                             usernameManuallyEdited = true
                         }
                     }
+
+                if usernameExists && !username.isEmpty {
+                    Text("Username '\(username)' already exists")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
 
                 Text("Password")
                     .font(.caption)
@@ -2721,7 +2745,7 @@ struct CreateNetworkUserSheet: View {
                     }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(username.isEmpty || password.isEmpty || confirmPassword.isEmpty || viewModel.isLoading)
+                .disabled(username.isEmpty || password.isEmpty || confirmPassword.isEmpty || viewModel.isLoading || usernameExists)
             }
         }
         .padding()
