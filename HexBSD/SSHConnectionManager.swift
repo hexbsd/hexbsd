@@ -2170,6 +2170,17 @@ extension SSHConnectionManager {
         var currentVersion = ""
         var i = 0
 
+        // pkg audit output format:
+        // package-version is vulnerable:
+        //   title -- Short description
+        //   CVE: CVE-xxxx
+        //   CVE: CVE-yyyy (possibly multiple)
+        //   WWW: url
+        //
+        //   title -- Another description
+        //   CVE: CVE-zzzz
+        //   WWW: url
+
         while i < lines.count {
             let line = lines[i].trimmingCharacters(in: .whitespaces)
 
@@ -2189,31 +2200,50 @@ extension SSHConnectionManager {
                 continue
             }
 
-            // Look for CVE/vulnerability line
-            if !currentPackage.isEmpty && line.contains("--") {
+            // Look for vulnerability description line: "title -- description"
+            if !currentPackage.isEmpty && line.contains(" -- ") {
                 let vulnParts = line.components(separatedBy: " -- ")
                 if vulnParts.count >= 2 {
-                    let vulnId = vulnParts[0].trimmingCharacters(in: .whitespaces)
+                    let title = vulnParts[0].trimmingCharacters(in: .whitespaces)
                     let description = vulnParts[1].trimmingCharacters(in: .whitespaces)
 
-                    // Look ahead for WWW line
+                    // Collect CVEs and URL from following lines
+                    var cves: [String] = []
                     var url = ""
-                    if i + 1 < lines.count {
-                        let nextLine = lines[i + 1].trimmingCharacters(in: .whitespaces)
-                        if nextLine.hasPrefix("WWW:") {
+                    i += 1
+
+                    while i < lines.count {
+                        let nextLine = lines[i].trimmingCharacters(in: .whitespaces)
+
+                        if nextLine.hasPrefix("CVE:") {
+                            let cve = nextLine.replacingOccurrences(of: "CVE:", with: "")
+                                .trimmingCharacters(in: .whitespaces)
+                            cves.append(cve)
+                            i += 1
+                        } else if nextLine.hasPrefix("WWW:") {
                             url = nextLine.replacingOccurrences(of: "WWW:", with: "")
                                 .trimmingCharacters(in: .whitespaces)
-                            i += 1 // Skip the WWW line
+                            i += 1
+                            break  // WWW marks end of this vulnerability block
+                        } else if nextLine.isEmpty {
+                            i += 1
+                            break  // Empty line marks end of block
+                        } else {
+                            break  // Something else, stop collecting
                         }
                     }
+
+                    // Create vulnerability ID string from CVEs or use title
+                    let vulnId = cves.isEmpty ? title : cves.joined(separator: ", ")
 
                     vulnerabilities.append(Vulnerability(
                         packageName: currentPackage,
                         version: currentVersion,
                         vuln: vulnId,
-                        description: description,
+                        description: "\(title) -- \(description)",
                         url: url
                     ))
+                    continue  // Don't increment i again
                 }
             }
 

@@ -409,13 +409,18 @@ struct VulnerabilityDetailView: View {
                 }
 
                 // URL
-                if !vulnerability.url.isEmpty {
+                if !vulnerability.url.isEmpty, let url = URL(string: vulnerability.url) {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("More Information")
                             .font(.headline)
-                        Text(vulnerability.url)
-                            .foregroundColor(.blue)
-                            .textSelection(.enabled)
+                        Link(vulnerability.url, destination: url)
+                            .onHover { hovering in
+                                if hovering {
+                                    NSCursor.pointingHand.push()
+                                } else {
+                                    NSCursor.pop()
+                                }
+                            }
                     }
                 }
 
