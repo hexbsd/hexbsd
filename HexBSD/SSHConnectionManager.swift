@@ -12,6 +12,37 @@ import _CryptoExtras
 import NIOCore
 import NIOSSH
 
+/// Async semaphore to limit concurrent operations
+actor AsyncSemaphore {
+    private let limit: Int
+    private var count: Int = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(limit: Int) {
+        self.limit = limit
+    }
+
+    func acquire() async {
+        if count < limit {
+            count += 1
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func release() {
+        if let waiter = waiters.first {
+            waiters.removeFirst()
+            waiter.resume()
+        } else {
+            count -= 1
+        }
+    }
+}
+
 /// SSH key type
 enum SSHKeyType {
     case rsa
@@ -52,6 +83,9 @@ class SSHConnectionManager {
     // CPU tracking for per-core usage
     private var lastCPUSnapshot: [UInt64] = []
     private var lastCPUTime: Date?
+
+    // Semaphore to limit concurrent SSH commands (SSH servers typically limit to ~10 channels)
+    private let commandSemaphore = AsyncSemaphore(limit: 6)
 
     // Initializer - can create multiple instances for replication
     init() {}
@@ -229,6 +263,12 @@ class SSHConnectionManager {
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
+        // Throttle concurrent SSH commands to avoid channel exhaustion
+        await commandSemaphore.acquire()
+        defer {
+            Task { await commandSemaphore.release() }
+        }
+
         let output = try await client.executeCommand(command)
         return String(buffer: output)
     }
@@ -238,6 +278,12 @@ class SSHConnectionManager {
         guard let client = client else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Throttle concurrent SSH commands to avoid channel exhaustion
+        await commandSemaphore.acquire()
+        defer {
+            Task { await commandSemaphore.release() }
         }
 
         let streams = try await client.executeCommandStream(command)
@@ -255,6 +301,69 @@ class SSHConnectionManager {
         }
 
         return (stdout: stdout, stderr: stderr)
+    }
+
+    /// Execute a command with streaming output via a callback
+    /// The callback is called for each chunk of output received
+    /// Returns the exit code when the command completes
+    func executeCommandStreaming(_ command: String, onOutput: @escaping (String) -> Void) async throws -> Int {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Throttle concurrent SSH commands to avoid channel exhaustion
+        // Note: This holds the semaphore for the duration of the streaming command
+        await commandSemaphore.acquire()
+        defer {
+            Task { await commandSemaphore.release() }
+        }
+
+        print("DEBUG: executeCommandStreaming starting with command: \(command)")
+
+        // Wrap command to get exit code at the end, use script command to force line buffering
+        // The script command creates a pseudo-terminal which forces programs to use line buffering
+        let wrappedCommand = "script -q /dev/null sh -c '\(command.replacingOccurrences(of: "'", with: "'\\''")) 2>&1; echo EXIT_CODE:$?'"
+        print("DEBUG: Wrapped command: \(wrappedCommand)")
+
+        let streams = try await client.executeCommandStream(wrappedCommand)
+        print("DEBUG: Got command streams, starting to read output")
+
+        var allOutput = ""
+        var outputCount = 0
+
+        for try await event in streams {
+            // Check for task cancellation
+            try Task.checkCancellation()
+
+            switch event {
+            case .stdout(let data), .stderr(let data):
+                let text = String(buffer: data)
+                allOutput += text
+                outputCount += 1
+                print("DEBUG: Stream event #\(outputCount), received \(text.count) chars: \(text.prefix(100))...")
+
+                // Don't output the exit code marker
+                if !text.contains("EXIT_CODE:") {
+                    await MainActor.run {
+                        onOutput(text)
+                    }
+                }
+            }
+        }
+
+        print("DEBUG: Stream finished, total output: \(allOutput.count) chars")
+
+        // Parse exit code from the end
+        if let range = allOutput.range(of: "EXIT_CODE:") {
+            let exitCodeStr = allOutput[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+            let exitCode = Int(exitCodeStr) ?? 1
+            print("DEBUG: Parsed exit code: \(exitCode)")
+            return exitCode
+        }
+
+        print("DEBUG: No exit code found, returning 0")
+        return 0
     }
 
     /// Start an interactive shell session with PTY
@@ -886,7 +995,7 @@ extension SSHConnectionManager {
         let checkOutput = try await executeCommand(checkCommand)
 
         if checkOutput.trimmingCharacters(in: .whitespacesAndNewlines) != "installed" {
-            return PoudriereInfo(isInstalled: false, htmlPath: "", dataPath: "", configPath: nil, runningBuilds: [])
+            return PoudriereInfo(isInstalled: false, htmlPath: "", dataPath: "", configPath: nil, runningBuilds: [], hasBuilds: false)
         }
 
         // Try to detect custom poudriere config path from running processes
@@ -951,6 +1060,23 @@ extension SSHConnectionManager {
                 echo "DIAG:POUDRIERE_DATA already set: '${POUDRIERE_DATA}'"
             fi
 
+            # Validate that POUDRIERE_DATA actually exists
+            # If configured path doesn't exist, try standard fallbacks
+            if [ ! -d "$POUDRIERE_DATA" ]; then
+                echo "DIAG:Configured POUDRIERE_DATA '$POUDRIERE_DATA' does not exist"
+                # Try common fallback locations
+                if [ -d "/usr/local/poudriere/data" ]; then
+                    POUDRIERE_DATA="/usr/local/poudriere/data"
+                    echo "DIAG:Using fallback: /usr/local/poudriere/data"
+                elif [ -n "$BASEFS" ] && [ -d "${BASEFS}/data" ]; then
+                    POUDRIERE_DATA="${BASEFS}/data"
+                    echo "DIAG:Using fallback: ${BASEFS}/data"
+                else
+                    echo "DIAG:No valid data directory found, using default"
+                    POUDRIERE_DATA="/usr/local/poudriere/data"
+                fi
+            fi
+
             # Output the paths
             echo "DATA:${POUDRIERE_DATA}"
 
@@ -992,6 +1118,17 @@ extension SSHConnectionManager {
             # Get POUDRIERE_DATA (with default)
             POUDRIERE_DATA=${POUDRIERE_DATA:-${BASEFS}/data}
             POUDRIERE_DATA=${POUDRIERE_DATA:-/usr/local/poudriere/data}
+
+            # Validate that POUDRIERE_DATA actually exists
+            # If configured path doesn't exist, try standard fallbacks
+            if [ ! -d "$POUDRIERE_DATA" ]; then
+                # Try common fallback locations
+                if [ -d "/usr/local/poudriere/data" ]; then
+                    POUDRIERE_DATA="/usr/local/poudriere/data"
+                elif [ -n "$BASEFS" ] && [ -d "${BASEFS}/data" ]; then
+                    POUDRIERE_DATA="${BASEFS}/data"
+                fi
+            fi
 
             # Output the paths
             echo "DATA:${POUDRIERE_DATA}"
@@ -1035,12 +1172,47 @@ extension SSHConnectionManager {
         let runningBuilds = (try? await getRunningPoudriereBulk()) ?? []
         print("  - Running Builds: \(runningBuilds.joined(separator: ", "))")
 
+        // Check if any builds have been run by looking for build directories in logs/bulk
+        // Find where build logs are stored - check multiple possible locations
+        print("DEBUG: Looking for build logs, dataPath: \(dataPath)")
+        let findLogsCommand = """
+        echo "=== Searching for poudriere logs ==="
+        echo "Checking \(dataPath):"
+        ls -la '\(dataPath)' 2>&1 | head -10
+        echo ""
+        echo "Checking for logs directory:"
+        find '\(dataPath)' -maxdepth 3 -type d -name 'logs' 2>/dev/null | head -5
+        echo ""
+        echo "Checking for bulk directory:"
+        find '\(dataPath)' -maxdepth 4 -type d -name 'bulk' 2>/dev/null | head -5
+        echo ""
+        echo "Looking for .html files (build results):"
+        find '\(dataPath)' -maxdepth 5 -name '*.html' 2>/dev/null | head -5
+        echo ""
+        echo "Checking /usr/local/poudriere:"
+        ls -la /usr/local/poudriere 2>&1 | head -10
+        echo ""
+        echo "Checking if any builds exist anywhere:"
+        if find '\(dataPath)' -maxdepth 5 -type f -name '*.html' 2>/dev/null | head -1 | grep -q .; then
+            echo 'has-builds'
+        elif find /usr/local/poudriere -maxdepth 5 -type d -name 'bulk' 2>/dev/null | head -1 | grep -q .; then
+            echo 'has-builds'
+        else
+            echo 'no-builds'
+        fi
+        """
+        let buildCheckOutput = try await executeCommand(findLogsCommand)
+        print("DEBUG: Build check output:\n\(buildCheckOutput)")
+        let hasBuilds = buildCheckOutput.contains("has-builds")
+        print("  - Has Builds: \(hasBuilds)")
+
         return PoudriereInfo(
             isInstalled: true,
             htmlPath: htmlPath,
             dataPath: dataPath,
             configPath: customConfigPath,
-            runningBuilds: runningBuilds
+            runningBuilds: runningBuilds,
+            hasBuilds: hasBuilds
         )
     }
 
@@ -1056,6 +1228,623 @@ extension SSHConnectionManager {
         let content = try await executeCommand(command)
 
         return content
+    }
+
+    /// List all poudriere jails
+    func listPoudriereJails() async throws -> [PoudriereJail] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // poudriere jail -l outputs: NAME VERSION ARCH METHOD TIMESTAMP PATH
+        let command = "poudriere jail -l -q 2>/dev/null || echo ''"
+        let output = try await executeCommand(command)
+
+        var jails: [PoudriereJail] = []
+        for line in output.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+
+            // Split by whitespace, handling variable spacing
+            let parts = trimmed.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+            if parts.count >= 6 {
+                let jail = PoudriereJail(
+                    id: parts[0],
+                    name: parts[0],
+                    version: parts[1],
+                    arch: parts[2],
+                    method: parts[3],
+                    timestamp: parts[4],
+                    path: parts[5]
+                )
+                jails.append(jail)
+            }
+        }
+
+        return jails
+    }
+
+    /// Create a new poudriere jail (kept for backwards compatibility, but streaming version is preferred)
+    func createPoudriereJail(name: String, version: String, arch: String, method: String) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "poudriere jail -c -j '\(name)' -v '\(version)' -a '\(arch)' -m '\(method)'"
+        print("DEBUG: Creating poudriere jail with command: \(command)")
+
+        // Wrap command to capture exit code and output even on failure
+        let wrappedCommand = """
+        \(command) 2>&1; echo "EXIT_CODE:$?"
+        """
+
+        let output = try await executeCommand(wrappedCommand)
+        print("DEBUG: Jail creation raw output: \(output)")
+
+        // Parse exit code from output
+        let lines = output.components(separatedBy: .newlines)
+        var exitCode = 0
+        var resultOutput = ""
+
+        for line in lines {
+            if line.hasPrefix("EXIT_CODE:") {
+                exitCode = Int(line.replacingOccurrences(of: "EXIT_CODE:", with: "")) ?? 0
+            } else {
+                resultOutput += line + "\n"
+            }
+        }
+
+        resultOutput = resultOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        print("DEBUG: Jail creation output: \(resultOutput)")
+        print("DEBUG: Jail creation exit code: \(exitCode)")
+
+        if exitCode != 0 {
+            throw NSError(domain: "SSHConnectionManager", code: exitCode,
+                         userInfo: [NSLocalizedDescriptionKey: "Jail creation failed: \(resultOutput)"])
+        }
+
+        return resultOutput
+    }
+
+    /// Delete a poudriere jail
+    func deletePoudriereJail(name: String) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "poudriere jail -d -j '\(name)'"
+        let output = try await executeCommand(command)
+        return output
+    }
+
+    /// Update a poudriere jail
+    func updatePoudriereJail(name: String) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "poudriere jail -u -j '\(name)'"
+        let output = try await executeCommand(command)
+        return output
+    }
+
+    /// List all poudriere ports trees
+    func listPoudrierePortsTrees() async throws -> [PoudrierePortsTree] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // poudriere ports -l outputs: PORTSTREE METHOD TIMESTAMP PATH
+        // Timestamp can contain spaces (e.g., "2024-01-15 13:55:26")
+        // The path is always last and starts with /
+        let command = "poudriere ports -l -q 2>/dev/null || echo ''"
+        let output = try await executeCommand(command)
+
+        var trees: [PoudrierePortsTree] = []
+        for line in output.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+
+            let parts = trimmed.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+            // Need at least: name, method, and path (path starts with /)
+            if parts.count >= 3 {
+                let name = parts[0]
+                let method = parts[1]
+
+                // Find the path - it's the last element that starts with /
+                var path = ""
+                var timestampParts: [String] = []
+
+                for i in 2..<parts.count {
+                    if parts[i].hasPrefix("/") {
+                        path = parts[i]
+                    } else if path.isEmpty {
+                        // Everything between method and path is timestamp
+                        timestampParts.append(parts[i])
+                    }
+                }
+
+                let timestamp = timestampParts.joined(separator: " ")
+
+                let tree = PoudrierePortsTree(
+                    id: name,
+                    name: name,
+                    method: method,
+                    timestamp: timestamp,
+                    path: path
+                )
+                trees.append(tree)
+                print("DEBUG: Parsed ports tree - name: \(name), method: \(method), timestamp: \(timestamp), path: \(path)")
+            }
+        }
+
+        return trees
+    }
+
+    /// Create a new poudriere ports tree
+    func createPoudrierePortsTree(name: String, method: String, branch: String? = nil) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var command = "poudriere ports -c -p '\(name)' -m '\(method)'"
+        if let branch = branch, !branch.isEmpty, method.contains("git") {
+            command += " -B '\(branch)'"
+        }
+
+        let output = try await executeCommand(command)
+        return output
+    }
+
+    /// Delete a poudriere ports tree
+    func deletePoudrierePortsTree(name: String) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "poudriere ports -d -p '\(name)'"
+        let output = try await executeCommand(command)
+        return output
+    }
+
+    /// Update a poudriere ports tree
+    func updatePoudrierePortsTree(name: String) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "poudriere ports -u -p '\(name)'"
+        let output = try await executeCommand(command)
+        return output
+    }
+
+    /// Start a bulk build with all packages
+    func startPoudriereBulkAll(jail: String, portsTree: String, clean: Bool = false, test: Bool = false) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var command = "poudriere bulk -j '\(jail)' -p '\(portsTree)' -a"
+        if clean { command += " -c" }
+        if test { command += " -t" }
+
+        // Run in background with nohup so it survives SSH disconnection
+        command = "nohup \(command) > /tmp/poudriere-bulk-\(jail)-\(portsTree).log 2>&1 &"
+
+        let output = try await executeCommand(command)
+        return output
+    }
+
+    /// Start a bulk build with specific packages
+    func startPoudriereBulkPackages(jail: String, portsTree: String, packages: [String], clean: Bool = false, test: Bool = false) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // First validate that all packages exist in the ports tree
+        let trees = try await listPoudrierePortsTrees()
+        guard let tree = trees.first(where: { $0.name == portsTree }) else {
+            throw NSError(domain: "SSHConnectionManager", code: 2,
+                         userInfo: [NSLocalizedDescriptionKey: "Ports tree not found: \(portsTree)"])
+        }
+
+        print("DEBUG: Validating packages in ports tree at: \(tree.path)")
+        var invalidPackages: [String] = []
+        for pkg in packages {
+            let checkCommand = "test -d '\(tree.path)/\(pkg)' && echo 'exists' || echo 'missing'"
+            print("DEBUG: Checking package '\(pkg)' with command: \(checkCommand)")
+            let result = try await executeCommand(checkCommand)
+            let trimmedResult = result.trimmingCharacters(in: .whitespacesAndNewlines)
+            print("DEBUG: Result for '\(pkg)': '\(trimmedResult)'")
+            if trimmedResult == "missing" {
+                invalidPackages.append(pkg)
+            }
+        }
+
+        print("DEBUG: Invalid packages: \(invalidPackages)")
+        if !invalidPackages.isEmpty {
+            throw NSError(domain: "SSHConnectionManager", code: 3,
+                         userInfo: [NSLocalizedDescriptionKey: "Package(s) not found in ports tree: \(invalidPackages.joined(separator: ", "))"])
+        }
+
+        let packageList = packages.joined(separator: " ")
+        var command = "poudriere bulk -j '\(jail)' -p '\(portsTree)' \(packageList)"
+        if clean { command += " -c" }
+        if test { command += " -t" }
+
+        // Run in background with nohup so it survives SSH disconnection
+        command = "nohup \(command) > /tmp/poudriere-bulk-\(jail)-\(portsTree).log 2>&1 &"
+
+        let output = try await executeCommand(command)
+        return output
+    }
+
+    /// Start a bulk build from a package list file
+    func startPoudriereBulkFromFile(jail: String, portsTree: String, listFile: String, clean: Bool = false, test: Bool = false) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // First validate that the list file exists
+        let checkCommand = "test -f '\(listFile)' && echo 'exists' || echo 'missing'"
+        let result = try await executeCommand(checkCommand)
+        if result.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+            throw NSError(domain: "SSHConnectionManager", code: 3,
+                         userInfo: [NSLocalizedDescriptionKey: "Package list file not found: \(listFile)"])
+        }
+
+        var command = "poudriere bulk -j '\(jail)' -p '\(portsTree)' -f '\(listFile)'"
+        if clean { command += " -c" }
+        if test { command += " -t" }
+
+        // Run in background with nohup so it survives SSH disconnection
+        command = "nohup \(command) > /tmp/poudriere-bulk-\(jail)-\(portsTree).log 2>&1 &"
+
+        let output = try await executeCommand(command)
+        return output
+    }
+
+    /// Search for packages in the ports tree
+    func searchPoudrierePorts(query: String, portsTree: String) async throws -> [BuildablePackage] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Get the ports tree path
+        let trees = try await listPoudrierePortsTrees()
+        guard let tree = trees.first(where: { $0.name == portsTree }) else {
+            throw NSError(domain: "SSHConnectionManager", code: 2,
+                         userInfo: [NSLocalizedDescriptionKey: "Ports tree not found: \(portsTree)"])
+        }
+
+        // Search in the ports tree using make search
+        // This searches the INDEX file for matching ports
+        let command = """
+        cd '\(tree.path)' && make search name='\(query)' 2>/dev/null | grep -E '^Port:|^Path:|^Info:' | paste - - - | head -50
+        """
+
+        let output = try await executeCommand(command)
+
+        var packages: [BuildablePackage] = []
+        for line in output.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+
+            // Parse: Port: name\tPath: /usr/ports/cat/name\tInfo: description
+            var origin = ""
+            var comment = ""
+
+            let parts = trimmed.components(separatedBy: "\t")
+            for part in parts {
+                if part.hasPrefix("Path:") {
+                    let path = part.replacingOccurrences(of: "Path:", with: "").trimmingCharacters(in: .whitespaces)
+                    // Extract category/port from path
+                    let pathParts = path.components(separatedBy: "/")
+                    if pathParts.count >= 2 {
+                        origin = "\(pathParts[pathParts.count - 2])/\(pathParts[pathParts.count - 1])"
+                    }
+                } else if part.hasPrefix("Info:") {
+                    comment = part.replacingOccurrences(of: "Info:", with: "").trimmingCharacters(in: .whitespaces)
+                }
+            }
+
+            if !origin.isEmpty {
+                packages.append(BuildablePackage(origin: origin, comment: comment))
+            }
+        }
+
+        return packages
+    }
+
+    /// Get list of categories from the ports tree
+    func getPoudrierePortsCategories(portsTree: String) async throws -> [String] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let trees = try await listPoudrierePortsTrees()
+        guard let tree = trees.first(where: { $0.name == portsTree }) else {
+            throw NSError(domain: "SSHConnectionManager", code: 2,
+                         userInfo: [NSLocalizedDescriptionKey: "Ports tree not found: \(portsTree)"])
+        }
+
+        let command = "ls -d '\(tree.path)'/*/ 2>/dev/null | xargs -I{} basename {} | grep -v '^\\.' | sort"
+        let output = try await executeCommand(command)
+
+        return output.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("Mk") && !$0.hasPrefix("Tools") && !$0.hasPrefix("Templates") }
+    }
+
+    /// Get packages in a specific category
+    func getPoudrierePortsInCategory(portsTree: String, category: String) async throws -> [BuildablePackage] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let trees = try await listPoudrierePortsTrees()
+        guard let tree = trees.first(where: { $0.name == portsTree }) else {
+            throw NSError(domain: "SSHConnectionManager", code: 2,
+                         userInfo: [NSLocalizedDescriptionKey: "Ports tree not found: \(portsTree)"])
+        }
+
+        let command = """
+        for port in '\(tree.path)/\(category)'/*/; do
+            if [ -f "$port/Makefile" ]; then
+                name=$(basename "$port")
+                comment=$(make -C "$port" -V COMMENT 2>/dev/null | head -1)
+                echo "\(category)/$name|$comment"
+            fi
+        done
+        """
+
+        let output = try await executeCommand(command)
+
+        var packages: [BuildablePackage] = []
+        for line in output.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+
+            let parts = trimmed.components(separatedBy: "|")
+            let origin = parts[0]
+            let comment = parts.count > 1 ? parts[1] : ""
+
+            packages.append(BuildablePackage(origin: origin, comment: comment))
+        }
+
+        return packages
+    }
+
+    /// Read poudriere.conf configuration
+    func readPoudriereConfig() async throws -> PoudriereConfig {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = """
+        if [ -f /usr/local/etc/poudriere.conf ]; then
+            cat /usr/local/etc/poudriere.conf
+        elif [ -f /etc/poudriere.conf ]; then
+            cat /etc/poudriere.conf
+        else
+            echo ""
+        fi
+        """
+
+        let output = try await executeCommand(command)
+
+        var config = PoudriereConfig.default
+
+        for line in output.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
+
+            let parts = trimmed.components(separatedBy: "=")
+            if parts.count >= 2 {
+                let key = parts[0].trimmingCharacters(in: .whitespaces)
+                var value = parts.dropFirst().joined(separator: "=")
+                    .trimmingCharacters(in: .whitespaces)
+                // Remove surrounding quotes (both single and double)
+                if (value.hasPrefix("\"") && value.hasSuffix("\"")) ||
+                   (value.hasPrefix("'") && value.hasSuffix("'")) {
+                    value = String(value.dropFirst().dropLast())
+                }
+
+                switch key {
+                case "ZPOOL": config.zpool = value
+                case "BASEFS": config.basefs = value
+                case "POUDRIERE_DATA": config.poudriereData = value
+                case "DISTFILES_CACHE": config.distfilesCache = value
+                case "FREEBSD_HOST": config.freebsdHost = value
+                case "USE_PORTLINT": config.usePortlint = value.lowercased() == "yes"
+                case "USE_TMPFS": config.useTmpfs = value
+                case "PARALLEL_JOBS", "MAKE_JOBS": config.makeJobs = Int(value) ?? 4
+                case "ALLOW_MAKE_JOBS_PACKAGES": config.allowMakeJobsPackages = value
+                default: break
+                }
+            }
+        }
+
+        return config
+    }
+
+    /// Write poudriere.conf configuration
+    func writePoudriereConfig(_ config: PoudriereConfig) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let configContent = """
+        # Poudriere configuration
+        # Generated by HexBSD
+
+        # The pool where poudriere will create all datasets
+        ZPOOL=\(config.zpool)
+
+        # Root of the poudriere zfs filesystem
+        BASEFS=\(config.basefs)
+
+        # Where poudriere stores data
+        POUDRIERE_DATA=\(config.poudriereData)
+
+        # Cache for distfiles
+        DISTFILES_CACHE=\(config.distfilesCache)
+
+        # FreeBSD mirror for jail creation
+        FREEBSD_HOST=\(config.freebsdHost)
+
+        # Use portlint for QA checks
+        USE_PORTLINT=\(config.usePortlint ? "yes" : "no")
+
+        # Use tmpfs for work directories
+        USE_TMPFS=\(config.useTmpfs)
+
+        # Number of parallel jobs
+        PARALLEL_JOBS=\(config.makeJobs)
+
+        # Packages that can use more jobs
+        ALLOW_MAKE_JOBS_PACKAGES="\(config.allowMakeJobsPackages)"
+        """
+
+        // Determine config path
+        let checkPath = "test -f /usr/local/etc/poudriere.conf && echo '/usr/local/etc/poudriere.conf' || echo '/usr/local/etc/poudriere.conf'"
+        let configPath = try await executeCommand(checkPath).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Backup existing config
+        _ = try? await executeCommand("cp '\(configPath)' '\(configPath).bak' 2>/dev/null")
+
+        // Write new config
+        let escapedContent = configContent.replacingOccurrences(of: "'", with: "'\\''")
+        let command = "echo '\(escapedContent)' > '\(configPath)'"
+        _ = try await executeCommand(command)
+    }
+
+    /// Get available ZFS pools for poudriere
+    func getAvailableZpools() async throws -> [String] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "zpool list -Ho name 2>/dev/null || echo ''"
+        let output = try await executeCommand(command)
+
+        return output.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// Fetch available FreeBSD releases from the configured mirror
+    /// Releases are organized by architecture, so we check the amd64 directory for available versions
+    func getAvailableFreeBSDReleases(mirror: String = "https://download.FreeBSD.org", arch: String = "amd64") async throws -> [String] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Fetch the releases directory listing from the mirror
+        // Releases are at /releases/<arch>/ e.g., /releases/amd64/14.2-RELEASE/
+        let command = """
+        fetch -qo - '\(mirror)/releases/\(arch)/' 2>/dev/null | \
+        grep -oE 'href="[0-9]+\\.[0-9]+-RELEASE/"' | \
+        sed 's/href="//;s/\\/"$//' | \
+        sort -t. -k1,1rn -k2,2rn | \
+        uniq
+        """
+
+        let output = try await executeCommand(command)
+
+        var releases = output.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && $0.contains("-RELEASE") }
+
+        if releases.isEmpty {
+            // Fallback if fetch fails
+            releases = ["15.0-RELEASE", "14.3-RELEASE", "14.2-RELEASE", "13.5-RELEASE", "13.4-RELEASE"]
+        }
+
+        return releases
+    }
+
+    /// Fetch available architectures from the FreeBSD mirror
+    func getAvailableArchitectures(mirror: String = "https://download.FreeBSD.org") async throws -> [String] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Fetch the architecture directory listing - architectures are at /releases/
+        let command = """
+        fetch -qo - '\(mirror)/releases/' 2>/dev/null | \
+        grep -oE 'href="(amd64|i386|arm64|arm|powerpc|riscv)/"' | \
+        sed 's/href="//;s/\\/"$//' | \
+        sort | uniq
+        """
+
+        let output = try await executeCommand(command)
+
+        var archs = output.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
+        if archs.isEmpty {
+            // Fallback if fetch fails
+            archs = ["amd64", "arm64", "i386"]
+        }
+
+        return archs
+    }
+
+    /// Get the host system's architecture
+    func getHostArchitecture() async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "uname -p"
+        let output = try await executeCommand(command)
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Check if QEMU user-static is installed for cross-architecture builds
+    func checkQemuInstalled() async throws -> Bool {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "pkg info -e qemu-user-static && echo 'installed' || echo 'not-installed'"
+        let output = try await executeCommand(command)
+        return output.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
+    }
+
+    /// Install QEMU user-static for cross-architecture builds
+    func installQemu() async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "pkg install -y qemu-user-static 2>&1"
+        let output = try await executeCommand(command)
+        return output
     }
 }
 
