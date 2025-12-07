@@ -1229,14 +1229,16 @@ uidstart=1001
             var users: [LocalUser] = []
 
             for line in passwdOutput.split(separator: "\n") {
-                let parts = line.split(separator: ":")
-                guard parts.count >= 7 else { continue }
+                // master.passwd has 10 fields: name:password:uid:gid:class:change:expire:gecos:home:shell
+                // Use omittingEmptySubsequences: false to preserve empty fields
+                let parts = line.split(separator: ":", omittingEmptySubsequences: false)
+                guard parts.count >= 10 else { continue }
 
                 let username = String(parts[0])
                 let uid = Int(parts[2]) ?? 0
-                let fullName = String(parts[4])
-                let homeDirectory = String(parts[5])
-                let shell = String(parts[6])
+                let fullName = String(parts[7])      // gecos field
+                let homeDirectory = String(parts[8]) // home field
+                let shell = String(parts[9])         // shell field
 
                 // Only show users with UID >= 1001 (Gershwin uidstart) and < 60000
                 guard uid >= 1001 && uid < 60000 else {
