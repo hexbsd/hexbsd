@@ -3465,24 +3465,27 @@ extension SSHConnectionManager {
         }
 
         // Use pkg query to get package information in a parseable format
-        let output = try await executeCommand("pkg query -a '%n\t%v\t%c\t%sh'")
+        // %R gives the repository name (e.g., "FreeBSD-ports", "FreeBSD-ports-kmods", "FreeBSD-base")
+        let output = try await executeCommand("pkg query -a '%n\t%v\t%c\t%sh\t%R'")
 
         var packages: [Package] = []
 
         for line in output.split(separator: "\n") {
-            let components = line.split(separator: "\t", maxSplits: 3, omittingEmptySubsequences: false).map { String($0) }
-            guard components.count >= 4 else { continue }
+            let components = line.split(separator: "\t", maxSplits: 4, omittingEmptySubsequences: false).map { String($0) }
+            guard components.count >= 5 else { continue }
 
             let name = components[0]
             let version = components[1]
             let description = components[2]
             let size = components[3]
+            let repository = components[4].isEmpty ? "Unknown" : components[4]
 
             packages.append(Package(
                 name: name,
                 version: version,
                 description: description,
-                size: size
+                size: size,
+                repository: repository
             ))
         }
 

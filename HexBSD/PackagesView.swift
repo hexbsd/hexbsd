@@ -32,6 +32,7 @@ struct Package: Identifiable, Hashable {
     let version: String
     let description: String
     let size: String
+    let repository: String  // The repository this package came from (e.g., "FreeBSD-ports", "FreeBSD-ports-kmods", "FreeBSD-base")
 
     var displayName: String {
         name
@@ -112,16 +113,31 @@ struct PackagesContentView: View {
     @State private var selectedPackage: Package?
     @State private var selectedUpgradablePackage: UpgradablePackage?
     @State private var selectedAvailablePackage: AvailablePackage?
+    @State private var selectedRepositoryFilter: String? = nil  // nil means "All Repositories"
+
+    // Get unique repository names from installed packages
+    var availableRepositories: [String] {
+        let repos = Set(viewModel.packages.map { $0.repository })
+        return repos.sorted()
+    }
 
     var filteredPackages: [Package] {
-        if searchText.isEmpty {
-            return viewModel.packages
-        } else {
-            return viewModel.packages.filter { pkg in
+        var packages = viewModel.packages
+
+        // Filter by repository if one is selected
+        if let repoFilter = selectedRepositoryFilter {
+            packages = packages.filter { $0.repository == repoFilter }
+        }
+
+        // Filter by search text
+        if !searchText.isEmpty {
+            packages = packages.filter { pkg in
                 pkg.name.localizedCaseInsensitiveContains(searchText) ||
                 pkg.description.localizedCaseInsensitiveContains(searchText)
             }
         }
+
+        return packages
     }
 
     var filteredUpgradablePackages: [UpgradablePackage] {
@@ -149,6 +165,10 @@ struct PackagesContentView: View {
     var packageCountText: String {
         switch selectedTab {
         case .installed:
+            if let repo = selectedRepositoryFilter {
+                let count = viewModel.packages.filter { $0.repository == repo }.count
+                return "\(count) package(s) from \(repo)"
+            }
             return "\(viewModel.packages.count) package(s) installed"
         case .upgradable:
             return "\(viewModel.upgradablePackages.count) package(s) upgradable"
@@ -281,6 +301,52 @@ struct PackagesContentView: View {
             .cornerRadius(8)
             .padding(.horizontal)
             .padding(.top, 8)
+
+            // Repository filter (only shown for installed tab when there are multiple repos)
+            if selectedTab == .installed && availableRepositories.count > 1 {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        // "All" button
+                        Button(action: {
+                            selectedRepositoryFilter = nil
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "shippingbox.fill")
+                                Text("All (\(viewModel.packages.count))")
+                            }
+                            .font(.caption)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(selectedRepositoryFilter == nil ? Color.accentColor : Color.secondary.opacity(0.1))
+                            .foregroundColor(selectedRepositoryFilter == nil ? .white : .primary)
+                            .cornerRadius(6)
+                        }
+                        .buttonStyle(.plain)
+
+                        // Individual repository buttons
+                        ForEach(availableRepositories, id: \.self) { repo in
+                            let count = viewModel.packages.filter { $0.repository == repo }.count
+                            Button(action: {
+                                selectedRepositoryFilter = repo
+                            }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: repositoryIcon(for: repo))
+                                    Text("\(repo) (\(count))")
+                                }
+                                .font(.caption)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(selectedRepositoryFilter == repo ? repositoryColor(for: repo) : Color.secondary.opacity(0.1))
+                                .foregroundColor(selectedRepositoryFilter == repo ? .white : .primary)
+                                .cornerRadius(6)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+                .padding(.top, 8)
+            }
 
             // Package list
             if viewModel.isLoading {
@@ -461,6 +527,34 @@ struct PackagesContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+
+    // MARK: - Repository Helpers
+
+    func repositoryIcon(for repo: String) -> String {
+        let lowercased = repo.lowercased()
+        if lowercased.contains("base") {
+            return "gearshape.fill"
+        } else if lowercased.contains("kmod") {
+            return "cpu.fill"
+        } else if lowercased.contains("ports") {
+            return "shippingbox.fill"
+        } else {
+            return "archivebox.fill"
+        }
+    }
+
+    func repositoryColor(for repo: String) -> Color {
+        let lowercased = repo.lowercased()
+        if lowercased.contains("base") {
+            return .purple
+        } else if lowercased.contains("kmod") {
+            return .orange
+        } else if lowercased.contains("ports") {
+            return .blue
+        } else {
+            return .green
+        }
+    }
 }
 
 // MARK: - Installed Package Row
@@ -468,17 +562,40 @@ struct PackagesContentView: View {
 struct InstalledPackageRow: View {
     let package: Package
 
+    private var repoColor: Color {
+        let lowercased = package.repository.lowercased()
+        if lowercased.contains("base") {
+            return .purple
+        } else if lowercased.contains("kmod") {
+            return .orange
+        } else if lowercased.contains("ports") {
+            return .blue
+        } else {
+            return .green
+        }
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             // Icon
             Image(systemName: "shippingbox.fill")
                 .font(.title2)
-                .foregroundColor(.blue)
+                .foregroundColor(repoColor)
                 .frame(width: 30)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(package.name)
-                    .font(.headline)
+                HStack {
+                    Text(package.name)
+                        .font(.headline)
+
+                    Text(package.repository)
+                        .font(.system(size: 9))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(repoColor.opacity(0.15))
+                        .foregroundColor(repoColor)
+                        .cornerRadius(4)
+                }
 
                 HStack(spacing: 12) {
                     Label(package.version, systemImage: "number")
