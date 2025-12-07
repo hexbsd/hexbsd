@@ -2899,7 +2899,7 @@ struct UserConfigProgressSheet: View {
 
     var body: some View {
         VStack(spacing: 20) {
-            Text("Configuring Standalone Installation")
+            Text("Performing System Setup")
                 .font(.title2)
                 .bold()
 
@@ -2927,20 +2927,9 @@ struct NetworkConfigProgressSheet: View {
     let step: String
     let role: NetworkRole
 
-    var title: String {
-        switch role {
-        case .server:
-            return "Configuring Network Server"
-        case .client:
-            return "Configuring Network Client"
-        default:
-            return "Configuring Network Domain"
-        }
-    }
-
     var body: some View {
         VStack(spacing: 20) {
-            Text(title)
+            Text("Performing System Setup")
                 .font(.title2)
                 .bold()
 
@@ -3338,90 +3327,117 @@ struct CreateNetgroupSheet: View {
     @Binding var isPresented: Bool
 
     @State private var netgroupName = ""
-    @State private var selectedMembers: [String] = []
-    @State private var newMember = ""
+    @State private var selectedMembers: Set<String> = []
+    @State private var selectedAvailable: String?
+    @State private var selectedMember: String?
 
     private var isFormValid: Bool {
         !netgroupName.isEmpty && netgroupName.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
     }
 
+    // Get available users (network users not already selected)
+    private var availableUsers: [LocalUser] {
+        viewModel.setupState.networkUsers.filter { !selectedMembers.contains($0.username) }
+    }
+
+    // Get selected members as sorted array
+    private var membersList: [String] {
+        Array(selectedMembers).sorted()
+    }
+
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 16) {
             Text("Create New Netgroup")
                 .font(.title2)
                 .bold()
 
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
                 Text("Netgroup Name")
                     .font(.caption)
                 TextField("Netgroup name", text: $netgroupName)
                     .textFieldStyle(.roundedBorder)
+            }
+            .padding(.horizontal)
 
-                Divider()
+            Divider()
 
-                Text("Members")
-                    .font(.caption)
-                    .fontWeight(.medium)
-                Text("Add usernames to this netgroup")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+            Text("Members (optional)")
+                .font(.caption)
+                .fontWeight(.medium)
 
-                HStack {
-                    TextField("Username", text: $newMember)
-                        .textFieldStyle(.roundedBorder)
-                    Button(action: {
-                        if !newMember.isEmpty && !selectedMembers.contains(newMember) {
-                            selectedMembers.append(newMember)
-                            newMember = ""
-                        }
-                    }) {
-                        Image(systemName: "plus.circle.fill")
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(newMember.isEmpty)
-                }
+            // Two-column layout
+            HStack(spacing: 12) {
+                // Available Users column
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Available Users")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
 
-                if !selectedMembers.isEmpty {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 4) {
-                            ForEach(selectedMembers, id: \.self) { member in
-                                HStack {
-                                    Text(member)
-                                        .font(.system(.body, design: .monospaced))
-                                    Spacer()
-                                    Button(action: {
-                                        selectedMembers.removeAll { $0 == member }
-                                    }) {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .foregroundColor(.red)
-                                    }
-                                    .buttonStyle(.borderless)
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .fill(Color(nsColor: .controlBackgroundColor))
-                                )
+                    List(availableUsers, id: \.username, selection: $selectedAvailable) { user in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(user.username)
+                                .font(.system(.body, design: .monospaced))
+                            if !user.fullName.isEmpty {
+                                Text(user.fullName)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                             }
                         }
+                        .tag(user.username)
                     }
-                    .frame(maxHeight: 120)
+                    .listStyle(.bordered)
+                    .frame(height: 200)
+                }
+
+                // Add/Remove buttons
+                VStack(spacing: 8) {
+                    Button(action: {
+                        if let user = selectedAvailable {
+                            selectedMembers.insert(user)
+                            selectedAvailable = nil
+                        }
+                    }) {
+                        Image(systemName: "chevron.right")
+                            .frame(width: 24, height: 24)
+                    }
+                    .disabled(selectedAvailable == nil)
+
+                    Button(action: {
+                        if let member = selectedMember {
+                            selectedMembers.remove(member)
+                            selectedMember = nil
+                        }
+                    }) {
+                        Image(systemName: "chevron.left")
+                            .frame(width: 24, height: 24)
+                    }
+                    .disabled(selectedMember == nil)
+                }
+
+                // Netgroup Members column
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Netgroup Members (\(selectedMembers.count))")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    List(membersList, id: \.self, selection: $selectedMember) { username in
+                        Text(username)
+                            .font(.system(.body, design: .monospaced))
+                            .tag(username)
+                    }
+                    .listStyle(.bordered)
+                    .frame(height: 200)
                 }
             }
-            .padding()
+            .padding(.horizontal)
 
+            // Info message
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "info.circle")
                     .foregroundColor(.blue)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Changes will be applied to the NIS database")
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                    Text("NIS maps will be rebuilt after creating the netgroup.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
+                Text("NIS maps will be rebuilt after creating the netgroup.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
             .padding(8)
             .background(
@@ -3429,6 +3445,8 @@ struct CreateNetgroupSheet: View {
                     .fill(Color.blue.opacity(0.1))
             )
             .padding(.horizontal)
+
+            Divider()
 
             HStack {
                 Button("Cancel") {
@@ -3438,7 +3456,7 @@ struct CreateNetgroupSheet: View {
 
                 Button(action: {
                     Task {
-                        await viewModel.createNetgroup(name: netgroupName, members: selectedMembers)
+                        await viewModel.createNetgroup(name: netgroupName, members: Array(selectedMembers))
                         isPresented = false
                     }
                 }) {
@@ -3450,9 +3468,10 @@ struct CreateNetgroupSheet: View {
                 .disabled(!isFormValid)
                 .opacity(isFormValid ? 1.0 : 0.5)
             }
+            .padding(.bottom)
         }
-        .padding()
-        .frame(width: 450)
+        .padding(.top)
+        .frame(width: 500, height: 480)
     }
 }
 
@@ -3461,20 +3480,31 @@ struct EditNetgroupSheet: View {
     @Binding var isPresented: Bool
     let netgroup: Netgroup
 
-    @State private var selectedMembers: [String] = []
-    @State private var newMember = ""
+    @State private var selectedMembers: Set<String> = []
+    @State private var selectedAvailable: String?
+    @State private var selectedMember: String?
 
     private var hasChanges: Bool {
-        Set(selectedMembers) != Set(netgroup.members)
+        selectedMembers != Set(netgroup.members)
+    }
+
+    // Get available users (network users not already selected)
+    private var availableUsers: [LocalUser] {
+        viewModel.setupState.networkUsers.filter { !selectedMembers.contains($0.username) }
+    }
+
+    // Get selected members as sorted array
+    private var membersList: [String] {
+        Array(selectedMembers).sorted()
     }
 
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 16) {
             Text("Edit Netgroup")
                 .font(.title2)
                 .bold()
 
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
                 Text("Netgroup Name")
                     .font(.caption)
                 TextField("Netgroup name", text: .constant(netgroup.name))
@@ -3491,78 +3521,88 @@ struct EditNetgroupSheet: View {
                             .foregroundColor(.orange)
                     }
                 }
+            }
+            .padding(.horizontal)
 
-                Divider()
+            Divider()
 
-                Text("Members")
-                    .font(.caption)
-                    .fontWeight(.medium)
-                Text("Add or remove usernames from this netgroup")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+            Text("Members")
+                .font(.caption)
+                .fontWeight(.medium)
 
-                HStack {
-                    TextField("Username", text: $newMember)
-                        .textFieldStyle(.roundedBorder)
-                    Button(action: {
-                        if !newMember.isEmpty && !selectedMembers.contains(newMember) {
-                            selectedMembers.append(newMember)
-                            newMember = ""
-                        }
-                    }) {
-                        Image(systemName: "plus.circle.fill")
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(newMember.isEmpty)
-                }
-
-                if !selectedMembers.isEmpty {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 4) {
-                            ForEach(selectedMembers, id: \.self) { member in
-                                HStack {
-                                    Text(member)
-                                        .font(.system(.body, design: .monospaced))
-                                    Spacer()
-                                    Button(action: {
-                                        selectedMembers.removeAll { $0 == member }
-                                    }) {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .foregroundColor(.red)
-                                    }
-                                    .buttonStyle(.borderless)
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .fill(Color(nsColor: .controlBackgroundColor))
-                                )
-                            }
-                        }
-                    }
-                    .frame(maxHeight: 120)
-                } else {
-                    Text("No members")
+            // Two-column layout
+            HStack(spacing: 12) {
+                // Available Users column
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Available Users")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding()
+
+                    List(availableUsers, id: \.username, selection: $selectedAvailable) { user in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(user.username)
+                                .font(.system(.body, design: .monospaced))
+                            if !user.fullName.isEmpty {
+                                Text(user.fullName)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .tag(user.username)
+                    }
+                    .listStyle(.bordered)
+                    .frame(height: 200)
+                }
+
+                // Add/Remove buttons
+                VStack(spacing: 8) {
+                    Button(action: {
+                        if let user = selectedAvailable {
+                            selectedMembers.insert(user)
+                            selectedAvailable = nil
+                        }
+                    }) {
+                        Image(systemName: "chevron.right")
+                            .frame(width: 24, height: 24)
+                    }
+                    .disabled(selectedAvailable == nil)
+
+                    Button(action: {
+                        if let member = selectedMember {
+                            selectedMembers.remove(member)
+                            selectedMember = nil
+                        }
+                    }) {
+                        Image(systemName: "chevron.left")
+                            .frame(width: 24, height: 24)
+                    }
+                    .disabled(selectedMember == nil)
+                }
+
+                // Netgroup Members column
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Netgroup Members (\(selectedMembers.count))")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    List(membersList, id: \.self, selection: $selectedMember) { username in
+                        Text(username)
+                            .font(.system(.body, design: .monospaced))
+                            .tag(username)
+                    }
+                    .listStyle(.bordered)
+                    .frame(height: 200)
                 }
             }
-            .padding()
+            .padding(.horizontal)
 
+            // Info message
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "info.circle")
                     .foregroundColor(.blue)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Changes will be applied to the NIS database")
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                    Text("NIS maps will be rebuilt after saving changes.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
+                Text("NIS maps will be rebuilt after saving changes.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
             .padding(8)
             .background(
@@ -3570,6 +3610,8 @@ struct EditNetgroupSheet: View {
                     .fill(Color.blue.opacity(0.1))
             )
             .padding(.horizontal)
+
+            Divider()
 
             HStack {
                 Button("Cancel") {
@@ -3579,7 +3621,7 @@ struct EditNetgroupSheet: View {
 
                 Button(action: {
                     Task {
-                        await viewModel.editNetgroup(netgroup: netgroup, newMembers: selectedMembers)
+                        await viewModel.editNetgroup(netgroup: netgroup, newMembers: Array(selectedMembers))
                         isPresented = false
                     }
                 }) {
@@ -3591,11 +3633,12 @@ struct EditNetgroupSheet: View {
                 .disabled(!hasChanges)
                 .opacity(hasChanges ? 1.0 : 0.5)
             }
+            .padding(.bottom)
         }
-        .padding()
-        .frame(width: 450)
+        .padding(.top)
+        .frame(width: 500, height: 480)
         .onAppear {
-            selectedMembers = netgroup.members
+            selectedMembers = Set(netgroup.members)
         }
     }
 }
