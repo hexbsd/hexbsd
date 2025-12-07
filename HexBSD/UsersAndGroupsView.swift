@@ -2105,6 +2105,30 @@ SAVEHIST=10000
         isLoading = false
     }
 
+    func fingerUser(username: String) async -> String {
+        isLoading = true
+        error = nil
+
+        var fingerOutput = ""
+
+        do {
+            // Use finger command to get user information
+            let command = "finger \(username) 2>&1"
+            fingerOutput = try await sshManager.executeCommand(command)
+
+            if fingerOutput.contains("no such user") {
+                throw NSError(domain: "UsersAndGroups", code: 21, userInfo: [NSLocalizedDescriptionKey: "User '\(username)' not found"])
+            }
+
+        } catch {
+            self.error = "Failed to finger user: \(error.localizedDescription)"
+            fingerOutput = "Error: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+        return fingerOutput
+    }
+
     func broadcastMessage(message: String) async {
         isLoading = true
         error = nil
@@ -3070,6 +3094,7 @@ struct UserManagementPhase: View {
     @ObservedObject var viewModel: UsersAndGroupsViewModel
     @State private var showCreateUserSheet = false
     @State private var showDeleteConfirmation = false
+    @State private var userToFinger: LocalUser?
     @State private var userToEdit: LocalUser?
     @State private var userToDelete: LocalUser?
     @State private var removeHomeDirectory = false
@@ -3101,6 +3126,9 @@ struct UserManagementPhase: View {
                         ForEach(viewModel.setupState.localUsers) { user in
                             UserRow(
                                 user: user,
+                                onFinger: {
+                                    userToFinger = user
+                                },
                                 onEdit: {
                                     userToEdit = user
                                 },
@@ -3125,6 +3153,12 @@ struct UserManagementPhase: View {
         }
         .sheet(isPresented: $showCreateUserSheet) {
             CreateUserSheet(viewModel: viewModel, isPresented: $showCreateUserSheet)
+        }
+        .sheet(item: $userToFinger) { user in
+            FingerUserSheet(viewModel: viewModel, user: user, isPresented: Binding(
+                get: { userToFinger != nil },
+                set: { if !$0 { userToFinger = nil } }
+            ))
         }
         .sheet(item: $userToEdit) { user in
             EditUserSheet(viewModel: viewModel, isPresented: Binding(
@@ -3572,6 +3606,356 @@ struct ActiveSessionsPhase: View {
             if let session = sessionToTerminate {
                 Text("Are you sure you want to terminate the session for \(session.user) on \(session.tty)? This will forcefully log out the user.")
             }
+        }
+    }
+}
+
+// MARK: - Finger User Sheet
+
+struct FingerInfo {
+    var login: String = ""
+    var name: String = ""
+    var directory: String = ""
+    var shell: String = ""
+    var office: String = ""
+    var officePhone: String = ""
+    var homePhone: String = ""
+    var lastLogin: String = ""
+    var mail: String = ""
+    var plan: String = ""
+    var sessions: [(tty: String, from: String, since: String, idle: String)] = []
+    var rawOutput: String = ""
+
+    static func parse(from output: String) -> FingerInfo {
+        var info = FingerInfo()
+        info.rawOutput = output
+
+        let lines = output.components(separatedBy: "\n")
+
+        for line in lines {
+            // Parse "Login: xxx    Name: yyy"
+            if line.contains("Login:") {
+                if let loginMatch = line.range(of: "Login:\\s*([^\\s]+)", options: .regularExpression) {
+                    let loginPart = String(line[loginMatch])
+                    info.login = loginPart.replacingOccurrences(of: "Login:", with: "").trimmingCharacters(in: .whitespaces)
+                }
+                if let nameRange = line.range(of: "Name:") {
+                    info.name = String(line[nameRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                }
+            }
+
+            // Parse "Directory: xxx    Shell: yyy"
+            if line.contains("Directory:") {
+                if let dirMatch = line.range(of: "Directory:\\s*([^\\s]+)", options: .regularExpression) {
+                    let dirPart = String(line[dirMatch])
+                    info.directory = dirPart.replacingOccurrences(of: "Directory:", with: "").trimmingCharacters(in: .whitespaces)
+                }
+                if let shellRange = line.range(of: "Shell:") {
+                    info.shell = String(line[shellRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                }
+            }
+
+            // Parse "Office: xxx, phone    Home Phone: yyy"
+            if line.contains("Office:") {
+                if let officeRange = line.range(of: "Office:") {
+                    var officePart = String(line[officeRange.upperBound...])
+                    if let homePhoneRange = officePart.range(of: "Home Phone:") {
+                        info.homePhone = String(officePart[homePhoneRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                        officePart = String(officePart[..<homePhoneRange.lowerBound])
+                    }
+                    info.office = officePart.trimmingCharacters(in: .whitespaces)
+                }
+            }
+
+            // Parse "On since xxx on tty from host" or "Last login xxx on tty from host"
+            if line.contains("On since") || line.contains("Last login") {
+                let isActive = line.contains("On since")
+                var session = (tty: "", from: "", since: "", idle: "")
+
+                if isActive, let sinceRange = line.range(of: "On since ") {
+                    var rest = String(line[sinceRange.upperBound...])
+                    if let onRange = rest.range(of: " on ") {
+                        session.since = String(rest[..<onRange.lowerBound]).trimmingCharacters(in: .whitespaces)
+                        rest = String(rest[onRange.upperBound...])
+                        if let fromRange = rest.range(of: " from ") {
+                            session.tty = String(rest[..<fromRange.lowerBound]).trimmingCharacters(in: .whitespaces)
+                            session.from = String(rest[fromRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                        } else {
+                            session.tty = rest.trimmingCharacters(in: .whitespaces)
+                        }
+                    }
+                } else if let lastRange = line.range(of: "Last login ") {
+                    var rest = String(line[lastRange.upperBound...])
+                    if let onRange = rest.range(of: " on ") {
+                        session.since = String(rest[..<onRange.lowerBound]).trimmingCharacters(in: .whitespaces)
+                        rest = String(rest[onRange.upperBound...])
+                        if let fromRange = rest.range(of: " from ") {
+                            session.tty = String(rest[..<fromRange.lowerBound]).trimmingCharacters(in: .whitespaces)
+                            session.from = String(rest[fromRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                        } else {
+                            session.tty = rest.trimmingCharacters(in: .whitespaces)
+                        }
+                    }
+                    info.lastLogin = line
+                }
+
+                if isActive && !session.tty.isEmpty {
+                    info.sessions.append(session)
+                }
+            }
+
+            // Parse idle time (usually on next line after session)
+            if line.trimmingCharacters(in: .whitespaces).contains("idle") && !info.sessions.isEmpty {
+                let idleTime = line.trimmingCharacters(in: .whitespaces)
+                let lastIndex = info.sessions.count - 1
+                info.sessions[lastIndex].idle = idleTime
+            }
+
+            // Parse mail status
+            if line.contains("mail") || line.contains("Mail") {
+                info.mail = line.trimmingCharacters(in: .whitespaces)
+            }
+
+            // Parse plan (and following lines)
+            if line.contains("Plan:") {
+                if let planRange = line.range(of: "Plan:") {
+                    info.plan = String(line[planRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                }
+            } else if line == "No Plan." {
+                info.plan = "No Plan"
+            }
+        }
+
+        return info
+    }
+}
+
+struct FingerUserSheet: View {
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
+    let user: LocalUser
+    @Binding var isPresented: Bool
+    @State private var fingerInfo: FingerInfo?
+    @State private var isLoading = true
+    @State private var errorMessage: String?
+
+    var body: some View {
+        VStack(spacing: 16) {
+            // Header
+            HStack {
+                Image(systemName: "person.text.rectangle")
+                    .font(.title2)
+                    .foregroundColor(.blue)
+                Text("User Information")
+                    .font(.headline)
+                Spacer()
+            }
+
+            if isLoading {
+                Spacer()
+                ProgressView("Loading user information...")
+                Spacer()
+            } else if let error = errorMessage {
+                Spacer()
+                VStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.largeTitle)
+                        .foregroundColor(.orange)
+                    Text(error)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+            } else if let info = fingerInfo {
+                ScrollView {
+                    VStack(spacing: 12) {
+                        // User Identity Card
+                        GroupBox {
+                            VStack(spacing: 8) {
+                                HStack {
+                                    Image(systemName: "person.circle.fill")
+                                        .font(.system(size: 48))
+                                        .foregroundColor(.blue)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(info.name.isEmpty ? user.username : info.name)
+                                            .font(.title2)
+                                            .fontWeight(.semibold)
+                                        Text(user.username)
+                                            .font(.subheadline)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    Spacer()
+                                    if user.hasSudoAccess {
+                                        Text("sudo")
+                                            .font(.caption)
+                                            .fontWeight(.medium)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
+                                            .background(Color.orange.opacity(0.2))
+                                            .foregroundColor(.orange)
+                                            .cornerRadius(4)
+                                    }
+                                }
+                            }
+                        } label: {
+                            Label("Identity", systemImage: "person.fill")
+                        }
+
+                        // Account Details Card
+                        GroupBox {
+                            VStack(spacing: 8) {
+                                FingerInfoRow(label: "Home Directory", value: info.directory.isEmpty ? user.homeDirectory : info.directory, icon: "folder.fill")
+                                Divider()
+                                FingerInfoRow(label: "Shell", value: info.shell.isEmpty ? user.shell : info.shell, icon: "terminal.fill")
+                                Divider()
+                                FingerInfoRow(label: "UID", value: String(user.id), icon: "number")
+                            }
+                        } label: {
+                            Label("Account Details", systemImage: "gearshape.fill")
+                        }
+
+                        // Contact Info (if available)
+                        if !info.office.isEmpty || !info.homePhone.isEmpty {
+                            GroupBox {
+                                VStack(spacing: 8) {
+                                    if !info.office.isEmpty {
+                                        FingerInfoRow(label: "Office", value: info.office, icon: "building.2.fill")
+                                        if !info.homePhone.isEmpty {
+                                            Divider()
+                                        }
+                                    }
+                                    if !info.homePhone.isEmpty {
+                                        FingerInfoRow(label: "Home Phone", value: info.homePhone, icon: "phone.fill")
+                                    }
+                                }
+                            } label: {
+                                Label("Contact", systemImage: "phone.circle.fill")
+                            }
+                        }
+
+                        // Active Sessions
+                        if !info.sessions.isEmpty {
+                            GroupBox {
+                                VStack(spacing: 8) {
+                                    ForEach(Array(info.sessions.enumerated()), id: \.offset) { index, session in
+                                        if index > 0 {
+                                            Divider()
+                                        }
+                                        HStack(alignment: .top) {
+                                            Image(systemName: "terminal")
+                                                .foregroundColor(.green)
+                                                .frame(width: 20)
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                HStack {
+                                                    Text(session.tty)
+                                                        .font(.system(.body, design: .monospaced))
+                                                        .fontWeight(.medium)
+                                                    if !session.from.isEmpty {
+                                                        Text("from \(session.from)")
+                                                            .font(.caption)
+                                                            .foregroundColor(.secondary)
+                                                    }
+                                                }
+                                                Text("Since: \(session.since)")
+                                                    .font(.caption)
+                                                    .foregroundColor(.secondary)
+                                                if !session.idle.isEmpty {
+                                                    Text(session.idle)
+                                                        .font(.caption)
+                                                        .foregroundColor(.orange)
+                                                }
+                                            }
+                                            Spacer()
+                                        }
+                                    }
+                                }
+                            } label: {
+                                Label("Active Sessions (\(info.sessions.count))", systemImage: "desktopcomputer")
+                            }
+                        } else if !info.lastLogin.isEmpty {
+                            GroupBox {
+                                HStack {
+                                    Image(systemName: "clock.arrow.circlepath")
+                                        .foregroundColor(.secondary)
+                                        .frame(width: 20)
+                                    Text(info.lastLogin)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                    Spacer()
+                                }
+                            } label: {
+                                Label("Last Login", systemImage: "clock")
+                            }
+                        }
+
+                        // Mail Status
+                        if !info.mail.isEmpty {
+                            GroupBox {
+                                HStack {
+                                    Image(systemName: info.mail.lowercased().contains("no mail") ? "envelope.badge" : "envelope.fill")
+                                        .foregroundColor(info.mail.lowercased().contains("no mail") ? .secondary : .blue)
+                                        .frame(width: 20)
+                                    Text(info.mail)
+                                        .font(.body)
+                                    Spacer()
+                                }
+                            } label: {
+                                Label("Mail", systemImage: "envelope")
+                            }
+                        }
+
+                        // Plan
+                        if !info.plan.isEmpty && info.plan != "No Plan" {
+                            GroupBox {
+                                Text(info.plan)
+                                    .font(.body)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            } label: {
+                                Label("Plan", systemImage: "doc.text")
+                            }
+                        }
+                    }
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Close") {
+                    isPresented = false
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding()
+        .frame(width: 450, height: 500)
+        .onAppear {
+            Task {
+                let output = await viewModel.fingerUser(username: user.username)
+                if output.contains("Error:") || output.contains("no such user") {
+                    errorMessage = output
+                } else {
+                    fingerInfo = FingerInfo.parse(from: output)
+                }
+                isLoading = false
+            }
+        }
+    }
+}
+
+struct FingerInfoRow: View {
+    let label: String
+    let value: String
+    let icon: String
+
+    var body: some View {
+        HStack {
+            Image(systemName: icon)
+                .foregroundColor(.secondary)
+                .frame(width: 20)
+            Text(label)
+                .foregroundColor(.secondary)
+            Spacer()
+            Text(value)
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
         }
     }
 }
@@ -4413,6 +4797,7 @@ struct EditGroupSheet: View {
 
 struct UserRow: View {
     let user: LocalUser
+    let onFinger: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
 
@@ -4464,6 +4849,13 @@ struct UserRow: View {
             }
 
             Spacer()
+
+            Button(action: onFinger) {
+                Image(systemName: "person.text.rectangle")
+                    .foregroundColor(.green)
+            }
+            .buttonStyle(.borderless)
+            .help("Finger user")
 
             Button(action: onEdit) {
                 Image(systemName: "pencil")
@@ -4754,6 +5146,7 @@ struct NetworkUserManagementPhase: View {
     @ObservedObject var viewModel: UsersAndGroupsViewModel
     @State private var showCreateUserSheet = false
     @State private var showDeleteConfirmation = false
+    @State private var userToFinger: LocalUser?
     @State private var userToEdit: LocalUser?
     @State private var userToDelete: LocalUser?
 
@@ -4813,6 +5206,9 @@ struct NetworkUserManagementPhase: View {
                             NetworkUserRow(
                                 user: user,
                                 isReadOnly: isClient,
+                                onFinger: {
+                                    userToFinger = user
+                                },
                                 onEdit: {
                                     userToEdit = user
                                 },
@@ -4840,6 +5236,12 @@ struct NetworkUserManagementPhase: View {
         }
         .sheet(isPresented: $showCreateUserSheet) {
             CreateNetworkUserSheet(viewModel: viewModel, isPresented: $showCreateUserSheet)
+        }
+        .sheet(item: $userToFinger) { user in
+            FingerUserSheet(viewModel: viewModel, user: user, isPresented: Binding(
+                get: { userToFinger != nil },
+                set: { if !$0 { userToFinger = nil } }
+            ))
         }
         .sheet(item: $userToEdit) { user in
             EditNetworkUserSheet(viewModel: viewModel, isPresented: Binding(
@@ -4870,6 +5272,7 @@ struct NetworkUserManagementPhase: View {
 struct NetworkUserRow: View {
     let user: LocalUser
     var isReadOnly: Bool = false
+    let onFinger: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
 
@@ -4925,6 +5328,13 @@ struct NetworkUserRow: View {
             }
 
             Spacer()
+
+            Button(action: onFinger) {
+                Image(systemName: "person.text.rectangle")
+                    .foregroundColor(.green)
+            }
+            .buttonStyle(.borderless)
+            .help("Finger user")
 
             if !isReadOnly {
                 Button(action: onEdit) {
