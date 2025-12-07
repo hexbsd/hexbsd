@@ -105,6 +105,7 @@ struct LocalUser: Identifiable, Hashable {
     let homeDirectory: String
     let shell: String
     let isSystemUser: Bool // UID < 1000
+    let hasSudoAccess: Bool
 
     var displayName: String {
         fullName.isEmpty ? username : "\(fullName) (\(username))"
@@ -1203,6 +1204,11 @@ SAVEHIST=10000
         do {
             // Get list of users from /etc/passwd
             let passwdOutput = try await sshManager.executeCommand("cat /etc/passwd")
+
+            // Get wheel group members
+            let wheelOutput = try await sshManager.executeCommand("pw groupshow wheel 2>/dev/null | cut -d: -f4")
+            let wheelMembers = Set(wheelOutput.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: ",").map { String($0) })
+
             var users: [LocalUser] = []
 
             for line in passwdOutput.split(separator: "\n") {
@@ -1226,7 +1232,8 @@ SAVEHIST=10000
                     fullName: fullName,
                     homeDirectory: homeDirectory,
                     shell: shell,
-                    isSystemUser: false
+                    isSystemUser: false,
+                    hasSudoAccess: wheelMembers.contains(username)
                 ))
             }
 
@@ -1300,6 +1307,55 @@ SAVEHIST=10000
         isLoading = false
     }
 
+    func editUser(user: LocalUser, newFullName: String, newPassword: String?, hasSudoAccess: Bool) async {
+        isLoading = true
+        error = nil
+
+        do {
+            var changes: [String] = []
+
+            // Update full name if changed
+            if newFullName != user.fullName {
+                _ = try await sshManager.executeCommand("pw usermod \(user.username) -c '\(newFullName)'")
+                changes.append("full name")
+            }
+
+            // Update password if provided
+            if let password = newPassword, !password.isEmpty {
+                _ = try await sshManager.executeCommand("echo '\(password)' | pw usermod \(user.username) -h 0")
+                changes.append("password")
+            }
+
+            // Update sudo access if changed
+            if hasSudoAccess != user.hasSudoAccess {
+                if hasSudoAccess {
+                    // Add to wheel group
+                    _ = try await sshManager.executeCommand("pw groupmod wheel -m \(user.username)")
+                    changes.append("granted sudo access")
+                } else {
+                    // Remove from wheel group
+                    _ = try await sshManager.executeCommand("pw groupmod wheel -d \(user.username)")
+                    changes.append("revoked sudo access")
+                }
+            }
+
+            if changes.isEmpty {
+                confirmationMessage = "No changes were made to user '\(user.username)'."
+            } else {
+                confirmationMessage = "User '\(user.username)' updated: \(changes.joined(separator: ", "))."
+            }
+            showingConfirmation = true
+
+            // Reload users list
+            await loadLocalUsers()
+
+        } catch {
+            self.error = "Failed to edit user: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+
     // MARK: - Network User Management (NIS)
 
     func loadNetworkUsers() async {
@@ -1310,6 +1366,38 @@ SAVEHIST=10000
             var users: [LocalUser] = []
             let isServer = setupState.networkDomain?.role == .server
             print("DEBUG loadNetworkUsers: role=\(String(describing: setupState.networkDomain?.role)), isServer=\(isServer)")
+
+            // Get sudo-users netgroup members
+            var sudoUsers: Set<String> = []
+            if isServer {
+                // Server: read from /var/yp/netgroup
+                let netgroupOutput = try await sshManager.executeCommand("grep '^sudo-users' /var/yp/netgroup 2>/dev/null || echo ''")
+                // Parse netgroup format: sudo-users (,user1,) (,user2,)
+                let regex = try? NSRegularExpression(pattern: "\\(,([^,]+),\\)", options: [])
+                if let regex = regex {
+                    let range = NSRange(netgroupOutput.startIndex..., in: netgroupOutput)
+                    let matches = regex.matches(in: netgroupOutput, options: [], range: range)
+                    for match in matches {
+                        if let userRange = Range(match.range(at: 1), in: netgroupOutput) {
+                            sudoUsers.insert(String(netgroupOutput[userRange]))
+                        }
+                    }
+                }
+            } else {
+                // Client: use getent netgroup
+                let netgroupOutput = try await sshManager.executeCommand("getent netgroup sudo-users 2>/dev/null || echo ''")
+                // Parse output format: sudo-users (,user1,) (,user2,)
+                let regex = try? NSRegularExpression(pattern: "\\(,([^,]+),\\)", options: [])
+                if let regex = regex {
+                    let range = NSRange(netgroupOutput.startIndex..., in: netgroupOutput)
+                    let matches = regex.matches(in: netgroupOutput, options: [], range: range)
+                    for match in matches {
+                        if let userRange = Range(match.range(at: 1), in: netgroupOutput) {
+                            sudoUsers.insert(String(netgroupOutput[userRange]))
+                        }
+                    }
+                }
+            }
 
             if isServer {
                 // Server: read from /var/yp/master.passwd (10 fields)
@@ -1342,7 +1430,8 @@ SAVEHIST=10000
                         fullName: fullName,
                         homeDirectory: homeDirectory,
                         shell: shell,
-                        isSystemUser: false
+                        isSystemUser: false,
+                        hasSudoAccess: sudoUsers.contains(username)
                     ))
                 }
             } else {
@@ -1376,7 +1465,8 @@ SAVEHIST=10000
                         fullName: fullName,
                         homeDirectory: homeDirectory,
                         shell: shell,
-                        isSystemUser: false
+                        isSystemUser: false,
+                        hasSudoAccess: sudoUsers.contains(username)
                     ))
                 }
             }
@@ -1475,6 +1565,73 @@ SAVEHIST=10000
 
         } catch {
             self.error = "Failed to create network user: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+
+    func editNetworkUser(user: LocalUser, newFullName: String, newPassword: String?, hasSudoAccess: Bool) async {
+        isLoading = true
+        error = nil
+
+        do {
+            var changes: [String] = []
+
+            // Update full name if changed (field 8 in master.passwd, 0-indexed field 7)
+            if newFullName != user.fullName {
+                // Use awk to update the gecos field (field 8) in master.passwd
+                _ = try await sshManager.executeCommand("awk -F: -v OFS=: '$1==\"\(user.username)\" {$8=\"\(newFullName)\"} {print}' /var/yp/master.passwd > /var/yp/master.passwd.tmp && mv /var/yp/master.passwd.tmp /var/yp/master.passwd")
+                changes.append("full name")
+            }
+
+            // Update password if provided (field 2 in master.passwd)
+            if let password = newPassword, !password.isEmpty {
+                let hashResult = try await sshManager.executeCommand("openssl passwd -6 '\(password)'")
+                let passwordHash = hashResult.trimmingCharacters(in: .whitespacesAndNewlines)
+                // Use awk to update the password field (field 2) in master.passwd
+                _ = try await sshManager.executeCommand("awk -F: -v OFS=: '$1==\"\(user.username)\" {$2=\"\(passwordHash)\"} {print}' /var/yp/master.passwd > /var/yp/master.passwd.tmp && mv /var/yp/master.passwd.tmp /var/yp/master.passwd")
+                changes.append("password")
+            }
+
+            // Update sudo access if changed
+            if hasSudoAccess != user.hasSudoAccess {
+                if hasSudoAccess {
+                    // Add to sudo-users netgroup
+                    let inNetgroup = try await sshManager.executeCommand("grep '^sudo-users' /var/yp/netgroup | grep -q '(,\(user.username),)' && echo 'exists' || echo 'missing'")
+                    if inNetgroup.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+                        _ = try await sshManager.executeCommand("/usr/bin/sed -i '' 's/^sudo-users.*/& (,\(user.username),)/' /var/yp/netgroup")
+                    }
+                    changes.append("granted sudo access")
+                } else {
+                    // Remove from sudo-users netgroup
+                    _ = try await sshManager.executeCommand("/usr/bin/sed -i '' 's/ (,\(user.username),)//g' /var/yp/netgroup")
+                    changes.append("revoked sudo access")
+                }
+            }
+
+            // Rebuild NIS maps if any changes were made
+            if !changes.isEmpty {
+                guard let domain = setupState.networkDomain?.domainName else {
+                    throw NSError(domain: "GershwinSetup", code: 7, userInfo: [NSLocalizedDescriptionKey: "NIS domain name not found"])
+                }
+
+                // Regenerate /var/yp/passwd from /var/yp/master.passwd
+                _ = try await sshManager.executeCommand("awk -F: 'NF==10 {print $1\":\"$2\":\"$3\":\"$4\":\"$8\":\"$9\":\"$10}' /var/yp/master.passwd > /var/yp/passwd")
+
+                // Rebuild NIS maps
+                _ = try await sshManager.executeCommand("rm -f /var/yp/*/passwd.byname /var/yp/*/passwd.byuid /var/yp/*/master.passwd.byname /var/yp/*/master.passwd.byuid /var/yp/*/netgroup /var/yp/*/netgroup.byuser /var/yp/*/netgroup.byhost 2>/dev/null; cd /var/yp && make NETGROUP=/var/yp/netgroup 2>&1")
+
+                confirmationMessage = "Network user '\(user.username)' updated: \(changes.joined(separator: ", ")).\n\nNIS maps have been rebuilt."
+            } else {
+                confirmationMessage = "No changes were made to user '\(user.username)'."
+            }
+            showingConfirmation = true
+
+            // Reload network users list
+            await loadNetworkUsers()
+
+        } catch {
+            self.error = "Failed to edit network user: \(error.localizedDescription)"
         }
 
         isLoading = false
@@ -2331,6 +2488,7 @@ struct UserManagementPhase: View {
     @ObservedObject var viewModel: GershwinSetupViewModel
     @State private var showCreateUserSheet = false
     @State private var showDeleteConfirmation = false
+    @State private var userToEdit: LocalUser?
     @State private var userToDelete: LocalUser?
     @State private var removeHomeDirectory = false
 
@@ -2361,6 +2519,9 @@ struct UserManagementPhase: View {
                         ForEach(viewModel.setupState.localUsers) { user in
                             UserRow(
                                 user: user,
+                                onEdit: {
+                                    userToEdit = user
+                                },
                                 onDelete: {
                                     userToDelete = user
                                     showDeleteConfirmation = true
@@ -2382,6 +2543,12 @@ struct UserManagementPhase: View {
         }
         .sheet(isPresented: $showCreateUserSheet) {
             CreateUserSheet(viewModel: viewModel, isPresented: $showCreateUserSheet)
+        }
+        .sheet(item: $userToEdit) { user in
+            EditUserSheet(viewModel: viewModel, isPresented: Binding(
+                get: { userToEdit != nil },
+                set: { if !$0 { userToEdit = nil } }
+            ), user: user)
         }
         .alert("Delete User", isPresented: $showDeleteConfirmation) {
             Button("Cancel", role: .cancel) {
@@ -2414,14 +2581,28 @@ struct UserManagementPhase: View {
 
 struct UserRow: View {
     let user: LocalUser
+    let onEdit: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                Text(user.displayName)
-                    .font(.body)
-                    .fontWeight(.medium)
+                HStack(spacing: 8) {
+                    Text(user.displayName)
+                        .font(.body)
+                        .fontWeight(.medium)
+
+                    if user.hasSudoAccess {
+                        Text("sudo")
+                            .font(.caption2)
+                            .fontWeight(.medium)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.orange.opacity(0.2))
+                            .foregroundColor(.orange)
+                            .cornerRadius(4)
+                    }
+                }
 
                 HStack(spacing: 12) {
                     HStack(spacing: 4) {
@@ -2451,6 +2632,13 @@ struct UserRow: View {
             }
 
             Spacer()
+
+            Button(action: onEdit) {
+                Image(systemName: "pencil")
+                    .foregroundColor(.blue)
+            }
+            .buttonStyle(.borderless)
+            .help("Edit user")
 
             Button(action: onDelete) {
                 Image(systemName: "trash")
@@ -2619,10 +2807,122 @@ struct CreateUserSheet: View {
     }
 }
 
+struct EditUserSheet: View {
+    @ObservedObject var viewModel: GershwinSetupViewModel
+    @Binding var isPresented: Bool
+    let user: LocalUser
+
+    @State private var fullName: String = ""
+    @State private var password = ""
+    @State private var confirmPassword = ""
+    @State private var hasSudoAccess = false
+
+    // Form is valid when passwords match (if provided)
+    private var isFormValid: Bool {
+        (password.isEmpty && confirmPassword.isEmpty) ||
+        (!password.isEmpty && password == confirmPassword)
+    }
+
+    private var hasChanges: Bool {
+        fullName != user.fullName ||
+        !password.isEmpty ||
+        hasSudoAccess != user.hasSudoAccess
+    }
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Edit User")
+                .font(.title2)
+                .bold()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Username")
+                    .font(.caption)
+                TextField("Username", text: .constant(user.username))
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(true)
+                    .foregroundColor(.secondary)
+
+                Text("Full Name")
+                    .font(.caption)
+                TextField("Full Name", text: $fullName)
+                    .textFieldStyle(.roundedBorder)
+
+                Divider()
+
+                Text("Change Password")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                Text("Leave blank to keep current password")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                SecureField("New Password", text: $password)
+                    .textFieldStyle(.roundedBorder)
+
+                SecureField("Confirm New Password", text: $confirmPassword)
+                    .textFieldStyle(.roundedBorder)
+
+                if !confirmPassword.isEmpty && password != confirmPassword {
+                    Text("Passwords do not match")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+
+                Divider()
+
+                Toggle(isOn: $hasSudoAccess) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Allow sudo access")
+                            .font(.body)
+                        Text("Grants sudo/administrative privileges")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .padding()
+
+            HStack {
+                Button("Cancel") {
+                    isPresented = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button(action: {
+                    Task {
+                        await viewModel.editUser(
+                            user: user,
+                            newFullName: fullName,
+                            newPassword: password.isEmpty ? nil : password,
+                            hasSudoAccess: hasSudoAccess
+                        )
+                        isPresented = false
+                    }
+                }) {
+                    Text("Save Changes")
+                        .frame(minWidth: 80)
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!isFormValid || !hasChanges)
+                .opacity(isFormValid && hasChanges ? 1.0 : 0.5)
+            }
+        }
+        .padding()
+        .frame(width: 450)
+        .onAppear {
+            fullName = user.fullName
+            hasSudoAccess = user.hasSudoAccess
+        }
+    }
+}
+
 struct NetworkUserManagementPhase: View {
     @ObservedObject var viewModel: GershwinSetupViewModel
     @State private var showCreateUserSheet = false
     @State private var showDeleteConfirmation = false
+    @State private var userToEdit: LocalUser?
     @State private var userToDelete: LocalUser?
 
     private var isClient: Bool {
@@ -2681,6 +2981,9 @@ struct NetworkUserManagementPhase: View {
                             NetworkUserRow(
                                 user: user,
                                 isReadOnly: isClient,
+                                onEdit: {
+                                    userToEdit = user
+                                },
                                 onDelete: {
                                     userToDelete = user
                                     showDeleteConfirmation = true
@@ -2706,6 +3009,12 @@ struct NetworkUserManagementPhase: View {
         .sheet(isPresented: $showCreateUserSheet) {
             CreateNetworkUserSheet(viewModel: viewModel, isPresented: $showCreateUserSheet)
         }
+        .sheet(item: $userToEdit) { user in
+            EditNetworkUserSheet(viewModel: viewModel, isPresented: Binding(
+                get: { userToEdit != nil },
+                set: { if !$0 { userToEdit = nil } }
+            ), user: user)
+        }
         .alert("Delete Network User", isPresented: $showDeleteConfirmation) {
             Button("Cancel", role: .cancel) {
                 userToDelete = nil
@@ -2729,6 +3038,7 @@ struct NetworkUserManagementPhase: View {
 struct NetworkUserRow: View {
     let user: LocalUser
     var isReadOnly: Bool = false
+    let onEdit: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
@@ -2738,9 +3048,22 @@ struct NetworkUserRow: View {
                 .font(.caption)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(user.displayName)
-                    .font(.body)
-                    .fontWeight(.medium)
+                HStack(spacing: 8) {
+                    Text(user.displayName)
+                        .font(.body)
+                        .fontWeight(.medium)
+
+                    if user.hasSudoAccess {
+                        Text("sudo")
+                            .font(.caption2)
+                            .fontWeight(.medium)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.orange.opacity(0.2))
+                            .foregroundColor(.orange)
+                            .cornerRadius(4)
+                    }
+                }
 
                 HStack(spacing: 12) {
                     HStack(spacing: 4) {
@@ -2772,6 +3095,13 @@ struct NetworkUserRow: View {
             Spacer()
 
             if !isReadOnly {
+                Button(action: onEdit) {
+                    Image(systemName: "pencil")
+                        .foregroundColor(.blue)
+                }
+                .buttonStyle(.borderless)
+                .help("Edit network user")
+
                 Button(action: onDelete) {
                     Image(systemName: "trash")
                         .foregroundColor(.red)
@@ -2940,6 +3270,136 @@ struct CreateNetworkUserSheet: View {
         }
         .padding()
         .frame(width: 450)
+    }
+}
+
+struct EditNetworkUserSheet: View {
+    @ObservedObject var viewModel: GershwinSetupViewModel
+    @Binding var isPresented: Bool
+    let user: LocalUser
+
+    @State private var fullName: String = ""
+    @State private var password = ""
+    @State private var confirmPassword = ""
+    @State private var hasSudoAccess = false
+
+    // Form is valid when passwords match (if provided)
+    private var isFormValid: Bool {
+        (password.isEmpty && confirmPassword.isEmpty) ||
+        (!password.isEmpty && password == confirmPassword)
+    }
+
+    private var hasChanges: Bool {
+        fullName != user.fullName ||
+        !password.isEmpty ||
+        hasSudoAccess != user.hasSudoAccess
+    }
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Edit Network User")
+                .font(.title2)
+                .bold()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Username")
+                    .font(.caption)
+                TextField("Username", text: .constant(user.username))
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(true)
+                    .foregroundColor(.secondary)
+
+                Text("Full Name")
+                    .font(.caption)
+                TextField("Full Name", text: $fullName)
+                    .textFieldStyle(.roundedBorder)
+
+                Divider()
+
+                Text("Change Password")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                Text("Leave blank to keep current password")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                SecureField("New Password", text: $password)
+                    .textFieldStyle(.roundedBorder)
+
+                SecureField("Confirm New Password", text: $confirmPassword)
+                    .textFieldStyle(.roundedBorder)
+
+                if !confirmPassword.isEmpty && password != confirmPassword {
+                    Text("Passwords do not match")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+
+                Divider()
+
+                Toggle(isOn: $hasSudoAccess) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Allow sudo access")
+                            .font(.body)
+                        Text("Grants sudo/administrative privileges")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .padding()
+
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "info.circle")
+                    .foregroundColor(.blue)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Changes will be applied to the NIS database")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                    Text("NIS maps will be rebuilt after saving changes.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.blue.opacity(0.1))
+            )
+            .padding(.horizontal)
+
+            HStack {
+                Button("Cancel") {
+                    isPresented = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button(action: {
+                    Task {
+                        await viewModel.editNetworkUser(
+                            user: user,
+                            newFullName: fullName,
+                            newPassword: password.isEmpty ? nil : password,
+                            hasSudoAccess: hasSudoAccess
+                        )
+                        isPresented = false
+                    }
+                }) {
+                    Text("Save Changes")
+                        .frame(minWidth: 80)
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!isFormValid || !hasChanges)
+                .opacity(isFormValid && hasChanges ? 1.0 : 0.5)
+            }
+        }
+        .padding()
+        .frame(width: 450)
+        .onAppear {
+            fullName = user.fullName
+            hasSudoAccess = user.hasSudoAccess
+        }
     }
 }
 
