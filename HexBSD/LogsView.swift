@@ -30,11 +30,78 @@ struct LogFile: Identifiable, Hashable {
     }
 }
 
+// MARK: - Log Search Result Model
+
+struct LogSearchResult: Identifiable, Hashable {
+    let id = UUID()
+    let name: String
+    let path: String
+    let size: String
+    let matchCount: Int
+
+    var icon: String {
+        if name.contains("error") || name.contains("err") {
+            return "exclamationmark.triangle"
+        } else if name.contains("security") || name.contains("auth") {
+            return "lock.shield"
+        } else if name.contains("mail") {
+            return "envelope"
+        } else if name.contains("cron") {
+            return "clock"
+        } else {
+            return "doc.text"
+        }
+    }
+}
+
+// MARK: - Highlighted Text View
+
+struct HighlightedText: View {
+    let text: String
+    let highlight: String
+
+    var body: some View {
+        if highlight.isEmpty {
+            Text(text)
+        } else {
+            highlightedText
+        }
+    }
+
+    private var highlightedText: Text {
+        guard !highlight.isEmpty else { return Text(text) }
+
+        var result = Text("")
+        var remaining = text[...]
+
+        while let range = remaining.range(of: highlight, options: .caseInsensitive) {
+            // Add text before the match
+            let before = String(remaining[..<range.lowerBound])
+            result = result + Text(before)
+
+            // Add the highlighted match with bold + color (no background on Text)
+            let match = String(remaining[range])
+            result = result + Text(match)
+                .foregroundColor(.orange)
+                .bold()
+
+            // Move past this match
+            remaining = remaining[range.upperBound...]
+        }
+
+        // Add any remaining text
+        result = result + Text(String(remaining))
+
+        return result
+    }
+}
+
 // MARK: - Logs Content View
 
 struct LogsContentView: View {
     @StateObject private var viewModel = LogsViewModel()
     @State private var showError = false
+    @FocusState private var isSearchFocused: Bool
 
     var body: some View {
         HSplitView {
@@ -58,10 +125,87 @@ struct LogsContentView: View {
                 }
                 .padding()
 
+                // Global search field
+                HStack(spacing: 4) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
+                    TextField("Search all logs...", text: $viewModel.globalSearchText)
+                        .textFieldStyle(.plain)
+                        .onSubmit {
+                            Task {
+                                await viewModel.searchAllLogs()
+                            }
+                        }
+                    if viewModel.isSearchingAll {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                    } else if !viewModel.globalSearchText.isEmpty {
+                        Button(action: { viewModel.clearGlobalSearch() }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(6)
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+
                 Divider()
 
-                // File list
-                if viewModel.isLoadingList {
+                // Search results or file list
+                if viewModel.showingSearchResults {
+                    // Search results view
+                    VStack(spacing: 0) {
+                        HStack {
+                            Text("\(viewModel.searchResults.count) files, \(viewModel.totalSearchMatches) matches")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button("Show All") {
+                                viewModel.clearGlobalSearch()
+                            }
+                            .font(.caption)
+                            .buttonStyle(.borderless)
+                        }
+                        .padding(.horizontal)
+                        .padding(.vertical, 6)
+
+                        Divider()
+
+                        List(viewModel.searchResults) { result in
+                            Button(action: {
+                                viewModel.selectLogFromSearch(result)
+                            }) {
+                                HStack {
+                                    Image(systemName: result.icon)
+                                        .foregroundColor(.blue)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(result.name)
+                                            .font(.body)
+                                            .foregroundColor(.primary)
+                                        HStack {
+                                            Text(result.size)
+                                            Text("•")
+                                            Text("\(result.matchCount) matches")
+                                                .foregroundColor(.orange)
+                                        }
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .foregroundColor(.secondary)
+                                        .font(.caption)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                } else if viewModel.isLoadingList {
                     VStack(spacing: 20) {
                         ProgressView()
                         Text("Loading logs...")
@@ -104,6 +248,33 @@ struct LogsContentView: View {
                     Spacer()
 
                     if viewModel.selectedLog != nil {
+                        // Search field
+                        HStack(spacing: 4) {
+                            Image(systemName: "magnifyingglass")
+                                .foregroundColor(.secondary)
+                            TextField("Search logs...", text: $viewModel.searchText)
+                                .textFieldStyle(.plain)
+                                .frame(width: 150)
+                                .focused($isSearchFocused)
+                            if !viewModel.searchText.isEmpty {
+                                Text("\(viewModel.matchCount) matches")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Button(action: { viewModel.searchText = "" }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .cornerRadius(6)
+
+                        Divider()
+                            .frame(height: 16)
+
                         // Line count selector
                         Picker("Lines", selection: $viewModel.lineCount) {
                             Text("100").tag(100)
@@ -164,12 +335,26 @@ struct LogsContentView: View {
                 } else {
                     ScrollViewReader { proxy in
                         ScrollView {
-                            Text(viewModel.logContent)
-                                .font(.system(.body, design: .monospaced))
-                                .textSelection(.enabled)
+                            if viewModel.searchText.isEmpty {
+                                Text(viewModel.logContent)
+                                    .font(.system(.body, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding()
+                                    .id("logContent")
+                            } else {
+                                // Show filtered content with highlighted matches
+                                VStack(alignment: .leading, spacing: 0) {
+                                    ForEach(Array(viewModel.filteredLogContent.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
+                                        HighlightedText(text: line, highlight: viewModel.searchText)
+                                            .font(.system(.body, design: .monospaced))
+                                            .textSelection(.enabled)
+                                    }
+                                }
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding()
                                 .id("logContent")
+                            }
                         }
                         .background(Color(nsColor: .textBackgroundColor))
                         .onChange(of: viewModel.logContent) { oldValue, newValue in
@@ -218,6 +403,15 @@ struct LogsContentView: View {
                 }
             }
         }
+        .background {
+            Button("") {
+                if viewModel.selectedLog != nil {
+                    isSearchFocused = true
+                }
+            }
+            .keyboardShortcut("f", modifiers: .command)
+            .opacity(0)
+        }
     }
 }
 
@@ -233,6 +427,30 @@ class LogsViewModel: ObservableObject {
     @Published var error: String?
     @Published var lineCount: Int = 100
     @Published var autoRefresh: Bool = false
+    @Published var searchText: String = ""
+
+    // Global search
+    @Published var globalSearchText: String = ""
+    @Published var searchResults: [LogSearchResult] = []
+    @Published var isSearchingAll = false
+    @Published var showingSearchResults = false
+
+    var filteredLogContent: String {
+        guard !searchText.isEmpty else { return logContent }
+        let lines = logContent.components(separatedBy: "\n")
+        let filtered = lines.filter { $0.localizedCaseInsensitiveContains(searchText) }
+        return filtered.joined(separator: "\n")
+    }
+
+    var matchCount: Int {
+        guard !searchText.isEmpty else { return 0 }
+        let lines = logContent.components(separatedBy: "\n")
+        return lines.filter { $0.localizedCaseInsensitiveContains(searchText) }.count
+    }
+
+    var totalSearchMatches: Int {
+        searchResults.reduce(0) { $0 + $1.matchCount }
+    }
 
     private let sshManager = SSHConnectionManager.shared
 
@@ -291,5 +509,42 @@ class LogsViewModel: ObservableObject {
         } catch {
             self.error = "Failed to export log: \(error.localizedDescription)"
         }
+    }
+
+    func searchAllLogs() async {
+        guard !globalSearchText.isEmpty else {
+            searchResults = []
+            showingSearchResults = false
+            return
+        }
+
+        isSearchingAll = true
+        error = nil
+
+        do {
+            searchResults = try await sshManager.searchAllLogs(pattern: globalSearchText)
+            showingSearchResults = true
+        } catch {
+            self.error = "Search failed: \(error.localizedDescription)"
+            searchResults = []
+        }
+
+        isSearchingAll = false
+    }
+
+    func selectLogFromSearch(_ result: LogSearchResult) {
+        // Find the matching log file and select it
+        if let logFile = logFiles.first(where: { $0.path == result.path }) {
+            selectedLog = logFile
+            // Set the local search filter to highlight matches
+            searchText = globalSearchText
+        }
+        showingSearchResults = false
+    }
+
+    func clearGlobalSearch() {
+        globalSearchText = ""
+        searchResults = []
+        showingSearchResults = false
     }
 }

@@ -581,6 +581,65 @@ extension SSHConnectionManager {
         return try await executeCommand(command)
     }
 
+    /// Search all log files for a pattern, returns files with match counts
+    func searchAllLogs(pattern: String) async throws -> [LogSearchResult] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Escape single quotes in the pattern for shell safety
+        let escapedPattern = pattern.replacingOccurrences(of: "'", with: "'\\''")
+
+        // Use grep -c to count matches per file, -i for case insensitive
+        // Only search readable non-compressed files
+        // Wrap in a subshell that always exits 0 to avoid TTY errors
+        let command = """
+        (for f in /var/log/*; do
+            if [ -f "$f" ] && [ -r "$f" ]; then
+                case "$f" in
+                    *.bz2|*.gz|*.xz) ;;
+                    *)
+                        count=$(grep -ci '\(escapedPattern)' "$f" 2>/dev/null) || count=0
+                        if [ "$count" -gt 0 ] 2>/dev/null; then
+                            size=$(ls -lh "$f" 2>/dev/null | awk '{print $5}')
+                            echo "$count|$size|$f"
+                        fi
+                        ;;
+                esac
+            fi
+        done) 2>/dev/null; true
+        """
+        let output = try await executeCommand(command)
+
+        return parseLogSearchResults(output)
+    }
+
+    private func parseLogSearchResults(_ output: String) -> [LogSearchResult] {
+        var results: [LogSearchResult] = []
+        let lines = output.components(separatedBy: .newlines)
+
+        for line in lines where !line.isEmpty {
+            let parts = line.components(separatedBy: "|")
+            guard parts.count == 3,
+                  let count = Int(parts[0]) else { continue }
+
+            let size = parts[1]
+            let path = parts[2]
+            let name = (path as NSString).lastPathComponent
+
+            results.append(LogSearchResult(
+                name: name,
+                path: path,
+                size: size,
+                matchCount: count
+            ))
+        }
+
+        // Sort by match count descending
+        return results.sorted { $0.matchCount > $1.matchCount }
+    }
+
     private func parseLogFiles(_ output: String) -> [LogFile] {
         var files: [LogFile] = []
         let lines = output.components(separatedBy: .newlines)
