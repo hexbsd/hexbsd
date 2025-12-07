@@ -2321,7 +2321,6 @@ struct CreateUserSheet: View {
     @State private var password = ""
     @State private var confirmPassword = ""
     @State private var addToWheel = false
-    @State private var showPasswordMismatchError = false
     @State private var usernameManuallyEdited = false
 
     // Generate username from full name: first initial + last name, lowercase
@@ -2347,6 +2346,16 @@ struct CreateUserSheet: View {
     private var usernameExists: Bool {
         let existingUsernames = viewModel.setupState.localUsers.map { $0.username }
         return existingUsernames.contains(username)
+    }
+
+    // Form is valid when all fields are filled and validated
+    private var isFormValid: Bool {
+        !username.isEmpty &&
+        !password.isEmpty &&
+        !confirmPassword.isEmpty &&
+        password == confirmPassword &&
+        !usernameExists &&
+        !viewModel.isLoading
     }
 
     var body: some View {
@@ -2393,7 +2402,7 @@ struct CreateUserSheet: View {
                 SecureField("Confirm Password", text: $confirmPassword)
                     .textFieldStyle(.roundedBorder)
 
-                if showPasswordMismatchError {
+                if !confirmPassword.isEmpty && password != confirmPassword {
                     Text("Passwords do not match")
                         .font(.caption)
                         .foregroundColor(.red)
@@ -2438,19 +2447,19 @@ struct CreateUserSheet: View {
                 }
                 .keyboardShortcut(.cancelAction)
 
-                Button("Create User") {
-                    if password != confirmPassword {
-                        showPasswordMismatchError = true
-                        return
-                    }
-
+                Button(action: {
                     Task {
                         await viewModel.createUser(username: username, fullName: fullName, password: password, addToWheel: addToWheel)
                         isPresented = false
                     }
+                }) {
+                    Text("Create User")
+                        .frame(minWidth: 80)
                 }
+                .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(username.isEmpty || password.isEmpty || confirmPassword.isEmpty || viewModel.isLoading || usernameExists)
+                .disabled(!isFormValid)
+                .opacity(isFormValid ? 1.0 : 0.5)
             }
         }
         .padding()
@@ -2616,7 +2625,6 @@ struct CreateNetworkUserSheet: View {
     @State private var password = ""
     @State private var confirmPassword = ""
     @State private var addToWheel = false
-    @State private var showPasswordMismatchError = false
     @State private var usernameManuallyEdited = false
 
     // Generate username from full name: first initial + last name, lowercase
@@ -2642,6 +2650,16 @@ struct CreateNetworkUserSheet: View {
     private var usernameExists: Bool {
         let existingUsernames = viewModel.setupState.networkUsers.map { $0.username }
         return existingUsernames.contains(username)
+    }
+
+    // Form is valid when all fields are filled and validated
+    private var isFormValid: Bool {
+        !username.isEmpty &&
+        !password.isEmpty &&
+        !confirmPassword.isEmpty &&
+        password == confirmPassword &&
+        !usernameExists &&
+        !viewModel.isLoading
     }
 
     var body: some View {
@@ -2688,7 +2706,7 @@ struct CreateNetworkUserSheet: View {
                 SecureField("Confirm Password", text: $confirmPassword)
                     .textFieldStyle(.roundedBorder)
 
-                if showPasswordMismatchError {
+                if !confirmPassword.isEmpty && password != confirmPassword {
                     Text("Passwords do not match")
                         .font(.caption)
                         .foregroundColor(.red)
@@ -2733,19 +2751,19 @@ struct CreateNetworkUserSheet: View {
                 }
                 .keyboardShortcut(.cancelAction)
 
-                Button("Create Network User") {
-                    if password != confirmPassword {
-                        showPasswordMismatchError = true
-                        return
-                    }
-
+                Button(action: {
                     Task {
                         await viewModel.createNetworkUser(username: username, fullName: fullName, password: password, addToWheel: addToWheel)
                         isPresented = false
                     }
+                }) {
+                    Text("Create Network User")
+                        .frame(minWidth: 80)
                 }
+                .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(username.isEmpty || password.isEmpty || confirmPassword.isEmpty || viewModel.isLoading || usernameExists)
+                .disabled(!isFormValid)
+                .opacity(isFormValid ? 1.0 : 0.5)
             }
         }
         .padding()
