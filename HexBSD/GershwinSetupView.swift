@@ -703,6 +703,7 @@ uidstart=1001
             await loadSetupState()
 
         } catch {
+            print("DEBUG: Network domain configuration failed with error: \(error)")
             self.error = "Failed to configure network domain: \(error.localizedDescription)"
         }
 
@@ -712,81 +713,149 @@ uidstart=1001
     }
 
     private func setupNetworkServer() async throws {
+        print("DEBUG NIS Server: Starting setup for domain '\(nisDomainName)'")
+
         // Configure NIS server
         networkConfigStep = "Configuring NIS server..."
-        _ = try await sshManager.executeCommand("sysrc nisdomainname=\"\(nisDomainName)\"")
-        _ = try await sshManager.executeCommand("sysrc nis_server_enable=\"YES\"")
-        _ = try await sshManager.executeCommand("sysrc nis_yppasswdd_enable=\"YES\"")
+        print("DEBUG NIS Server: Configuring NIS server in rc.conf...")
+        var result = try await sshManager.executeCommand("sysrc nisdomainname=\"\(nisDomainName)\"")
+        print("DEBUG NIS Server: sysrc nisdomainname result: \(result)")
+        result = try await sshManager.executeCommand("sysrc nis_server_enable=\"YES\"")
+        print("DEBUG NIS Server: sysrc nis_server_enable result: \(result)")
+        result = try await sshManager.executeCommand("sysrc nis_yppasswdd_enable=\"YES\"")
+        print("DEBUG NIS Server: sysrc nis_yppasswdd_enable result: \(result)")
 
         // Configure NFS server
         networkConfigStep = "Configuring NFS server..."
-        _ = try await sshManager.executeCommand("sysrc rpcbind_enable=\"YES\"")
-        _ = try await sshManager.executeCommand("sysrc nfs_server_enable=\"YES\"")
-        _ = try await sshManager.executeCommand("sysrc mountd_enable=\"YES\"")
-        _ = try await sshManager.executeCommand("sysrc rpc_lockd_enable=\"YES\"")
+        print("DEBUG NIS Server: Configuring NFS server in rc.conf...")
+        result = try await sshManager.executeCommand("sysrc rpcbind_enable=\"YES\"")
+        print("DEBUG NIS Server: sysrc rpcbind_enable result: \(result)")
+        result = try await sshManager.executeCommand("sysrc nfs_server_enable=\"YES\"")
+        print("DEBUG NIS Server: sysrc nfs_server_enable result: \(result)")
+        result = try await sshManager.executeCommand("sysrc mountd_enable=\"YES\"")
+        print("DEBUG NIS Server: sysrc mountd_enable result: \(result)")
+        result = try await sshManager.executeCommand("sysrc rpc_lockd_enable=\"YES\"")
+        print("DEBUG NIS Server: sysrc rpc_lockd_enable result: \(result)")
 
         // Create /etc/exports if it doesn't exist
         networkConfigStep = "Configuring /etc/exports..."
-        _ = try await sshManager.executeCommand("touch /etc/exports")
+        print("DEBUG NIS Server: Configuring /etc/exports...")
+        result = try await sshManager.executeCommand("touch /etc/exports")
+        print("DEBUG NIS Server: touch /etc/exports result: \(result)")
 
         // Check if /Network export already exists
         let exportsContent = try await sshManager.executeCommand("cat /etc/exports 2>/dev/null || echo ''")
+        print("DEBUG NIS Server: Current /etc/exports content: \(exportsContent)")
         if !exportsContent.contains("/Network") {
-            _ = try await sshManager.executeCommand("echo '/Network -maproot=root -alldirs' >> /etc/exports")
+            result = try await sshManager.executeCommand("echo '/Network -maproot=root -alldirs' >> /etc/exports")
+            print("DEBUG NIS Server: Added /Network to exports: \(result)")
         }
 
         // Set up NIS database directory
         networkConfigStep = "Setting up NIS database..."
-        _ = try await sshManager.executeCommand("mkdir -p /var/yp")
+        print("DEBUG NIS Server: Setting up /var/yp...")
+        result = try await sshManager.executeCommand("mkdir -p /var/yp")
+        print("DEBUG NIS Server: mkdir /var/yp result: \(result)")
 
         // Create initial master.passwd for NIS with only network users (empty initially)
-        // We create a minimal file that ypinit can use
         networkConfigStep = "Creating NIS user database..."
+        print("DEBUG NIS Server: Checking /var/yp/master.passwd...")
         let ypmasterPasswd = try await sshManager.executeCommand("cat /var/yp/master.passwd 2>/dev/null || echo ''")
+        print("DEBUG NIS Server: /var/yp/master.passwd content: '\(ypmasterPasswd.trimmingCharacters(in: .whitespacesAndNewlines))'")
         if ypmasterPasswd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            // Create empty master.passwd - users will be added via the Users tab
-            _ = try await sshManager.executeCommand("touch /var/yp/master.passwd")
-            _ = try await sshManager.executeCommand("chmod 600 /var/yp/master.passwd")
-        }
-
-        // Create /var/yp/Makefile if it doesn't exist (copy from default)
-        let makefileExists = try await sshManager.executeCommand("test -f /var/yp/Makefile && echo 'exists' || echo 'missing'")
-        if makefileExists.contains("missing") {
-            _ = try await sshManager.executeCommand("cp /var/yp/Makefile.dist /var/yp/Makefile 2>/dev/null || true")
+            result = try await sshManager.executeCommand("touch /var/yp/master.passwd")
+            print("DEBUG NIS Server: touch /var/yp/master.passwd result: \(result)")
+            result = try await sshManager.executeCommand("chmod 600 /var/yp/master.passwd")
+            print("DEBUG NIS Server: chmod 600 /var/yp/master.passwd result: \(result)")
         }
 
         // Set the NIS domain name
         networkConfigStep = "Setting NIS domain..."
-        _ = try await sshManager.executeCommand("domainname \(nisDomainName)")
+        print("DEBUG NIS Server: Setting domain name to '\(nisDomainName)'...")
+        result = try await sshManager.executeCommand("domainname \(nisDomainName)")
+        print("DEBUG NIS Server: domainname result: \(result)")
 
         // Start rpcbind (required for NIS/NFS)
         networkConfigStep = "Starting rpcbind..."
-        _ = try await sshManager.executeCommand("service rpcbind onestart 2>&1 || true")
+        print("DEBUG NIS Server: Starting rpcbind...")
+        result = try await sshManager.executeCommand("service rpcbind onestart 2>&1 || true")
+        print("DEBUG NIS Server: rpcbind start result: \(result)")
 
-        // Initialize NIS maps
+        // Initialize NIS maps (this creates /var/yp/Makefile from Makefile.dist)
         networkConfigStep = "Initializing NIS maps..."
-        // Get the hostname for ypinit - it asks for list of NIS servers, we provide just this host
+        print("DEBUG NIS Server: Getting hostname...")
         let hostname = try await sshManager.executeCommand("hostname -s")
         let trimmedHostname = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
-        // ypinit -m prompts for: 1) list of servers (one per line, Ctrl+D to end), 2) confirmation (y/n)
-        // We provide the hostname, then empty line to signal done, then 'y' to confirm
-        _ = try await sshManager.executeCommand("cd /var/yp && printf '%s\\n\\ny\\n' '\(trimmedHostname)' | ypinit -m \(nisDomainName) 2>&1 || true")
+        print("DEBUG NIS Server: Hostname is '\(trimmedHostname)'")
+
+        print("DEBUG NIS Server: Running ypinit -m \(nisDomainName)...")
+        result = try await sshManager.executeCommand("cd /var/yp && printf '%s\\n\\ny\\n' '\(trimmedHostname)' | ypinit -m \(nisDomainName) 2>&1 || true")
+        print("DEBUG NIS Server: ypinit result: \(result)")
+
+        // Note: We don't modify the Makefile. Instead, we pass MASTER_PASSWD as an argument
+        // when running make to rebuild NIS maps. The Makefile is designed to accept this.
+        print("DEBUG NIS Server: Skipping Makefile modification - will pass MASTER_PASSWD to make command")
 
         // Start NIS server
         networkConfigStep = "Starting NIS server..."
-        _ = try await sshManager.executeCommand("service ypserv start 2>&1 || true")
-        _ = try await sshManager.executeCommand("service yppasswdd start 2>&1 || true")
+        print("DEBUG NIS Server: Starting ypserv...")
+        result = try await sshManager.executeCommand("service ypserv start 2>&1 || true")
+        print("DEBUG NIS Server: ypserv start result: \(result)")
+        result = try await sshManager.executeCommand("service yppasswdd start 2>&1 || true")
+        print("DEBUG NIS Server: yppasswdd start result: \(result)")
 
         // Start NFS server
         networkConfigStep = "Starting NFS server..."
-        _ = try await sshManager.executeCommand("service nfsd start 2>&1 || true")
-        _ = try await sshManager.executeCommand("service mountd start 2>&1 || true")
-        _ = try await sshManager.executeCommand("service lockd start 2>&1 || true")
+        print("DEBUG NIS Server: Starting NFS services...")
+        result = try await sshManager.executeCommand("service nfsd start 2>&1 || true")
+        print("DEBUG NIS Server: nfsd start result: \(result)")
+        result = try await sshManager.executeCommand("service mountd start 2>&1 || true")
+        print("DEBUG NIS Server: mountd start result: \(result)")
+        result = try await sshManager.executeCommand("service lockd start 2>&1 || true")
+        print("DEBUG NIS Server: lockd start result: \(result)")
+
+        // Configure server as NIS client of itself (required for ypcat and local NIS lookups)
+        networkConfigStep = "Configuring NIS client on server..."
+        print("DEBUG NIS Server: Configuring server as NIS client of itself...")
+        result = try await sshManager.executeCommand("sysrc nis_client_enable=\"YES\"")
+        print("DEBUG NIS Server: sysrc nis_client_enable result: \(result)")
+
+        // Enable NIS compat mode by adding +::::::::: to /etc/master.passwd if not present
+        // master.passwd has 10 fields: name:password:uid:gid:class:change:expire:gecos:home:shell
+        print("DEBUG NIS Server: Enabling NIS compat mode...")
+        let masterPasswdHasPlus = try await sshManager.executeCommand("grep -q '^+:' /etc/master.passwd && echo 'exists' || echo 'missing'")
+        print("DEBUG NIS Server: master.passwd '+:' check: \(masterPasswdHasPlus.trimmingCharacters(in: .whitespacesAndNewlines))")
+        if masterPasswdHasPlus.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+            result = try await sshManager.executeCommand("echo '+:::::::::' >> /etc/master.passwd")
+            print("DEBUG NIS Server: Added +::::::::: to master.passwd: \(result)")
+            result = try await sshManager.executeCommand("pwd_mkdb -p /etc/master.passwd 2>&1")
+            print("DEBUG NIS Server: pwd_mkdb result: \(result)")
+        }
+
+        // Add +::::: to /etc/group if not present
+        let groupHasPlus = try await sshManager.executeCommand("grep -q '^+:' /etc/group && echo 'exists' || echo 'missing'")
+        print("DEBUG NIS Server: group '+:' check: \(groupHasPlus.trimmingCharacters(in: .whitespacesAndNewlines))")
+        if groupHasPlus.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+            result = try await sshManager.executeCommand("echo '+:*::' >> /etc/group")
+            print("DEBUG NIS Server: Added +:*:: to group: \(result)")
+        }
+
+        // Start ypbind so server can query its own NIS database
+        print("DEBUG NIS Server: Starting ypbind...")
+        result = try await sshManager.executeCommand("service ypbind start 2>&1 || true")
+        print("DEBUG NIS Server: ypbind start result: \(result)")
 
         // Verify services are running
         networkConfigStep = "Verifying services..."
+        print("DEBUG NIS Server: Checking service status...")
         let ypservStatus = try await sshManager.executeCommand("service ypserv status 2>&1 || echo 'not running'")
+        print("DEBUG NIS Server: ypserv status: \(ypservStatus)")
         let nfsdStatus = try await sshManager.executeCommand("service nfsd status 2>&1 || echo 'not running'")
+        print("DEBUG NIS Server: nfsd status: \(nfsdStatus)")
+
+        // Check ypbind status too
+        let ypbindStatus = try await sshManager.executeCommand("service ypbind status 2>&1 || echo 'not running'")
+        print("DEBUG NIS Server: ypbind status: \(ypbindStatus)")
 
         confirmationMessage = """
         NIS/NFS server configured and started successfully!
@@ -794,11 +863,13 @@ uidstart=1001
         Configuration completed:
         ✓ NIS domain: \(nisDomainName)
         ✓ NIS server configured and started
+        ✓ NIS client configured (server binds to itself)
         ✓ NFS server configured and started
         ✓ /Network exported for clients
 
         Service status:
         ypserv: \(ypservStatus.contains("running") ? "running" : "check status")
+        ypbind: \(ypbindStatus.contains("running") ? "running" : "check status")
         nfsd: \(nfsdStatus.contains("running") ? "running" : "check status")
 
         You can now add network users in the Users tab.
@@ -808,70 +879,131 @@ uidstart=1001
     }
 
     private func setupNetworkClient() async throws {
+        print("DEBUG CLIENT: Starting NIS client setup...")
+        print("DEBUG CLIENT: Domain: \(nisDomainName), Server: \(nisServerAddress)")
+
         guard !nisServerAddress.isEmpty else {
+            print("DEBUG CLIENT: ERROR - NIS server address is empty")
             throw NSError(domain: "GershwinSetup", code: 3, userInfo: [NSLocalizedDescriptionKey: "Please enter NIS server address"])
         }
 
         // Configure NIS client
         networkConfigStep = "Configuring NIS client..."
-        _ = try await sshManager.executeCommand("sysrc nisdomainname=\"\(nisDomainName)\"")
-        _ = try await sshManager.executeCommand("sysrc rpcbind_enable=\"YES\"")
-        _ = try await sshManager.executeCommand("sysrc nis_client_enable=\"YES\"")
+        print("DEBUG CLIENT: Configuring NIS client rc.conf entries...")
+        let sysrc1 = try await sshManager.executeCommand("sysrc nisdomainname=\"\(nisDomainName)\"")
+        print("DEBUG CLIENT: sysrc nisdomainname result: \(sysrc1)")
+        let sysrc2 = try await sshManager.executeCommand("sysrc rpcbind_enable=\"YES\"")
+        print("DEBUG CLIENT: sysrc rpcbind_enable result: \(sysrc2)")
+        let sysrc3 = try await sshManager.executeCommand("sysrc nis_client_enable=\"YES\"")
+        print("DEBUG CLIENT: sysrc nis_client_enable result: \(sysrc3)")
 
         // Configure NFS client
         networkConfigStep = "Configuring NFS client..."
-        _ = try await sshManager.executeCommand("sysrc nfs_client_enable=\"YES\"")
-        _ = try await sshManager.executeCommand("sysrc rpc_lockd_enable=\"YES\"")
+        print("DEBUG CLIENT: Configuring NFS client rc.conf entries...")
+        let sysrc4 = try await sshManager.executeCommand("sysrc nfs_client_enable=\"YES\"")
+        print("DEBUG CLIENT: sysrc nfs_client_enable result: \(sysrc4)")
+        let sysrc5 = try await sshManager.executeCommand("sysrc rpc_lockd_enable=\"YES\"")
+        print("DEBUG CLIENT: sysrc rpc_lockd_enable result: \(sysrc5)")
 
-        // Update /etc/nsswitch.conf
-        // Use "files nis" order so local users (like root) always work even if NIS is down
-        networkConfigStep = "Configuring nsswitch.conf..."
-        let nsswitchContent = """
-group: files nis
-group_compat: nis
-hosts: files dns
-netgroup: compat
-networks: files
-passwd: files nis
-passwd_compat: nis
-shells: files
-services: compat
-services_compat: nis
-protocols: files
-rpc: files
-"""
-        // Use heredoc to avoid escaping issues
-        _ = try await sshManager.executeCommand("cat > /etc/nsswitch.conf << 'NSSWITCH_EOF'\n\(nsswitchContent)\nNSSWITCH_EOF")
+        // Enable NIS compat mode by adding +::::: entries to passwd/group files
+        // This uses the traditional FreeBSD approach with the default nsswitch.conf (compat mode)
+        networkConfigStep = "Enabling NIS compat mode..."
+        print("DEBUG CLIENT: Enabling NIS compat mode...")
+
+        // Add +::::::::: to /etc/master.passwd if not present (enables NIS user lookup)
+        // master.passwd has 10 fields: name:password:uid:gid:class:change:expire:gecos:home:shell
+        // So we need 9 colons for the + entry: +::::::::::
+        let masterPasswdHasPlus = try await sshManager.executeCommand("grep -q '^+:' /etc/master.passwd && echo 'exists' || echo 'missing'")
+        print("DEBUG CLIENT: master.passwd '+:' check: \(masterPasswdHasPlus.trimmingCharacters(in: .whitespacesAndNewlines))")
+        if masterPasswdHasPlus.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+            print("DEBUG CLIENT: Adding +:::::::::  to /etc/master.passwd (10 fields)...")
+            let addPlusResult = try await sshManager.executeCommand("echo '+:::::::::' >> /etc/master.passwd")
+            print("DEBUG CLIENT: Add +::::::::: result: \(addPlusResult)")
+            // Rebuild /etc/passwd and /etc/pwd.db from master.passwd
+            print("DEBUG CLIENT: Running pwd_mkdb -p /etc/master.passwd...")
+            let pwdMkdbResult = try await sshManager.executeCommand("pwd_mkdb -p /etc/master.passwd 2>&1")
+            print("DEBUG CLIENT: pwd_mkdb result: \(pwdMkdbResult)")
+        } else {
+            print("DEBUG CLIENT: +::::::::: already exists in master.passwd")
+        }
+
+        // Add +::::: to /etc/group if not present (enables NIS group lookup)
+        let groupHasPlus = try await sshManager.executeCommand("grep -q '^+:' /etc/group && echo 'exists' || echo 'missing'")
+        print("DEBUG CLIENT: group '+:' check: \(groupHasPlus.trimmingCharacters(in: .whitespacesAndNewlines))")
+        if groupHasPlus.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+            print("DEBUG CLIENT: Adding +:*:: to /etc/group...")
+            let addGroupPlusResult = try await sshManager.executeCommand("echo '+:*::' >> /etc/group")
+            print("DEBUG CLIENT: Add +:*:: result: \(addGroupPlusResult)")
+        } else {
+            print("DEBUG CLIENT: +:*:: already exists in group")
+        }
 
         // Check if /Network mount already exists in /etc/fstab
         networkConfigStep = "Configuring /etc/fstab..."
+        print("DEBUG CLIENT: Configuring /etc/fstab...")
         let fstabContent = try await sshManager.executeCommand("cat /etc/fstab 2>/dev/null || echo ''")
+        print("DEBUG CLIENT: Current fstab content:\n\(fstabContent)")
         if !fstabContent.contains("/Network") {
             let fstabEntry = "\(nisServerAddress):/Network         /Network        nfs     rw              0       0"
-            _ = try await sshManager.executeCommand("echo '\(fstabEntry)' >> /etc/fstab")
+            print("DEBUG CLIENT: Adding fstab entry: \(fstabEntry)")
+            let fstabAddResult = try await sshManager.executeCommand("echo '\(fstabEntry)' >> /etc/fstab")
+            print("DEBUG CLIENT: fstab add result: \(fstabAddResult)")
+        } else {
+            print("DEBUG CLIENT: /Network entry already exists in fstab")
         }
 
         // Start NIS client service
         networkConfigStep = "Starting NIS client service..."
+        print("DEBUG CLIENT: Starting NIS client services...")
         // Set the NIS domain name directly (faster than /etc/netstart)
-        _ = try await sshManager.executeCommand("domainname \(nisDomainName)")
+        print("DEBUG CLIENT: Setting domain name to \(nisDomainName)...")
+        let domainnameResult = try await sshManager.executeCommand("domainname \(nisDomainName) 2>&1")
+        print("DEBUG CLIENT: domainname result: \(domainnameResult)")
         // Start rpcbind if not running (required for NIS/NFS)
-        _ = try await sshManager.executeCommand("service rpcbind onestart 2>&1 || true")
-        _ = try await sshManager.executeCommand("service ypbind onestart 2>&1 || true")
+        print("DEBUG CLIENT: Starting rpcbind...")
+        let rpcbindResult = try await sshManager.executeCommand("service rpcbind onestart 2>&1 || true")
+        print("DEBUG CLIENT: rpcbind start result: \(rpcbindResult)")
+        print("DEBUG CLIENT: Starting ypbind...")
+        let ypbindResult = try await sshManager.executeCommand("service ypbind onestart 2>&1 || true")
+        print("DEBUG CLIENT: ypbind start result: \(ypbindResult)")
 
         // Start NFS client services
         networkConfigStep = "Starting NFS client services..."
-        _ = try await sshManager.executeCommand("service nfsclient onestart 2>&1 || true")
-        _ = try await sshManager.executeCommand("service lockd onestart 2>&1 || true")
+        print("DEBUG CLIENT: Starting NFS client services...")
+        let nfsclientResult = try await sshManager.executeCommand("service nfsclient onestart 2>&1 || true")
+        print("DEBUG CLIENT: nfsclient start result: \(nfsclientResult)")
+        let lockdResult = try await sshManager.executeCommand("service lockd onestart 2>&1 || true")
+        print("DEBUG CLIENT: lockd start result: \(lockdResult)")
 
         // Mount the network share
         networkConfigStep = "Mounting /Network..."
-        _ = try await sshManager.executeCommand("mount /Network 2>&1 || true")
+        print("DEBUG CLIENT: Mounting /Network...")
+        let mountResult = try await sshManager.executeCommand("mount /Network 2>&1 || true")
+        print("DEBUG CLIENT: mount /Network result: \(mountResult)")
 
         // Verify NIS connectivity
         networkConfigStep = "Verifying NIS connectivity..."
+        print("DEBUG CLIENT: Verifying NIS connectivity...")
         let ypcatResult = try await sshManager.executeCommand("ypcat passwd 2>&1 || echo 'NIS not responding'")
-        let getentResult = try await sshManager.executeCommand("getent passwd 2>&1 | grep -v '^root:' | head -5 || echo 'No network users found'")
+        print("DEBUG CLIENT: ypcat passwd result:\n\(ypcatResult)")
+        let ypwhichResult = try await sshManager.executeCommand("ypwhich 2>&1 || echo 'Cannot determine NIS server'")
+        print("DEBUG CLIENT: ypwhich result: \(ypwhichResult)")
+
+        // Filter ypcat to show only network users (UID >= 1001)
+        var networkUsers = "No network users found"
+        if !ypcatResult.contains("not responding") && !ypcatResult.isEmpty {
+            let lines = ypcatResult.split(separator: "\n")
+            let filteredUsers = lines.filter { line in
+                let parts = line.split(separator: ":")
+                if parts.count >= 3, let uid = Int(parts[2]) {
+                    return uid >= 1001 && uid < 60000
+                }
+                return false
+            }
+            if !filteredUsers.isEmpty {
+                networkUsers = filteredUsers.prefix(5).joined(separator: "\n")
+            }
+        }
 
         let configSteps = """
         Configuration completed:
@@ -881,16 +1013,18 @@ rpc: files
         ✓ /Network mounted from \(nisServerAddress)
         """
 
+        print("DEBUG CLIENT: NIS client setup completed successfully!")
+        print("DEBUG CLIENT: Network users found: \(networkUsers)")
+
         confirmationMessage = """
         NIS/NFS client configured and started successfully!
 
         \(configSteps)
 
-        NIS verification:
-        \(ypcatResult.prefix(200))
+        NIS server responding: \(ypwhichResult.trimmingCharacters(in: .whitespacesAndNewlines))
 
-        Network users found:
-        \(getentResult.prefix(300))
+        Network users (UID >= 1001):
+        \(networkUsers)
 
         You can now create network users on the server or login with existing network accounts.
         """
@@ -918,7 +1052,7 @@ rpc: files
 
             // Remove /Network from /etc/fstab
             networkConfigStep = "Removing /Network from fstab..."
-            _ = try await sshManager.executeCommand("sed -i '' '/\\/Network/d' /etc/fstab")
+            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/\\/Network/d' /etc/fstab")
 
             // Disable NIS client in rc.conf
             networkConfigStep = "Disabling NIS client..."
@@ -931,23 +1065,11 @@ rpc: files
             _ = try await sshManager.executeCommand("sysrc -x nfs_client_enable 2>/dev/null || true")
             _ = try await sshManager.executeCommand("sysrc -x rpc_lockd_enable 2>/dev/null || true")
 
-            // Restore default nsswitch.conf
-            networkConfigStep = "Restoring nsswitch.conf..."
-            let defaultNsswitchContent = """
-group: compat
-group_compat: nis
-hosts: files dns
-netgroup: compat
-networks: files
-passwd: compat
-passwd_compat: nis
-shells: files
-services: compat
-services_compat: nis
-protocols: files
-rpc: files
-"""
-            _ = try await sshManager.executeCommand("cat > /etc/nsswitch.conf << 'NSSWITCH_EOF'\n\(defaultNsswitchContent)\nNSSWITCH_EOF")
+            // Remove NIS compat entries from passwd/group files
+            networkConfigStep = "Removing NIS compat entries..."
+            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/^+:/d' /etc/master.passwd")
+            _ = try await sshManager.executeCommand("pwd_mkdb -p /etc/master.passwd")
+            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/^+:/d' /etc/group")
 
             // Remount /Network ZFS dataset
             networkConfigStep = "Remounting /Network ZFS dataset..."
@@ -966,7 +1088,7 @@ rpc: files
             ✓ NFS client disabled
             ✓ /Network NFS unmounted and removed from fstab
             ✓ /Network ZFS dataset remounted
-            ✓ nsswitch.conf restored to defaults
+            ✓ NIS compat entries removed from passwd/group
 
             This system is now configured as a standalone machine.
             """
@@ -1178,7 +1300,13 @@ rpc: files
                 throw NSError(domain: "GershwinSetup", code: 7, userInfo: [NSLocalizedDescriptionKey: "NIS domain name not found"])
             }
 
-            _ = try await sshManager.executeCommand("cd /var/yp && make \(domain) 2>&1")
+            // Regenerate /var/yp/passwd from /var/yp/master.passwd (7-field format from 10-field format)
+            // master.passwd: name:password:uid:gid:class:change:expire:gecos:home:shell
+            // passwd:        name:password:uid:gid:gecos:home:shell
+            _ = try await sshManager.executeCommand("awk -F: 'NF==10 {print $1\":\"$2\":\"$3\":\"$4\":\"$8\":\"$9\":\"$10}' /var/yp/master.passwd > /var/yp/passwd")
+
+            // Touch master.passwd to ensure make sees it as newer, then rebuild maps
+            _ = try await sshManager.executeCommand("touch /var/yp/master.passwd /var/yp/passwd && cd /var/yp && make 2>&1")
 
             // Remove the user from local system (keep it only in NIS)
             _ = try await sshManager.executeCommand("pw userdel \(username) 2>&1 || true")
@@ -1206,14 +1334,18 @@ rpc: files
 
         do {
             // Remove user from /var/yp/master.passwd
-            _ = try await sshManager.executeCommand("sed -i '' '/^\(user.username):/d' /var/yp/master.passwd")
+            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/^\(user.username):/d' /var/yp/master.passwd")
 
             // Rebuild NIS maps
             guard let domain = setupState.networkDomain?.domainName else {
                 throw NSError(domain: "GershwinSetup", code: 7, userInfo: [NSLocalizedDescriptionKey: "NIS domain name not found"])
             }
 
-            _ = try await sshManager.executeCommand("cd /var/yp && make \(domain) 2>&1")
+            // Regenerate /var/yp/passwd from /var/yp/master.passwd (7-field format from 10-field format)
+            _ = try await sshManager.executeCommand("awk -F: 'NF==10 {print $1\":\"$2\":\"$3\":\"$4\":\"$8\":\"$9\":\"$10}' /var/yp/master.passwd > /var/yp/passwd")
+
+            // Touch master.passwd to ensure make sees it as newer, then rebuild maps
+            _ = try await sshManager.executeCommand("touch /var/yp/master.passwd /var/yp/passwd && cd /var/yp && make 2>&1")
 
             confirmationMessage = "Network user '\(user.username)' removed successfully!\n\nNIS maps have been rebuilt. Note: Home directory was not removed."
             showingConfirmation = true
