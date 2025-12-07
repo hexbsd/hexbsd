@@ -2322,6 +2322,26 @@ struct CreateUserSheet: View {
     @State private var confirmPassword = ""
     @State private var addToWheel = false
     @State private var showPasswordMismatchError = false
+    @State private var usernameManuallyEdited = false
+
+    // Generate username from full name: first initial + last name, lowercase
+    private func generateUsername(from name: String) -> String {
+        let components = name.trimmingCharacters(in: .whitespaces)
+            .split(separator: " ")
+            .map { String($0) }
+
+        guard !components.isEmpty else { return "" }
+
+        if components.count == 1 {
+            // Single name - use it as username
+            return components[0].lowercased()
+        } else {
+            // First initial + last name
+            let firstInitial = String(components[0].prefix(1))
+            let lastName = components[components.count - 1]
+            return (firstInitial + lastName).lowercased()
+        }
+    }
 
     var body: some View {
         VStack(spacing: 20) {
@@ -2330,15 +2350,26 @@ struct CreateUserSheet: View {
                 .bold()
 
             VStack(alignment: .leading, spacing: 12) {
-                Text("Username")
-                    .font(.caption)
-                TextField("Username (lowercase, no spaces)", text: $username)
-                    .textFieldStyle(.roundedBorder)
-
                 Text("Full Name")
                     .font(.caption)
                 TextField("Full Name", text: $fullName)
                     .textFieldStyle(.roundedBorder)
+                    .onChange(of: fullName) { _, newValue in
+                        if !usernameManuallyEdited {
+                            username = generateUsername(from: newValue)
+                        }
+                    }
+
+                Text("Username")
+                    .font(.caption)
+                TextField("Username (lowercase, no spaces)", text: $username)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: username) { oldValue, newValue in
+                        // Mark as manually edited if user changes it from the auto-generated value
+                        if !fullName.isEmpty && newValue != generateUsername(from: fullName) {
+                            usernameManuallyEdited = true
+                        }
+                    }
 
                 Text("Password")
                     .font(.caption)
@@ -2574,6 +2605,26 @@ struct CreateNetworkUserSheet: View {
     @State private var confirmPassword = ""
     @State private var addToWheel = false
     @State private var showPasswordMismatchError = false
+    @State private var usernameManuallyEdited = false
+
+    // Generate username from full name: first initial + last name, lowercase
+    private func generateUsername(from name: String) -> String {
+        let components = name.trimmingCharacters(in: .whitespaces)
+            .split(separator: " ")
+            .map { String($0) }
+
+        guard !components.isEmpty else { return "" }
+
+        if components.count == 1 {
+            // Single name - use it as username
+            return components[0].lowercased()
+        } else {
+            // First initial + last name
+            let firstInitial = String(components[0].prefix(1))
+            let lastName = components[components.count - 1]
+            return (firstInitial + lastName).lowercased()
+        }
+    }
 
     var body: some View {
         VStack(spacing: 20) {
@@ -2582,15 +2633,26 @@ struct CreateNetworkUserSheet: View {
                 .bold()
 
             VStack(alignment: .leading, spacing: 12) {
-                Text("Username")
-                    .font(.caption)
-                TextField("Username (lowercase, no spaces)", text: $username)
-                    .textFieldStyle(.roundedBorder)
-
                 Text("Full Name")
                     .font(.caption)
                 TextField("Full Name", text: $fullName)
                     .textFieldStyle(.roundedBorder)
+                    .onChange(of: fullName) { _, newValue in
+                        if !usernameManuallyEdited {
+                            username = generateUsername(from: newValue)
+                        }
+                    }
+
+                Text("Username")
+                    .font(.caption)
+                TextField("Username (lowercase, no spaces)", text: $username)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: username) { oldValue, newValue in
+                        // Mark as manually edited if user changes it from the auto-generated value
+                        if !fullName.isEmpty && newValue != generateUsername(from: fullName) {
+                            usernameManuallyEdited = true
+                        }
+                    }
 
                 Text("Password")
                     .font(.caption)
