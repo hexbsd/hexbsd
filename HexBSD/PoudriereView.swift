@@ -400,22 +400,81 @@ struct PoudriereContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if !viewModel.isInstalled {
-                VStack(spacing: 20) {
-                    Image(systemName: "shippingbox")
-                        .font(.system(size: 72))
-                        .foregroundColor(.secondary)
-                    Text("Poudriere Not Installed")
-                        .font(.title)
-                        .foregroundColor(.secondary)
-                    Text("Install poudriere to view build status")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Text("pkg install poudriere")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundColor(.blue)
-                        .padding(8)
+                ScrollView {
+                    VStack(spacing: 20) {
+                        Image(systemName: "shippingbox")
+                            .font(.system(size: 72))
+                            .foregroundColor(.secondary)
+                        Text("Poudriere Not Installed")
+                            .font(.title)
+                            .foregroundColor(.secondary)
+                        Text("Poudriere is a bulk package builder for FreeBSD")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.bottom, 10)
+
+                        // Requirements status
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Requirements")
+                                .font(.headline)
+
+                            // Poudriere package status
+                            HStack(spacing: 8) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.red)
+                                Text("Poudriere")
+                                    .fontWeight(.medium)
+                                Text("Not installed")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding()
+                        .frame(maxWidth: 400, alignment: .leading)
                         .background(Color(nsColor: .controlBackgroundColor))
-                        .cornerRadius(6)
+                        .cornerRadius(8)
+
+                        // Package selection
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Package")
+                                .font(.headline)
+
+                            Picker("Package", selection: $viewModel.selectedPackage) {
+                                Text("poudriere").tag("poudriere")
+                                Text("poudriere-devel").tag("poudriere-devel")
+                            }
+                            .pickerStyle(.radioGroup)
+
+                            Text(viewModel.selectedPackage == "poudriere-devel"
+                                 ? "Development version with latest features"
+                                 : "Stable release version")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding()
+                        .frame(maxWidth: 400, alignment: .leading)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .cornerRadius(8)
+
+                        // Setup button
+                        Button(action: {
+                            Task {
+                                await viewModel.setupPoudriere()
+                            }
+                        }) {
+                            Label("Install \(viewModel.selectedPackage)", systemImage: "gear")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+
+                        Text("This will install the selected poudriere package")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 400)
+                    }
+                    .padding()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let htmlContent = viewModel.htmlContent, !htmlContent.isEmpty {
@@ -458,6 +517,9 @@ struct PoudriereContentView: View {
         } message: {
             Text(viewModel.error ?? "Unknown error")
         }
+        .sheet(isPresented: $viewModel.isSettingUp) {
+            PoudriereSetupProgressSheet(step: viewModel.setupStep)
+        }
         .onChange(of: viewModel.error) { oldValue, newValue in
             if newValue != nil {
                 showError = true
@@ -483,6 +545,11 @@ class PoudriereViewModel: ObservableObject {
     @Published var htmlContent: String?
     @Published var isLoading = false
     @Published var error: String?
+
+    // Setup state
+    @Published var isSettingUp = false
+    @Published var setupStep = ""
+    @Published var selectedPackage = "poudriere"
 
     private let sshManager = SSHConnectionManager.shared
 
@@ -512,5 +579,58 @@ class PoudriereViewModel: ObservableObject {
 
     func refresh() async {
         await loadPoudriere()
+    }
+
+    func setupPoudriere() async {
+        isSettingUp = true
+        error = nil
+
+        do {
+            setupStep = "Installing \(selectedPackage)..."
+            _ = try await sshManager.executeCommand("pkg install -y \(selectedPackage)")
+            isInstalled = true
+
+            setupStep = "Setup complete!"
+
+            // Reload poudriere data
+            await loadPoudriere()
+
+        } catch {
+            self.error = "Setup failed: \(error.localizedDescription)"
+        }
+
+        isSettingUp = false
+        setupStep = ""
+    }
+}
+
+// MARK: - Poudriere Setup Progress Sheet
+
+struct PoudriereSetupProgressSheet: View {
+    let step: String
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Setting Up Poudriere")
+                .font(.title2)
+                .bold()
+
+            ProgressView()
+                .scaleEffect(1.5)
+                .padding()
+
+            Text(step)
+                .font(.body)
+                .foregroundColor(.secondary)
+                .frame(minWidth: 300)
+                .multilineTextAlignment(.center)
+
+            Text("Please wait...")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding(40)
+        .frame(minWidth: 400)
+        .interactiveDismissDisabled()
     }
 }

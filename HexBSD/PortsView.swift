@@ -159,87 +159,77 @@ struct PortsContentView: View {
                         Text("Ports Tree Not Found")
                             .font(.title)
                             .foregroundColor(.secondary)
-                        Text("Follow these steps to install and configure the FreeBSD ports tree")
+                        Text("The FreeBSD ports tree needs to be installed and configured")
                             .font(.caption)
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.center)
                             .padding(.bottom, 10)
 
-                        VStack(alignment: .leading, spacing: 16) {
-                            // Step 1
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    Text("1.")
-                                        .font(.headline)
-                                        .foregroundColor(.blue)
-                                        .frame(width: 24)
-                                    Text("Install Git and clone the ports tree")
-                                        .font(.headline)
-                                }
+                        // Requirements status
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Requirements")
+                                .font(.headline)
 
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("pkg install git")
-                                        .font(.system(.caption, design: .monospaced))
-                                        .foregroundColor(.blue)
-                                    Text("git clone https://git.FreeBSD.org/ports.git /usr/ports --depth=1")
-                                        .font(.system(.caption, design: .monospaced))
-                                        .foregroundColor(.blue)
+                            // Git status
+                            HStack(spacing: 8) {
+                                Image(systemName: viewModel.gitInstalled ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                    .foregroundColor(viewModel.gitInstalled ? .green : .red)
+                                Text("Git")
+                                    .fontWeight(.medium)
+                                if viewModel.gitInstalled {
+                                    Text("Installed")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                } else {
+                                    Text("Not installed")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
                                 }
-                                .padding(8)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color(nsColor: .controlBackgroundColor))
-                                .cornerRadius(6)
-                                .textSelection(.enabled)
                             }
 
-                            // Step 2
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    Text("2.")
-                                        .font(.headline)
-                                        .foregroundColor(.blue)
-                                        .frame(width: 24)
-                                    Text("Generate the INDEX file")
-                                        .font(.headline)
-                                }
-
-                                Text("This creates a searchable database of all ports (takes a few minutes)")
+                            // Ports tree status
+                            HStack(spacing: 8) {
+                                Image(systemName: viewModel.isInstalled ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                    .foregroundColor(viewModel.isInstalled ? .green : .red)
+                                Text("Ports Tree")
+                                    .fontWeight(.medium)
+                                Text("Not installed")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
-
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("cd /usr/ports")
-                                        .font(.system(.caption, design: .monospaced))
-                                        .foregroundColor(.blue)
-                                    Text("make index")
-                                        .font(.system(.caption, design: .monospaced))
-                                        .foregroundColor(.blue)
-                                }
-                                .padding(8)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color(nsColor: .controlBackgroundColor))
-                                .cornerRadius(6)
-                                .textSelection(.enabled)
                             }
 
-                            // Step 3
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    Text("3.")
-                                        .font(.headline)
-                                        .foregroundColor(.blue)
-                                        .frame(width: 24)
-                                    Text("Refresh this page")
-                                        .font(.headline)
-                                }
-
-                                Text("Click the Refresh button above once the INDEX is generated")
+                            // INDEX file status
+                            HStack(spacing: 8) {
+                                Image(systemName: "circle")
+                                    .foregroundColor(.secondary)
+                                Text("INDEX File")
+                                    .fontWeight(.medium)
+                                Text("Pending (requires ports tree)")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
                         }
                         .padding()
-                        .frame(maxWidth: 600)
+                        .frame(maxWidth: 400, alignment: .leading)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .cornerRadius(8)
+
+                        // Setup button
+                        Button(action: {
+                            Task {
+                                await viewModel.setupPorts()
+                            }
+                        }) {
+                            Label("Setup Ports Tree", systemImage: "gear")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+
+                        Text("This will install git (if needed), clone the ports tree, and generate the INDEX file")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 400)
                     }
                     .padding()
                 }
@@ -259,35 +249,80 @@ struct PortsContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if viewModel.isInstalled && !viewModel.hasIndex {
                 // Ports installed but no INDEX file
-                VStack(spacing: 20) {
-                    Image(systemName: "doc.badge.gearshape")
-                        .font(.system(size: 72))
-                        .foregroundColor(.orange)
-                    Text("INDEX File Missing")
-                        .font(.title)
-                        .foregroundColor(.secondary)
-                    Text("The ports tree is installed but the INDEX file needs to be generated")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
+                ScrollView {
+                    VStack(spacing: 20) {
+                        Image(systemName: "doc.badge.gearshape")
+                            .font(.system(size: 72))
+                            .foregroundColor(.orange)
+                        Text("INDEX File Missing")
+                            .font(.title)
+                            .foregroundColor(.secondary)
+                        Text("The ports tree is installed but the INDEX file needs to be generated")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("cd /usr/ports")
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundColor(.blue)
-                        Text("make index")
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundColor(.blue)
+                        // Requirements status
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Requirements")
+                                .font(.headline)
+
+                            // Git status
+                            HStack(spacing: 8) {
+                                Image(systemName: viewModel.gitInstalled ? "checkmark.circle.fill" : "circle")
+                                    .foregroundColor(viewModel.gitInstalled ? .green : .secondary)
+                                Text("Git")
+                                    .fontWeight(.medium)
+                                if viewModel.gitInstalled {
+                                    Text("Installed")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
+                            // Ports tree status
+                            HStack(spacing: 8) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                                Text("Ports Tree")
+                                    .fontWeight(.medium)
+                                Text("Installed at \(viewModel.portsPath)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+
+                            // INDEX file status
+                            HStack(spacing: 8) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.red)
+                                Text("INDEX File")
+                                    .fontWeight(.medium)
+                                Text("Not generated")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding()
+                        .frame(maxWidth: 400, alignment: .leading)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .cornerRadius(8)
+
+                        // Generate INDEX button
+                        Button(action: {
+                            Task {
+                                await viewModel.generateIndex()
+                            }
+                        }) {
+                            Label("Generate INDEX", systemImage: "gear")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+
+                        Text("This may take several minutes to complete")
+                            .font(.caption)
+                            .foregroundColor(.orange)
                     }
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(nsColor: .controlBackgroundColor))
-                    .cornerRadius(6)
-                    .textSelection(.enabled)
-
-                    Text("Note: This may take several minutes to complete")
-                        .font(.caption)
-                        .foregroundColor(.orange)
+                    .padding()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if !viewModel.searchResults.isEmpty {
@@ -369,6 +404,9 @@ struct PortsContentView: View {
             }
         } message: {
             Text(viewModel.error ?? "Unknown error")
+        }
+        .sheet(isPresented: $viewModel.isSettingUp) {
+            PortsSetupProgressSheet(step: viewModel.setupStep)
         }
         .onChange(of: viewModel.error) { oldValue, newValue in
             if newValue != nil {
@@ -616,6 +654,11 @@ class PortsViewModel: ObservableObject {
     @Published var categories: [String] = []
     @Published var totalPorts = ""
 
+    // Setup state
+    @Published var gitInstalled = false
+    @Published var isSettingUp = false
+    @Published var setupStep = ""
+
     private let sshManager = SSHConnectionManager.shared
 
     func loadPorts() async {
@@ -624,6 +667,10 @@ class PortsViewModel: ObservableObject {
         error = nil
 
         do {
+            // Check if git is installed
+            let gitCheck = try await sshManager.executeCommand("command -v git >/dev/null 2>&1 && echo 'INSTALLED' || echo 'NOT_INSTALLED'")
+            gitInstalled = gitCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "INSTALLED"
+
             let info = try await sshManager.checkPorts()
             isInstalled = info.isInstalled
             portsPath = info.portsPath
@@ -644,6 +691,67 @@ class PortsViewModel: ObservableObject {
         }
 
         isLoading = false
+    }
+
+    func setupPorts() async {
+        isSettingUp = true
+        error = nil
+
+        do {
+            // Step 1: Install git if not present
+            if !gitInstalled {
+                setupStep = "Installing git..."
+                _ = try await sshManager.executeCommand("pkg install -y git")
+                gitInstalled = true
+            }
+
+            // Step 2: Clone ports tree
+            if !isInstalled {
+                setupStep = "Cloning ports tree (this may take a few minutes)..."
+                _ = try await sshManager.executeCommand("git clone https://git.FreeBSD.org/ports.git /usr/ports --depth=1")
+                isInstalled = true
+                portsPath = "/usr/ports"
+            }
+
+            // Step 3: Generate INDEX file
+            if !hasIndex {
+                setupStep = "Generating INDEX file (this may take several minutes)..."
+                _ = try await sshManager.executeCommand("cd /usr/ports && make index")
+                hasIndex = true
+            }
+
+            setupStep = "Setup complete!"
+
+            // Reload ports data
+            await loadPorts()
+
+        } catch {
+            self.error = "Setup failed: \(error.localizedDescription)"
+        }
+
+        isSettingUp = false
+        setupStep = ""
+    }
+
+    func generateIndex() async {
+        isSettingUp = true
+        error = nil
+
+        do {
+            setupStep = "Generating INDEX file (this may take several minutes)..."
+            _ = try await sshManager.executeCommand("cd \(portsPath) && make index")
+            hasIndex = true
+            setupStep = "INDEX generated!"
+
+            // Reload ports data
+            await loadPorts()
+
+        } catch {
+            self.error = "Failed to generate INDEX: \(error.localizedDescription)"
+        }
+
+        isSettingUp = false
+        setupStep = ""
     }
 
     func searchPorts(query: String, category: String) async {
@@ -669,5 +777,36 @@ class PortsViewModel: ObservableObject {
     func refresh() async {
         searchResults = []
         await loadPorts()
+    }
+}
+
+// MARK: - Ports Setup Progress Sheet
+
+struct PortsSetupProgressSheet: View {
+    let step: String
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Setting Up Ports Tree")
+                .font(.title2)
+                .bold()
+
+            ProgressView()
+                .scaleEffect(1.5)
+                .padding()
+
+            Text(step)
+                .font(.body)
+                .foregroundColor(.secondary)
+                .frame(minWidth: 300)
+                .multilineTextAlignment(.center)
+
+            Text("Please wait...")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding(40)
+        .frame(minWidth: 400)
+        .interactiveDismissDisabled()
     }
 }
