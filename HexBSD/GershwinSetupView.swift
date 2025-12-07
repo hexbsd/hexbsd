@@ -171,6 +171,7 @@ class GershwinSetupViewModel: ObservableObject {
     @Published var showingConfirmation = false
     @Published var confirmationMessage = ""
     @Published var confirmationAction: (() -> Void)?
+    @Published var showingRemoveDomainConfirmation = false
 
     // User Configuration progress tracking
     @Published var isConfiguringUser = false
@@ -488,12 +489,16 @@ class GershwinSetupViewModel: ObservableObject {
             let zshCompletionsInstalled = completionsCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
             print("DEBUG: zsh-completions installed: \(zshCompletionsInstalled)")
 
+            let sudoCheck = try await sshManager.executeCommand("test -f /usr/local/bin/sudo && echo 'installed' || echo 'missing'")
+            let sudoInstalled = sudoCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
+            print("DEBUG: sudo installed: \(sudoInstalled)")
+
             let zshrcCheck = try await sshManager.executeCommand("test -f /usr/share/skel/.zshrc && echo 'configured' || echo 'missing'")
             let zshrcConfigured = zshrcCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "configured"
             print("DEBUG: .zshrc configured: \(zshrcConfigured)")
 
             // Run pkg update if any packages need to be installed
-            if !zshInstalled || !zshAutosuggestionsInstalled || !zshCompletionsInstalled {
+            if !zshInstalled || !zshAutosuggestionsInstalled || !zshCompletionsInstalled || !sudoInstalled {
                 userConfigStep = "Updating package repository..."
                 print("DEBUG: Running pkg update...")
                 let updateResult = try await sshManager.executeCommand("pkg update 2>&1")
@@ -522,6 +527,26 @@ class GershwinSetupViewModel: ObservableObject {
                 print("DEBUG: Installing zsh-completions...")
                 let completionsResult = try await sshManager.executeCommand("pkg install -y zsh-completions 2>&1")
                 print("DEBUG: zsh-completions install result: \(completionsResult.prefix(500))")
+            }
+
+            // Install sudo if not present
+            if !sudoInstalled {
+                userConfigStep = "Installing sudo..."
+                print("DEBUG: Installing sudo...")
+                let sudoResult = try await sshManager.executeCommand("pkg install -y sudo 2>&1")
+                print("DEBUG: sudo install result: \(sudoResult.prefix(500))")
+            }
+
+            // Configure sudoers to allow wheel group (for standalone local users)
+            userConfigStep = "Configuring sudo..."
+            print("DEBUG: Configuring sudoers for wheel group...")
+            _ = try await sshManager.executeCommand("mkdir -p /usr/local/etc/sudoers.d")
+            // Check if wheel sudoers config exists
+            let wheelSudoersCheck = try await sshManager.executeCommand("test -f /usr/local/etc/sudoers.d/wheel && echo 'exists' || echo 'missing'")
+            if wheelSudoersCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+                _ = try await sshManager.executeCommand("echo '%wheel ALL=(ALL) ALL' > /usr/local/etc/sudoers.d/wheel")
+                _ = try await sshManager.executeCommand("chmod 440 /usr/local/etc/sudoers.d/wheel")
+                print("DEBUG: Created /usr/local/etc/sudoers.d/wheel")
             }
 
             // Create .zshrc configuration in /usr/share/skel if not present
@@ -737,19 +762,22 @@ uidstart=1001
         result = try await sshManager.executeCommand("sysrc rpc_lockd_enable=\"YES\"")
         print("DEBUG NIS Server: sysrc rpc_lockd_enable result: \(result)")
 
-        // Create /etc/exports if it doesn't exist
-        networkConfigStep = "Configuring /etc/exports..."
-        print("DEBUG NIS Server: Configuring /etc/exports...")
+        // Create directories for network shares
+        networkConfigStep = "Creating network directories..."
+        print("DEBUG NIS Server: Creating /Network/Users and /Network/Applications directories...")
+        result = try await sshManager.executeCommand("mkdir -p /Network/Users /Network/Applications")
+        print("DEBUG NIS Server: mkdir result: \(result)")
+
+        // Ensure /etc/exports exists (mountd requires it even if empty)
+        networkConfigStep = "Configuring NFS exports..."
+        print("DEBUG NIS Server: Ensuring /etc/exports exists...")
         result = try await sshManager.executeCommand("touch /etc/exports")
         print("DEBUG NIS Server: touch /etc/exports result: \(result)")
 
-        // Check if /Network export already exists
-        let exportsContent = try await sshManager.executeCommand("cat /etc/exports 2>/dev/null || echo ''")
-        print("DEBUG NIS Server: Current /etc/exports content: \(exportsContent)")
-        if !exportsContent.contains("/Network") {
-            result = try await sshManager.executeCommand("echo '/Network -maproot=root -alldirs' >> /etc/exports")
-            print("DEBUG NIS Server: Added /Network to exports: \(result)")
-        }
+        // Configure ZFS NFS sharing using sharenfs property
+        print("DEBUG NIS Server: Configuring ZFS sharenfs property on zroot/Network...")
+        result = try await sshManager.executeCommand("zfs set sharenfs='-maproot=root -alldirs' zroot/Network")
+        print("DEBUG NIS Server: Set sharenfs on zroot/Network: \(result)")
 
         // Set up NIS database directory
         networkConfigStep = "Setting up NIS database..."
@@ -767,6 +795,23 @@ uidstart=1001
             print("DEBUG NIS Server: touch /var/yp/master.passwd result: \(result)")
             result = try await sshManager.executeCommand("chmod 600 /var/yp/master.passwd")
             print("DEBUG NIS Server: chmod 600 /var/yp/master.passwd result: \(result)")
+        }
+
+        // Create /var/yp/group for NIS group database (copy from /etc/group if not exists)
+        print("DEBUG NIS Server: Checking /var/yp/group...")
+        let ypGroup = try await sshManager.executeCommand("test -f /var/yp/group && echo 'exists' || echo 'missing'")
+        if ypGroup.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+            result = try await sshManager.executeCommand("cp /etc/group /var/yp/group")
+            print("DEBUG NIS Server: Copied /etc/group to /var/yp/group: \(result)")
+        }
+
+        // Create /var/yp/netgroup for sudo-users netgroup (empty initially)
+        print("DEBUG NIS Server: Checking /var/yp/netgroup...")
+        let ypNetgroup = try await sshManager.executeCommand("test -f /var/yp/netgroup && echo 'exists' || echo 'missing'")
+        if ypNetgroup.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+            // Create empty sudo-users netgroup
+            result = try await sshManager.executeCommand("echo 'sudo-users' > /var/yp/netgroup")
+            print("DEBUG NIS Server: Created /var/yp/netgroup with sudo-users: \(result)")
         }
 
         // Set the NIS domain name
@@ -820,25 +865,34 @@ uidstart=1001
         result = try await sshManager.executeCommand("sysrc nis_client_enable=\"YES\"")
         print("DEBUG NIS Server: sysrc nis_client_enable result: \(result)")
 
-        // Enable NIS compat mode by adding +::::::::: to /etc/master.passwd if not present
-        // master.passwd has 10 fields: name:password:uid:gid:class:change:expire:gecos:home:shell
+        // Enable NIS compat mode for passwd and group lookups
+        // This uses the traditional FreeBSD approach with +: entries in passwd/group files
         print("DEBUG NIS Server: Enabling NIS compat mode...")
+
+        // Add +::::::::: to /etc/master.passwd if not present
         let masterPasswdHasPlus = try await sshManager.executeCommand("grep -q '^+:' /etc/master.passwd && echo 'exists' || echo 'missing'")
-        print("DEBUG NIS Server: master.passwd '+:' check: \(masterPasswdHasPlus.trimmingCharacters(in: .whitespacesAndNewlines))")
         if masterPasswdHasPlus.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
-            result = try await sshManager.executeCommand("echo '+:::::::::' >> /etc/master.passwd")
-            print("DEBUG NIS Server: Added +::::::::: to master.passwd: \(result)")
-            result = try await sshManager.executeCommand("pwd_mkdb -p /etc/master.passwd 2>&1")
-            print("DEBUG NIS Server: pwd_mkdb result: \(result)")
+            print("DEBUG NIS Server: Adding +::::::::: to /etc/master.passwd...")
+            _ = try await sshManager.executeCommand("echo '+:::::::::' >> /etc/master.passwd")
+            _ = try await sshManager.executeCommand("pwd_mkdb -p /etc/master.passwd 2>&1")
         }
 
-        // Add +::::: to /etc/group if not present
+        // Add +:*:: to /etc/group if not present (enables NIS group lookup via compat mode)
         let groupHasPlus = try await sshManager.executeCommand("grep -q '^+:' /etc/group && echo 'exists' || echo 'missing'")
-        print("DEBUG NIS Server: group '+:' check: \(groupHasPlus.trimmingCharacters(in: .whitespacesAndNewlines))")
         if groupHasPlus.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
-            result = try await sshManager.executeCommand("echo '+:*::' >> /etc/group")
-            print("DEBUG NIS Server: Added +:*:: to group: \(result)")
+            print("DEBUG NIS Server: Adding +:*:: to /etc/group...")
+            _ = try await sshManager.executeCommand("echo '+:*::' >> /etc/group")
         }
+
+        // Create /etc/netgroup to import NIS netgroups
+        print("DEBUG NIS Server: Creating /etc/netgroup with + for NIS import...")
+        _ = try await sshManager.executeCommand("echo '+' > /etc/netgroup")
+
+        // Configure sudoers to allow sudo-users netgroup
+        print("DEBUG NIS Server: Configuring sudoers for sudo-users netgroup...")
+        _ = try await sshManager.executeCommand("mkdir -p /usr/local/etc/sudoers.d")
+        _ = try await sshManager.executeCommand("echo '+sudo-users ALL=(ALL) ALL' > /usr/local/etc/sudoers.d/network-users")
+        _ = try await sshManager.executeCommand("chmod 440 /usr/local/etc/sudoers.d/network-users")
 
         // Start ypbind so server can query its own NIS database
         print("DEBUG NIS Server: Starting ypbind...")
@@ -865,7 +919,7 @@ uidstart=1001
         ✓ NIS server configured and started
         ✓ NIS client configured (server binds to itself)
         ✓ NFS server configured and started
-        ✓ /Network exported for clients
+        ✓ /Network shared via ZFS sharenfs
 
         Service status:
         ypserv: \(ypservStatus.contains("running") ? "running" : "check status")
@@ -905,49 +959,55 @@ uidstart=1001
         let sysrc5 = try await sshManager.executeCommand("sysrc rpc_lockd_enable=\"YES\"")
         print("DEBUG CLIENT: sysrc rpc_lockd_enable result: \(sysrc5)")
 
-        // Enable NIS compat mode by adding +::::: entries to passwd/group files
-        // This uses the traditional FreeBSD approach with the default nsswitch.conf (compat mode)
+        // Enable NIS compat mode for passwd and group lookups
+        // This uses the traditional FreeBSD approach with +: entries in passwd/group files
         networkConfigStep = "Enabling NIS compat mode..."
         print("DEBUG CLIENT: Enabling NIS compat mode...")
 
         // Add +::::::::: to /etc/master.passwd if not present (enables NIS user lookup)
-        // master.passwd has 10 fields: name:password:uid:gid:class:change:expire:gecos:home:shell
-        // So we need 9 colons for the + entry: +::::::::::
+        // master.passwd has 10 fields, so we need 9 colons
         let masterPasswdHasPlus = try await sshManager.executeCommand("grep -q '^+:' /etc/master.passwd && echo 'exists' || echo 'missing'")
         print("DEBUG CLIENT: master.passwd '+:' check: \(masterPasswdHasPlus.trimmingCharacters(in: .whitespacesAndNewlines))")
         if masterPasswdHasPlus.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
-            print("DEBUG CLIENT: Adding +:::::::::  to /etc/master.passwd (10 fields)...")
-            let addPlusResult = try await sshManager.executeCommand("echo '+:::::::::' >> /etc/master.passwd")
-            print("DEBUG CLIENT: Add +::::::::: result: \(addPlusResult)")
-            // Rebuild /etc/passwd and /etc/pwd.db from master.passwd
+            print("DEBUG CLIENT: Adding +::::::::: to /etc/master.passwd...")
+            _ = try await sshManager.executeCommand("echo '+:::::::::' >> /etc/master.passwd")
             print("DEBUG CLIENT: Running pwd_mkdb -p /etc/master.passwd...")
-            let pwdMkdbResult = try await sshManager.executeCommand("pwd_mkdb -p /etc/master.passwd 2>&1")
-            print("DEBUG CLIENT: pwd_mkdb result: \(pwdMkdbResult)")
-        } else {
-            print("DEBUG CLIENT: +::::::::: already exists in master.passwd")
+            _ = try await sshManager.executeCommand("pwd_mkdb -p /etc/master.passwd 2>&1")
         }
 
-        // Add +::::: to /etc/group if not present (enables NIS group lookup)
+        // Add +:*:: to /etc/group if not present (enables NIS group lookup via compat mode)
         let groupHasPlus = try await sshManager.executeCommand("grep -q '^+:' /etc/group && echo 'exists' || echo 'missing'")
         print("DEBUG CLIENT: group '+:' check: \(groupHasPlus.trimmingCharacters(in: .whitespacesAndNewlines))")
         if groupHasPlus.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
             print("DEBUG CLIENT: Adding +:*:: to /etc/group...")
-            let addGroupPlusResult = try await sshManager.executeCommand("echo '+:*::' >> /etc/group")
-            print("DEBUG CLIENT: Add +:*:: result: \(addGroupPlusResult)")
-        } else {
-            print("DEBUG CLIENT: +:*:: already exists in group")
+            _ = try await sshManager.executeCommand("echo '+:*::' >> /etc/group")
         }
 
-        // Check if /Network mount already exists in /etc/fstab
+        // Create /etc/netgroup to import NIS netgroups
+        print("DEBUG CLIENT: Creating /etc/netgroup with + for NIS import...")
+        _ = try await sshManager.executeCommand("echo '+' > /etc/netgroup")
+
+        // Configure sudoers to allow sudo-users netgroup
+        print("DEBUG CLIENT: Configuring sudoers for sudo-users netgroup...")
+        _ = try await sshManager.executeCommand("mkdir -p /usr/local/etc/sudoers.d")
+        _ = try await sshManager.executeCommand("echo '+sudo-users ALL=(ALL) ALL' > /usr/local/etc/sudoers.d/network-users")
+        _ = try await sshManager.executeCommand("chmod 440 /usr/local/etc/sudoers.d/network-users")
+
+        // Create mount point directory for /Network
+        networkConfigStep = "Creating mount point..."
+        print("DEBUG CLIENT: Creating /Network mount point...")
+        _ = try await sshManager.executeCommand("mkdir -p /Network")
+
+        // Configure /etc/fstab for /Network
         networkConfigStep = "Configuring /etc/fstab..."
         print("DEBUG CLIENT: Configuring /etc/fstab...")
         let fstabContent = try await sshManager.executeCommand("cat /etc/fstab 2>/dev/null || echo ''")
         print("DEBUG CLIENT: Current fstab content:\n\(fstabContent)")
+
         if !fstabContent.contains("/Network") {
-            let fstabEntry = "\(nisServerAddress):/Network         /Network        nfs     rw              0       0"
+            let fstabEntry = "\(nisServerAddress):/Network\t/Network\tnfs\trw\t0\t0"
             print("DEBUG CLIENT: Adding fstab entry: \(fstabEntry)")
-            let fstabAddResult = try await sshManager.executeCommand("echo '\(fstabEntry)' >> /etc/fstab")
-            print("DEBUG CLIENT: fstab add result: \(fstabAddResult)")
+            _ = try await sshManager.executeCommand("echo '\(fstabEntry)' >> /etc/fstab")
         } else {
             print("DEBUG CLIENT: /Network entry already exists in fstab")
         }
@@ -1065,11 +1125,22 @@ uidstart=1001
             _ = try await sshManager.executeCommand("sysrc -x nfs_client_enable 2>/dev/null || true")
             _ = try await sshManager.executeCommand("sysrc -x rpc_lockd_enable 2>/dev/null || true")
 
+            // Restore nsswitch.conf to default (compat mode, which doesn't use NIS without +: entries)
+            networkConfigStep = "Restoring nsswitch.conf..."
+            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' 's/^passwd:.*/passwd: compat/' /etc/nsswitch.conf")
+            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' 's/^group:.*/group: compat/' /etc/nsswitch.conf")
+
             // Remove NIS compat entries from passwd/group files
             networkConfigStep = "Removing NIS compat entries..."
-            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/^+:/d' /etc/master.passwd")
-            _ = try await sshManager.executeCommand("pwd_mkdb -p /etc/master.passwd")
-            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/^+:/d' /etc/group")
+            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/^+:/d' /etc/master.passwd 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("pwd_mkdb -p /etc/master.passwd 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/^+:/d' /etc/group 2>/dev/null || true")
+
+            // Remove /etc/netgroup
+            _ = try await sshManager.executeCommand("rm -f /etc/netgroup 2>/dev/null || true")
+
+            // Remove sudoers network-users config
+            _ = try await sshManager.executeCommand("rm -f /usr/local/etc/sudoers.d/network-users 2>/dev/null || true")
 
             // Remount /Network ZFS dataset
             networkConfigStep = "Remounting /Network ZFS dataset..."
@@ -1088,7 +1159,7 @@ uidstart=1001
             ✓ NFS client disabled
             ✓ /Network NFS unmounted and removed from fstab
             ✓ /Network ZFS dataset remounted
-            ✓ NIS compat entries removed from passwd/group
+            ✓ nsswitch.conf restored to default
 
             This system is now configured as a standalone machine.
             """
@@ -1096,6 +1167,92 @@ uidstart=1001
 
         } catch {
             self.error = "Failed to leave network domain: \(error.localizedDescription)"
+        }
+
+        isConfiguringNetwork = false
+        networkConfigStep = ""
+        isLoading = false
+    }
+
+    func removeNetworkDomain() async {
+        isLoading = true
+        isConfiguringNetwork = true
+        error = nil
+
+        do {
+            // Stop NIS server services
+            networkConfigStep = "Stopping NIS server services..."
+            _ = try await sshManager.executeCommand("service ypserv stop 2>&1 || true")
+            _ = try await sshManager.executeCommand("service ypbind stop 2>&1 || true")
+            _ = try await sshManager.executeCommand("service yppasswdd stop 2>&1 || true")
+
+            // Stop NFS server services
+            networkConfigStep = "Stopping NFS server services..."
+            _ = try await sshManager.executeCommand("service nfsd stop 2>&1 || true")
+            _ = try await sshManager.executeCommand("service mountd stop 2>&1 || true")
+            _ = try await sshManager.executeCommand("service lockd stop 2>&1 || true")
+            _ = try await sshManager.executeCommand("service statd stop 2>&1 || true")
+
+            // Remove ZFS NFS sharing
+            networkConfigStep = "Removing NFS shares..."
+            _ = try await sshManager.executeCommand("zfs set sharenfs=off zroot/Network 2>&1 || true")
+
+            // Disable NIS server in rc.conf
+            networkConfigStep = "Disabling NIS server..."
+            _ = try await sshManager.executeCommand("sysrc -x nis_server_enable 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("sysrc -x nis_client_enable 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("sysrc -x nis_yppasswdd_enable 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("sysrc -x nisdomainname 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("sysrc -x rpcbind_enable 2>/dev/null || true")
+
+            // Disable NFS server in rc.conf
+            networkConfigStep = "Disabling NFS server..."
+            _ = try await sshManager.executeCommand("sysrc -x nfs_server_enable 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("sysrc -x mountd_enable 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("sysrc -x rpc_lockd_enable 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("sysrc -x rpc_statd_enable 2>/dev/null || true")
+
+            // Remove NIS compat entries from passwd/group files
+            networkConfigStep = "Removing NIS compat entries..."
+            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/^+:/d' /etc/master.passwd 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("pwd_mkdb -p /etc/master.passwd 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/^+:/d' /etc/group 2>/dev/null || true")
+
+            // Remove /etc/netgroup
+            _ = try await sshManager.executeCommand("rm -f /etc/netgroup 2>/dev/null || true")
+
+            // Remove sudoers network-users config
+            _ = try await sshManager.executeCommand("rm -f /usr/local/etc/sudoers.d/network-users 2>/dev/null || true")
+
+            // Remove NIS maps and data
+            networkConfigStep = "Removing NIS data..."
+            _ = try await sshManager.executeCommand("rm -rf /var/yp/* 2>&1 || true")
+
+            // Clear the domain name
+            _ = try await sshManager.executeCommand("domainname '' 2>&1 || true")
+
+            networkConfigStep = "Refreshing status..."
+
+            // Reload state
+            await loadSetupState()
+
+            confirmationMessage = """
+            Successfully removed the network domain.
+
+            Configuration removed:
+            ✓ NIS server disabled
+            ✓ NFS server disabled
+            ✓ NFS shares removed
+            ✓ NIS maps and data deleted
+            ✓ nsswitch.conf restored to default
+
+            This system is now configured as a standalone machine.
+            Network users and their home directories in /Network/Users remain intact.
+            """
+            showingConfirmation = true
+
+        } catch {
+            self.error = "Failed to remove network domain: \(error.localizedDescription)"
         }
 
         isConfiguringNetwork = false
@@ -1172,7 +1329,7 @@ uidstart=1001
 
             var message = "User '\(username)' created successfully!"
             if addToWheel {
-                message += "\n\nUser has been added to the wheel group."
+                message += "\n\nUser has been granted sudo access."
             }
             confirmationMessage = message
             showingConfirmation = true
@@ -1216,43 +1373,78 @@ uidstart=1001
         error = nil
 
         do {
-            // Check if /var/yp/master.passwd exists
-            let checkFile = try await sshManager.executeCommand("test -f /var/yp/master.passwd && echo 'exists' || echo 'missing'")
-            if checkFile.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
-                setupState.networkUsers = []
-                isLoading = false
-                return
-            }
-
-            // Get list of network users from /var/yp/master.passwd
-            let passwdOutput = try await sshManager.executeCommand("cat /var/yp/master.passwd")
             var users: [LocalUser] = []
+            let isServer = setupState.networkDomain?.role == .server
+            print("DEBUG loadNetworkUsers: role=\(String(describing: setupState.networkDomain?.role)), isServer=\(isServer)")
 
-            for line in passwdOutput.split(separator: "\n") {
-                // master.passwd has 10 fields: name:password:uid:gid:class:change:expire:gecos:home:shell
-                // Use omittingEmptySubsequences: false to preserve empty fields
-                let parts = line.split(separator: ":", omittingEmptySubsequences: false)
-                guard parts.count >= 10 else { continue }
-
-                let username = String(parts[0])
-                let uid = Int(parts[2]) ?? 0
-                let fullName = String(parts[7])      // gecos field
-                let homeDirectory = String(parts[8]) // home field
-                let shell = String(parts[9])         // shell field
-
-                // Only show users with UID >= 1001 (Gershwin uidstart) and < 60000
-                guard uid >= 1001 && uid < 60000 else {
-                    continue
+            if isServer {
+                // Server: read from /var/yp/master.passwd (10 fields)
+                let checkFile = try await sshManager.executeCommand("test -f /var/yp/master.passwd && echo 'exists' || echo 'missing'")
+                if checkFile.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+                    setupState.networkUsers = []
+                    isLoading = false
+                    return
                 }
 
-                users.append(LocalUser(
-                    id: uid,
-                    username: username,
-                    fullName: fullName,
-                    homeDirectory: homeDirectory,
-                    shell: shell,
-                    isSystemUser: false
-                ))
+                let passwdOutput = try await sshManager.executeCommand("cat /var/yp/master.passwd")
+
+                for line in passwdOutput.split(separator: "\n") {
+                    // master.passwd has 10 fields: name:password:uid:gid:class:change:expire:gecos:home:shell
+                    let parts = line.split(separator: ":", omittingEmptySubsequences: false)
+                    guard parts.count >= 10 else { continue }
+
+                    let username = String(parts[0])
+                    let uid = Int(parts[2]) ?? 0
+                    let fullName = String(parts[7])      // gecos field
+                    let homeDirectory = String(parts[8]) // home field
+                    let shell = String(parts[9])         // shell field
+
+                    // Only show users with UID >= 1001 (Gershwin uidstart) and < 60000
+                    guard uid >= 1001 && uid < 60000 else { continue }
+
+                    users.append(LocalUser(
+                        id: uid,
+                        username: username,
+                        fullName: fullName,
+                        homeDirectory: homeDirectory,
+                        shell: shell,
+                        isSystemUser: false
+                    ))
+                }
+            } else {
+                // Client: use ypcat passwd (7 fields)
+                print("DEBUG loadNetworkUsers: Using ypcat passwd for client")
+                let passwdOutput = try await sshManager.executeCommand("ypcat passwd 2>/dev/null || echo ''")
+                print("DEBUG loadNetworkUsers: ypcat output: \(passwdOutput)")
+                if passwdOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    setupState.networkUsers = []
+                    isLoading = false
+                    return
+                }
+
+                for line in passwdOutput.split(separator: "\n") {
+                    // passwd has 7 fields: name:password:uid:gid:gecos:home:shell
+                    let parts = line.split(separator: ":", omittingEmptySubsequences: false)
+                    guard parts.count >= 7 else { continue }
+
+                    let username = String(parts[0])
+                    let uid = Int(parts[2]) ?? 0
+                    let fullName = String(parts[4])      // gecos field
+                    let homeDirectory = String(parts[5]) // home field
+                    let shell = String(parts[6])         // shell field
+
+                    // Only show users with UID >= 1001 (Gershwin uidstart) and < 60000
+                    guard uid >= 1001 && uid < 60000 else { continue }
+
+                    users.append(LocalUser(
+                        id: uid,
+                        username: username,
+                        fullName: fullName,
+                        homeDirectory: homeDirectory,
+                        shell: shell,
+                        isSystemUser: false
+                    ))
+                }
             }
 
             setupState.networkUsers = users.sorted { $0.username < $1.username }
@@ -1280,22 +1472,49 @@ uidstart=1001
             let homePrefix = "/Network/Users"
             let shell = setupState.userConfig?.defaultShell ?? "/usr/local/bin/zsh"
 
-            // Use pw command to create user non-interactively in local system first
-            var createCommand = "pw useradd \(username) -c '\(fullName)' -d \(homePrefix)/\(username) -s \(shell) -m"
+            // Get the next available UID (starting from 1001 for network users)
+            let uidResult = try await sshManager.executeCommand("awk -F: 'BEGIN{max=1000} $3>max && $3<60000 {max=$3} END{print max+1}' /var/yp/master.passwd /etc/master.passwd 2>/dev/null | sort -n | tail -1")
+            let uid = uidResult.trimmingCharacters(in: .whitespacesAndNewlines)
+            let uidNum = Int(uid) ?? 1001
+            print("DEBUG: Next available UID: \(uidNum)")
 
-            if addToWheel {
-                createCommand += " -G wheel"
-            }
+            // Generate password hash using openssl
+            let hashResult = try await sshManager.executeCommand("openssl passwd -6 '\(password)'")
+            let passwordHash = hashResult.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            createCommand += " -h 0"
-            _ = try await sshManager.executeCommand("echo '\(password)' | \(createCommand)")
-
-            // Get the user's entry from /etc/master.passwd
-            let userEntry = try await sshManager.executeCommand("grep '^\(username):' /etc/master.passwd")
-            let trimmedEntry = userEntry.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Create the master.passwd entry directly (10 fields)
+            // name:password:uid:gid:class:change:expire:gecos:home:shell
+            let masterPasswdEntry = "\(username):\(passwordHash):\(uidNum):\(uidNum)::0:0:\(fullName):\(homePrefix)/\(username):\(shell)"
 
             // Append to /var/yp/master.passwd
-            _ = try await sshManager.executeCommand("echo '\(trimmedEntry)' >> /var/yp/master.passwd")
+            _ = try await sshManager.executeCommand("echo '\(masterPasswdEntry)' >> /var/yp/master.passwd")
+
+            // Check if user's private group already exists in /var/yp/group
+            let userGroupExists = try await sshManager.executeCommand("grep -q '^\(username):' /var/yp/group 2>/dev/null && echo 'exists' || echo 'missing'")
+            if userGroupExists.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+                // Create the user's private group in /var/yp/group
+                let groupEntry = "\(username):*:\(uidNum):"
+                _ = try await sshManager.executeCommand("echo '\(groupEntry)' >> /var/yp/group")
+            }
+
+            // If adding sudo access, add user to sudo-users netgroup
+            if addToWheel {
+                // Check if user is already in sudo-users netgroup
+                let inNetgroup = try await sshManager.executeCommand("grep '^sudo-users' /var/yp/netgroup | grep -q '(,\(username),)' && echo 'exists' || echo 'missing'")
+                if inNetgroup.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+                    // Append user to sudo-users netgroup: (,username,) format
+                    _ = try await sshManager.executeCommand("/usr/bin/sed -i '' 's/^sudo-users.*/& (,\(username),)/' /var/yp/netgroup")
+                }
+            }
+
+            // Create home directory
+            _ = try await sshManager.executeCommand("mkdir -p \(homePrefix)/\(username)")
+            _ = try await sshManager.executeCommand("chown \(uidNum):\(uidNum) \(homePrefix)/\(username)")
+            _ = try await sshManager.executeCommand("chmod 755 \(homePrefix)/\(username)")
+
+            // Copy skeleton files
+            _ = try await sshManager.executeCommand("cp -R /usr/share/skel/ \(homePrefix)/\(username)/ 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("chown -R \(uidNum):\(uidNum) \(homePrefix)/\(username)")
 
             // Rebuild NIS maps
             guard let domain = setupState.networkDomain?.domainName else {
@@ -1307,15 +1526,13 @@ uidstart=1001
             // passwd:        name:password:uid:gid:gecos:home:shell
             _ = try await sshManager.executeCommand("awk -F: 'NF==10 {print $1\":\"$2\":\"$3\":\"$4\":\"$8\":\"$9\":\"$10}' /var/yp/master.passwd > /var/yp/passwd")
 
-            // Touch master.passwd to ensure make sees it as newer, then rebuild maps
-            _ = try await sshManager.executeCommand("touch /var/yp/master.passwd /var/yp/passwd && cd /var/yp && make 2>&1")
-
-            // Remove the user from local system (keep it only in NIS)
-            _ = try await sshManager.executeCommand("pw userdel \(username) 2>&1 || true")
+            // Delete and rebuild NIS maps to ensure changes are picked up
+            // Pass GROUP=/var/yp/group and NETGROUP=/var/yp/netgroup so make uses our NIS files
+            _ = try await sshManager.executeCommand("rm -f /var/yp/*/passwd.byname /var/yp/*/passwd.byuid /var/yp/*/group.byname /var/yp/*/group.bygid /var/yp/*/master.passwd.byname /var/yp/*/master.passwd.byuid /var/yp/*/netgroup /var/yp/*/netgroup.byuser /var/yp/*/netgroup.byhost 2>/dev/null; cd /var/yp && make GROUP=/var/yp/group NETGROUP=/var/yp/netgroup 2>&1")
 
             var message = "Network user '\(username)' created successfully!\n\nNIS maps have been rebuilt. Clients should now see this user."
             if addToWheel {
-                message += "\n\nUser has been added to the wheel group."
+                message += "\n\nUser has been granted sudo access (via netgroup)."
             }
             confirmationMessage = message
             showingConfirmation = true
@@ -1338,6 +1555,13 @@ uidstart=1001
             // Remove user from /var/yp/master.passwd
             _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/^\(user.username):/d' /var/yp/master.passwd")
 
+            // Remove user's private group from /var/yp/group
+            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/^\(user.username):/d' /var/yp/group")
+
+            // Remove user from sudo-users netgroup
+            // Remove the (,username,) tuple from the netgroup line
+            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' 's/ (,\(user.username),)//g' /var/yp/netgroup")
+
             // Rebuild NIS maps
             guard let domain = setupState.networkDomain?.domainName else {
                 throw NSError(domain: "GershwinSetup", code: 7, userInfo: [NSLocalizedDescriptionKey: "NIS domain name not found"])
@@ -1346,8 +1570,8 @@ uidstart=1001
             // Regenerate /var/yp/passwd from /var/yp/master.passwd (7-field format from 10-field format)
             _ = try await sshManager.executeCommand("awk -F: 'NF==10 {print $1\":\"$2\":\"$3\":\"$4\":\"$8\":\"$9\":\"$10}' /var/yp/master.passwd > /var/yp/passwd")
 
-            // Touch master.passwd to ensure make sees it as newer, then rebuild maps
-            _ = try await sshManager.executeCommand("touch /var/yp/master.passwd /var/yp/passwd && cd /var/yp && make 2>&1")
+            // Delete and rebuild NIS maps to ensure changes are picked up
+            _ = try await sshManager.executeCommand("rm -f /var/yp/*/passwd.byname /var/yp/*/passwd.byuid /var/yp/*/group.byname /var/yp/*/group.bygid /var/yp/*/master.passwd.byname /var/yp/*/master.passwd.byuid /var/yp/*/netgroup /var/yp/*/netgroup.byuser /var/yp/*/netgroup.byhost 2>/dev/null; cd /var/yp && make GROUP=/var/yp/group NETGROUP=/var/yp/netgroup 2>&1")
 
             confirmationMessage = "Network user '\(user.username)' removed successfully!\n\nNIS maps have been rebuilt. Note: Home directory was not removed."
             showingConfirmation = true
@@ -1506,26 +1730,9 @@ struct UserManagementCard: View {
                         .foregroundColor(.secondary)
 
                     UserManagementPhase(viewModel: viewModel)
-                } else if viewModel.selectedNetworkRole == .server {
-                    // Network User Management
+                } else if viewModel.selectedNetworkRole == .server || viewModel.selectedNetworkRole == .client {
+                    // Network User Management (read-only for clients)
                     NetworkUserManagementPhase(viewModel: viewModel)
-                } else if viewModel.selectedNetworkRole == .client {
-                    // Client - no user management
-                    VStack(spacing: 16) {
-                        Image(systemName: "person.2.slash")
-                            .font(.system(size: 40))
-                            .foregroundColor(.secondary)
-
-                        Text("User management not available")
-                            .font(.headline)
-
-                        Text("This system is configured as an NIS client. Users are managed on the NIS server.")
-                            .font(.body)
-                            .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 20)
                 }
             }
             .padding()
@@ -1540,7 +1747,7 @@ struct UserManagementCard: View {
             Task {
                 if viewModel.selectedNetworkRole == .none {
                     await viewModel.loadLocalUsers()
-                } else if viewModel.selectedNetworkRole == .server {
+                } else if viewModel.selectedNetworkRole == .server || viewModel.selectedNetworkRole == .client {
                     await viewModel.loadNetworkUsers()
                 }
             }
@@ -1866,6 +2073,31 @@ struct DomainPhase: View {
                 .buttonStyle(.bordered)
                 .tint(.red)
                 .disabled(viewModel.isLoading)
+            } else if isConfiguredAsServer {
+                // Server is configured - show remove domain button
+                Divider()
+                Button(action: {
+                    viewModel.showingRemoveDomainConfirmation = true
+                }) {
+                    Label("Remove Domain", systemImage: "server.rack")
+                }
+                .buttonStyle(.bordered)
+                .tint(.red)
+                .disabled(viewModel.isLoading)
+                .confirmationDialog(
+                    "Remove Network Domain?",
+                    isPresented: $viewModel.showingRemoveDomainConfirmation,
+                    titleVisibility: .visible
+                ) {
+                    Button("Remove Domain", role: .destructive) {
+                        Task {
+                            await viewModel.removeNetworkDomain()
+                        }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This will stop all NIS/NFS services, remove network user data, and restore this system to standalone mode. This action cannot be undone.")
+                }
             }
 
             // Show "Complete Setup" button if network is configured but packages/user config are incomplete
@@ -2025,24 +2257,26 @@ struct UserManagementTab: View {
                             .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
                     )
                 } else if viewModel.selectedNetworkRole == .client {
-                    // Client - no user management
-                    VStack(spacing: 16) {
-                        Image(systemName: "person.2.slash")
-                            .font(.system(size: 60))
-                            .foregroundColor(.secondary)
-
-                        Text("User management not available")
-                            .font(.title3)
+                    // Client - read-only network user management
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Network Users")
+                            .font(.title2)
                             .bold()
 
-                        Text("This system is configured as an NIS client. Users are managed on the NIS server.")
-                            .font(.body)
+                        Text("View NIS network users (managed on server)")
+                            .font(.caption)
                             .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 40)
+
+                        Divider()
+
+                        NetworkUserManagementPhase(viewModel: viewModel)
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(60)
+                    .padding()
+                    .background(
+                        RoundedRectangle(cornerRadius: 16)
+                            .fill(Color(nsColor: .controlBackgroundColor))
+                            .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
+                    )
                 }
             }
             .padding()
@@ -2052,7 +2286,7 @@ struct UserManagementTab: View {
             Task {
                 if viewModel.selectedNetworkRole == .none {
                     await viewModel.loadLocalUsers()
-                } else if viewModel.selectedNetworkRole == .server {
+                } else if viewModel.selectedNetworkRole == .server || viewModel.selectedNetworkRole == .client {
                     await viewModel.loadNetworkUsers()
                 }
             }
@@ -2412,7 +2646,7 @@ struct CreateUserSheet: View {
 
                 Toggle(isOn: $addToWheel) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Add to wheel group")
+                        Text("Allow sudo access")
                             .font(.body)
                         Text("Grants sudo/administrative privileges")
                             .font(.caption)
@@ -2473,25 +2707,38 @@ struct NetworkUserManagementPhase: View {
     @State private var showDeleteConfirmation = false
     @State private var userToDelete: LocalUser?
 
+    private var isClient: Bool {
+        viewModel.setupState.networkDomain?.role == .client
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            // Info note at top
+            // Info note at top - different message for client vs server
             HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "info.circle")
-                    .foregroundColor(.blue)
+                Image(systemName: isClient ? "lock.fill" : "info.circle")
+                    .foregroundColor(isClient ? .orange : .blue)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Network users are shared across all NIS clients")
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                    Text("Home directories should be in /Network/Users for NFS access")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    if isClient {
+                        Text("Network users must be managed from the NIS server")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                        Text("Connect to the server to create, modify, or delete network users")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("Network users are shared across all NIS clients")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                        Text("Home directories should be in /Network/Users for NFS access")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
             .padding(8)
             .background(
                 RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.blue.opacity(0.1))
+                    .fill(isClient ? Color.orange.opacity(0.1) : Color.blue.opacity(0.1))
             )
 
             if viewModel.setupState.networkUsers.isEmpty {
@@ -2515,6 +2762,7 @@ struct NetworkUserManagementPhase: View {
                         ForEach(viewModel.setupState.networkUsers) { user in
                             NetworkUserRow(
                                 user: user,
+                                isReadOnly: isClient,
                                 onDelete: {
                                     userToDelete = user
                                     showDeleteConfirmation = true
@@ -2526,13 +2774,16 @@ struct NetworkUserManagementPhase: View {
                 .frame(maxHeight: 300)
             }
 
-            Button(action: {
-                showCreateUserSheet = true
-            }) {
-                Label("Create New Network User", systemImage: "plus.circle.fill")
+            // Only show create button on server
+            if !isClient {
+                Button(action: {
+                    showCreateUserSheet = true
+                }) {
+                    Label("Create New Network User", systemImage: "plus.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.isLoading)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(viewModel.isLoading)
         }
         .sheet(isPresented: $showCreateUserSheet) {
             CreateNetworkUserSheet(viewModel: viewModel, isPresented: $showCreateUserSheet)
@@ -2559,6 +2810,7 @@ struct NetworkUserManagementPhase: View {
 
 struct NetworkUserRow: View {
     let user: LocalUser
+    var isReadOnly: Bool = false
     let onDelete: () -> Void
 
     var body: some View {
@@ -2601,12 +2853,14 @@ struct NetworkUserRow: View {
 
             Spacer()
 
-            Button(action: onDelete) {
-                Image(systemName: "trash")
-                    .foregroundColor(.red)
+            if !isReadOnly {
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(.borderless)
+                .help("Delete network user")
             }
-            .buttonStyle(.borderless)
-            .help("Delete network user")
         }
         .padding(8)
         .background(
@@ -2716,7 +2970,7 @@ struct CreateNetworkUserSheet: View {
 
                 Toggle(isOn: $addToWheel) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Add to wheel group")
+                        Text("Allow sudo access")
                             .font(.body)
                         Text("Grants sudo/administrative privileges")
                             .font(.caption)
