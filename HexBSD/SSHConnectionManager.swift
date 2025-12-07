@@ -2253,6 +2253,329 @@ extension SSHConnectionManager {
         print("DEBUG: Parsed \(vulnerabilities.count) vulnerabilities")
         return vulnerabilities
     }
+
+    // MARK: - Firewall (ipfw) Operations
+
+    /// Get the current firewall status and rules
+    func getFirewallStatus() async throws -> (status: FirewallStatus, rules: [FirewallRule]) {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        print("DEBUG: getFirewallStatus - checking if ipfw exists...")
+
+        // Check if ipfw exists
+        let whichOutput = try await executeCommand("which ipfw 2>/dev/null || echo 'not found'")
+        print("DEBUG: which ipfw output: '\(whichOutput.trimmingCharacters(in: .whitespacesAndNewlines))'")
+        if whichOutput.trimmingCharacters(in: .whitespacesAndNewlines) == "not found" {
+            print("DEBUG: ipfw not found")
+            return (status: .notInstalled, rules: [])
+        }
+
+        // Check if firewall is enabled by looking for rules
+        // ipfw list returns rules if enabled, or just the default rule 65535
+        print("DEBUG: Getting ipfw list...")
+        let listOutput = try await executeCommand("ipfw list 2>&1 || echo 'ERROR'")
+        print("DEBUG: ipfw list output: '\(listOutput)'")
+
+        // "Protocol not available" means ipfw module is not loaded = firewall disabled
+        if listOutput.contains("Protocol not available") {
+            print("DEBUG: ipfw module not loaded - firewall disabled")
+            return (status: .disabled, rules: [])
+        }
+
+        if listOutput.contains("ERROR") || listOutput.contains("Permission denied") {
+            print("DEBUG: ipfw list error or permission denied")
+            // Need root, try with sudo check
+            let sudoCheck = try await executeCommand("id -u")
+            if sudoCheck.trimmingCharacters(in: .whitespacesAndNewlines) != "0" {
+                throw NSError(domain: "SSHConnectionManager", code: 2,
+                             userInfo: [NSLocalizedDescriptionKey: "Root privileges required to manage firewall"])
+            }
+            return (status: .unknown, rules: [])
+        }
+
+        let rules = parseFirewallRules(listOutput)
+        print("DEBUG: Parsed \(rules.count) firewall rules")
+
+        // If only the default allow rule exists (65535), firewall is effectively disabled
+        // If we have more rules, it's enabled
+        if rules.count <= 1 {
+            print("DEBUG: Firewall status: disabled (only default rule)")
+            return (status: .disabled, rules: rules)
+        } else {
+            print("DEBUG: Firewall status: enabled (\(rules.count) rules)")
+            return (status: .enabled, rules: rules)
+        }
+    }
+
+    /// Enable firewall with default secure rules (SSH allowed, block all else)
+    func enableFirewall() async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        print("DEBUG: enableFirewall - starting...")
+
+        // Write the rules to /etc/ipfw.rules first (before starting firewall)
+        print("DEBUG: Writing /etc/ipfw.rules...")
+        let rulesContent = """
+#!/bin/sh
+# HexBSD Firewall Rules
+ipfw -q flush
+# Allow loopback traffic
+ipfw -q add 00100 allow all from any to any via lo0 // loopback
+# Allow all outgoing traffic
+ipfw -q add 00200 allow all from any to any out // outbound
+# Allow SSH inbound
+ipfw -q add 01000 allow tcp from any to any 22 in // SSH
+# Deny everything else inbound
+ipfw -q add 65534 deny log all from any to any in // deny-all-inbound
+"""
+        let writeRulesOutput = try await executeCommand("printf '%s' '\(rulesContent.replacingOccurrences(of: "'", with: "'\\''"))' > /etc/ipfw.rules 2>&1")
+        print("DEBUG: write rules output: '\(writeRulesOutput)'")
+
+        let chmodOutput = try await executeCommand("chmod +x /etc/ipfw.rules 2>&1")
+        print("DEBUG: chmod output: '\(chmodOutput)'")
+
+        // Configure rc.conf
+        print("DEBUG: Setting sysrc firewall_enable...")
+        let sysrcEnableOutput = try await executeCommand("sysrc firewall_enable=\"YES\" 2>&1")
+        print("DEBUG: sysrc enable output: '\(sysrcEnableOutput)'")
+
+        print("DEBUG: Setting sysrc firewall_script...")
+        let sysrcScriptOutput = try await executeCommand("sysrc firewall_script=\"/etc/ipfw.rules\" 2>&1")
+        print("DEBUG: sysrc script output: '\(sysrcScriptOutput)'")
+
+        print("DEBUG: Setting sysrc firewall_logging...")
+        let sysrcLoggingOutput = try await executeCommand("sysrc firewall_logging=\"YES\" 2>&1")
+        print("DEBUG: sysrc logging output: '\(sysrcLoggingOutput)'")
+
+        // Remove firewall_type if set (we're using firewall_script instead)
+        print("DEBUG: Removing firewall_type if set...")
+        let removeTypeOutput = try await executeCommand("sysrc -x firewall_type 2>&1 || true")
+        print("DEBUG: remove type output: '\(removeTypeOutput)'")
+
+        // Start/restart the firewall service (this loads the module safely)
+        print("DEBUG: Starting ipfw service...")
+        let serviceOutput = try await executeCommand("service ipfw restart 2>&1")
+        print("DEBUG: service ipfw output: '\(serviceOutput)'")
+
+        print("DEBUG: enableFirewall - complete")
+    }
+
+    /// Disable firewall and flush all rules
+    func disableFirewall() async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        print("DEBUG: disableFirewall - starting...")
+
+        // Stop the firewall service
+        print("DEBUG: Stopping ipfw service...")
+        let stopOutput = try await executeCommand("service ipfw stop 2>&1")
+        print("DEBUG: service stop output: '\(stopOutput)'")
+
+        // Disable at boot
+        print("DEBUG: Setting sysrc firewall_enable=NO...")
+        let sysrcOutput = try await executeCommand("sysrc firewall_enable=\"NO\" 2>&1")
+        print("DEBUG: sysrc output: '\(sysrcOutput)'")
+
+        // Unload the kernel module
+        print("DEBUG: Unloading ipfw module...")
+        let kldunloadOutput = try await executeCommand("kldunload ipfw 2>&1 || true")
+        print("DEBUG: kldunload output: '\(kldunloadOutput)'")
+
+        print("DEBUG: disableFirewall - complete")
+    }
+
+    /// Parse ipfw list output into FirewallRule objects
+    private func parseFirewallRules(_ output: String) -> [FirewallRule] {
+        var rules: [FirewallRule] = []
+        let lines = output.components(separatedBy: .newlines)
+
+        // ipfw list format:
+        // 00100 allow ip from any to any via lo0
+        // 00200 allow tcp from any to any established
+        // 00300 allow tcp from any to any dst-port 22 in
+        // 65535 allow ip from any to any
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+
+            // Extract comment if present (after //)
+            var rulePart = trimmed
+            var comment = ""
+            if let commentIndex = trimmed.range(of: "//") {
+                rulePart = String(trimmed[..<commentIndex.lowerBound]).trimmingCharacters(in: .whitespaces)
+                comment = String(trimmed[commentIndex.upperBound...]).trimmingCharacters(in: .whitespaces)
+            }
+
+            let parts = rulePart.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            guard parts.count >= 4 else { continue }
+
+            // First part should be the rule number
+            guard let ruleNumber = Int(parts[0]) else { continue }
+
+            let action = parts[1]
+            let proto = parts.count > 2 ? parts[2] : "ip"
+
+            // Parse source and destination
+            var source = "any"
+            var destination = "any"
+            var options = ""
+
+            // Find "from" and "to" keywords
+            if let fromIndex = parts.firstIndex(of: "from"),
+               fromIndex + 1 < parts.count {
+                source = parts[fromIndex + 1]
+            }
+
+            if let toIndex = parts.firstIndex(of: "to"),
+               toIndex + 1 < parts.count {
+                destination = parts[toIndex + 1]
+            }
+
+            // Collect remaining options (ports, flags, etc.)
+            var optionParts: [String] = []
+            if let toIndex = parts.firstIndex(of: "to"),
+               toIndex + 2 < parts.count {
+                optionParts = Array(parts[(toIndex + 2)...])
+            }
+            options = optionParts.joined(separator: " ")
+
+            rules.append(FirewallRule(
+                ruleNumber: ruleNumber,
+                action: action,
+                proto: proto,
+                source: source,
+                destination: destination,
+                options: options,
+                comment: comment,
+                rawRule: trimmed
+            ))
+        }
+
+        return rules
+    }
+
+    /// Add a new firewall rule
+    func addFirewallRule(ruleNumber: Int, action: String, proto: String, source: String, destination: String, port: Int?, direction: String?, comment: String?) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var ruleCmd = "ipfw -q add \(String(format: "%05d", ruleNumber)) \(action) \(proto) from \(source) to \(destination)"
+
+        if let port = port {
+            ruleCmd += " \(port)"
+        }
+
+        if let direction = direction, !direction.isEmpty {
+            ruleCmd += " \(direction)"
+        }
+
+        if let comment = comment, !comment.isEmpty {
+            ruleCmd += " // \(comment)"
+        }
+
+        print("DEBUG: Adding firewall rule: \(ruleCmd)")
+        let output = try await executeCommand("\(ruleCmd) 2>&1")
+        print("DEBUG: Add rule output: '\(output)'")
+
+        // Also update /etc/ipfw.rules to persist the rule
+        try await updateIpfwRulesFile()
+    }
+
+    /// Delete a firewall rule by number
+    func deleteFirewallRule(ruleNumber: Int) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        print("DEBUG: Deleting firewall rule: \(ruleNumber)")
+        let output = try await executeCommand("ipfw -q delete \(ruleNumber) 2>&1")
+        print("DEBUG: Delete rule output: '\(output)'")
+
+        // Also update /etc/ipfw.rules to persist the change
+        try await updateIpfwRulesFile()
+    }
+
+    /// Update /etc/ipfw.rules with current rules for persistence
+    private func updateIpfwRulesFile() async throws {
+        // Get current rules
+        let rulesOutput = try await executeCommand("ipfw list 2>&1")
+
+        // Build the rules file content
+        var content = "#!/bin/sh\n# HexBSD Firewall Rules\nipfw -q flush\n"
+
+        for line in rulesOutput.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+
+            // Skip the default 65535 deny rule (kernel adds it automatically)
+            if trimmed.hasPrefix("65535") { continue }
+
+            // Convert "00100 allow..." to "ipfw -q add 00100 allow..."
+            content += "ipfw -q add \(trimmed)\n"
+        }
+
+        // Write to file
+        let escapedContent = content.replacingOccurrences(of: "'", with: "'\\''")
+        let _ = try await executeCommand("printf '%s' '\(escapedContent)' > /etc/ipfw.rules 2>&1")
+        let _ = try await executeCommand("chmod +x /etc/ipfw.rules 2>&1")
+        print("DEBUG: Updated /etc/ipfw.rules")
+    }
+
+    /// Set firewall logging enabled/disabled
+    func setFirewallLogging(enabled: Bool) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let value = enabled ? "YES" : "NO"
+        print("DEBUG: Setting firewall logging to \(value)")
+        let _ = try await executeCommand("sysrc firewall_logging=\"\(value)\" 2>&1")
+        print("DEBUG: Firewall logging set to \(value)")
+    }
+
+    /// Get current firewall logging status
+    func getFirewallLoggingStatus() async throws -> Bool {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let output = try await executeCommand("sysrc -n firewall_logging 2>/dev/null || echo 'YES'")
+        let value = output.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        return value == "YES" || value == "TRUE" || value == "1"
+    }
+
+    /// Get firewall logs from system log
+    func getFirewallLogs() async throws -> [String] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Search for ipfw entries in /var/log/security or /var/log/messages
+        // ipfw logs typically go to security log on FreeBSD
+        let output = try await executeCommand("grep -i 'ipfw' /var/log/security 2>/dev/null | tail -100 || grep -i 'ipfw' /var/log/messages 2>/dev/null | tail -100 || echo ''")
+
+        let lines = output.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
+        return lines
+    }
 }
 
 // MARK: - Jails Operations
