@@ -452,49 +452,76 @@ class GershwinSetupViewModel: ObservableObject {
         error = nil
 
         do {
-            // Fresh detection of package status to ensure accurate state
+            // Bootstrap pkg first if needed (fresh system without pkg installed)
+            userConfigStep = "Checking package manager..."
+            print("DEBUG: Checking if pkg is installed...")
+            var pkgCheck = try await sshManager.executeCommand("which pkg 2>/dev/null || echo 'missing'")
+            print("DEBUG: pkg check result: '\(pkgCheck.trimmingCharacters(in: .whitespacesAndNewlines))'")
+
+            if pkgCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+                userConfigStep = "Bootstrapping package manager..."
+                print("DEBUG: pkg not found, bootstrapping...")
+                let bootstrapResult = try await sshManager.executeCommand("env ASSUME_ALWAYS_YES=yes pkg bootstrap 2>&1")
+                print("DEBUG: Bootstrap result: \(bootstrapResult)")
+
+                // Verify pkg is now available
+                pkgCheck = try await sshManager.executeCommand("which pkg 2>/dev/null || echo 'missing'")
+                print("DEBUG: pkg check after bootstrap: '\(pkgCheck.trimmingCharacters(in: .whitespacesAndNewlines))'")
+                if pkgCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+                    throw NSError(domain: "GershwinSetup", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to bootstrap pkg - package manager not available"])
+                }
+            }
+
+            // Now detect package status (pkg is guaranteed to be available)
             userConfigStep = "Checking installed packages..."
+            print("DEBUG: Checking installed packages...")
+
             let zshCheck = try await sshManager.executeCommand("test -f /usr/local/bin/zsh && echo 'installed' || echo 'missing'")
             let zshInstalled = zshCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
+            print("DEBUG: zsh installed: \(zshInstalled)")
 
             let autosuggestCheck = try await sshManager.executeCommand("test -f /usr/local/share/zsh-autosuggestions/zsh-autosuggestions.zsh && echo 'installed' || echo 'missing'")
             let zshAutosuggestionsInstalled = autosuggestCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
+            print("DEBUG: zsh-autosuggestions installed: \(zshAutosuggestionsInstalled)")
 
             let completionsCheck = try await sshManager.executeCommand("pkg info -e zsh-completions 2>/dev/null && echo 'installed' || echo 'missing'")
             let zshCompletionsInstalled = completionsCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
+            print("DEBUG: zsh-completions installed: \(zshCompletionsInstalled)")
 
             let zshrcCheck = try await sshManager.executeCommand("test -f /usr/share/skel/.zshrc && echo 'configured' || echo 'missing'")
             let zshrcConfigured = zshrcCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "configured"
-
-            // Bootstrap pkg if needed (fresh system without pkg installed)
-            let pkgCheck = try await sshManager.executeCommand("which pkg 2>/dev/null || echo 'missing'")
-            if pkgCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
-                userConfigStep = "Bootstrapping package manager..."
-                _ = try await sshManager.executeCommand("env ASSUME_ALWAYS_YES=yes pkg bootstrap")
-            }
+            print("DEBUG: .zshrc configured: \(zshrcConfigured)")
 
             // Run pkg update if any packages need to be installed
             if !zshInstalled || !zshAutosuggestionsInstalled || !zshCompletionsInstalled {
                 userConfigStep = "Updating package repository..."
-                _ = try await sshManager.executeCommand("pkg update")
+                print("DEBUG: Running pkg update...")
+                let updateResult = try await sshManager.executeCommand("pkg update 2>&1")
+                print("DEBUG: pkg update result: \(updateResult.prefix(500))")
             }
 
             // Install zsh if not present
             if !zshInstalled {
                 userConfigStep = "Installing zsh..."
-                _ = try await sshManager.executeCommand("pkg install -y zsh")
+                print("DEBUG: Installing zsh...")
+                let zshResult = try await sshManager.executeCommand("pkg install -y zsh 2>&1")
+                print("DEBUG: zsh install result: \(zshResult.prefix(500))")
             }
 
             // Install zsh-autosuggestions if not present
             if !zshAutosuggestionsInstalled {
                 userConfigStep = "Installing zsh-autosuggestions..."
-                _ = try await sshManager.executeCommand("pkg install -y zsh-autosuggestions")
+                print("DEBUG: Installing zsh-autosuggestions...")
+                let autosuggestResult = try await sshManager.executeCommand("pkg install -y zsh-autosuggestions 2>&1")
+                print("DEBUG: zsh-autosuggestions install result: \(autosuggestResult.prefix(500))")
             }
 
             // Install zsh-completions if not present
             if !zshCompletionsInstalled {
                 userConfigStep = "Installing zsh-completions..."
-                _ = try await sshManager.executeCommand("pkg install -y zsh-completions")
+                print("DEBUG: Installing zsh-completions...")
+                let completionsResult = try await sshManager.executeCommand("pkg install -y zsh-completions 2>&1")
+                print("DEBUG: zsh-completions install result: \(completionsResult.prefix(500))")
             }
 
             // Create .zshrc configuration in /usr/share/skel if not present
@@ -1656,7 +1683,7 @@ struct DomainPhase: View {
                 Divider()
                 Button(action: {
                     Task {
-                        await viewModel.setupZFSDatasets()
+                        guard await viewModel.setupZFSDatasets() else { return }
                         await viewModel.setupUserConfig()
                     }
                 }) {
@@ -1674,7 +1701,7 @@ struct DomainPhase: View {
                         await viewModel.setupNetworkDomain()
                     }
                 }) {
-                    Label("Initialize Server", systemImage: "server.rack")
+                    Label("Create Domain", systemImage: "server.rack")
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(viewModel.isLoading)
