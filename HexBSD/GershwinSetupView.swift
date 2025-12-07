@@ -403,7 +403,8 @@ class GershwinSetupViewModel: ObservableObject {
 
     // MARK: - Setup Actions
 
-    func setupZFSDatasets() async {
+    @discardableResult
+    func setupZFSDatasets() async -> Bool {
         isLoading = true
         error = nil
 
@@ -431,53 +432,73 @@ class GershwinSetupViewModel: ObservableObject {
                 _ = try await sshManager.executeCommand("zfs create -o mountpoint=/Network \(zpoolRoot)/Network")
             }
 
-            // Reload state
-            await loadSetupState()
+            // Reload state (don't update network role - preserve user's selection during setup)
+            await loadSetupState(updateNetworkRole: false)
+
+            isLoading = false
+            return true
 
         } catch {
             self.error = "Failed to create ZFS datasets: \(error.localizedDescription)"
+            isLoading = false
+            return false
         }
-
-        isLoading = false
     }
 
-    func setupUserConfig() async {
+    @discardableResult
+    func setupUserConfig() async -> Bool {
         isLoading = true
         isConfiguringUser = true
         error = nil
 
         do {
-            // Check and install required packages
-            guard let userConfig = setupState.userConfig else {
-                throw NSError(domain: "GershwinSetup", code: 1, userInfo: [NSLocalizedDescriptionKey: "User config status not loaded"])
+            // Fresh detection of package status to ensure accurate state
+            userConfigStep = "Checking installed packages..."
+            let zshCheck = try await sshManager.executeCommand("test -f /usr/local/bin/zsh && echo 'installed' || echo 'missing'")
+            let zshInstalled = zshCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
+
+            let autosuggestCheck = try await sshManager.executeCommand("test -f /usr/local/share/zsh-autosuggestions/zsh-autosuggestions.zsh && echo 'installed' || echo 'missing'")
+            let zshAutosuggestionsInstalled = autosuggestCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
+
+            let completionsCheck = try await sshManager.executeCommand("pkg info -e zsh-completions 2>/dev/null && echo 'installed' || echo 'missing'")
+            let zshCompletionsInstalled = completionsCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
+
+            let zshrcCheck = try await sshManager.executeCommand("test -f /usr/share/skel/.zshrc && echo 'configured' || echo 'missing'")
+            let zshrcConfigured = zshrcCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "configured"
+
+            // Bootstrap pkg if needed (fresh system without pkg installed)
+            let pkgCheck = try await sshManager.executeCommand("which pkg 2>/dev/null || echo 'missing'")
+            if pkgCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+                userConfigStep = "Bootstrapping package manager..."
+                _ = try await sshManager.executeCommand("env ASSUME_ALWAYS_YES=yes pkg bootstrap")
             }
 
-            // Run pkg update first if any packages need to be installed
-            if !userConfig.zshInstalled || !userConfig.zshAutosuggestionsInstalled || !userConfig.zshCompletionsInstalled {
+            // Run pkg update if any packages need to be installed
+            if !zshInstalled || !zshAutosuggestionsInstalled || !zshCompletionsInstalled {
                 userConfigStep = "Updating package repository..."
                 _ = try await sshManager.executeCommand("pkg update")
             }
 
             // Install zsh if not present
-            if !userConfig.zshInstalled {
+            if !zshInstalled {
                 userConfigStep = "Installing zsh..."
                 _ = try await sshManager.executeCommand("pkg install -y zsh")
             }
 
             // Install zsh-autosuggestions if not present
-            if !userConfig.zshAutosuggestionsInstalled {
+            if !zshAutosuggestionsInstalled {
                 userConfigStep = "Installing zsh-autosuggestions..."
                 _ = try await sshManager.executeCommand("pkg install -y zsh-autosuggestions")
             }
 
             // Install zsh-completions if not present
-            if !userConfig.zshCompletionsInstalled {
+            if !zshCompletionsInstalled {
                 userConfigStep = "Installing zsh-completions..."
                 _ = try await sshManager.executeCommand("pkg install -y zsh-completions")
             }
 
             // Create .zshrc configuration in /usr/share/skel if not present
-            if !userConfig.zshrcConfigured {
+            if !zshrcConfigured {
                 userConfigStep = "Creating zsh configuration..."
                 let zshrcContent = """
 # Gershwin GNUstep zsh configuration
@@ -617,16 +638,21 @@ uidstart=1001
 
             userConfigStep = "Refreshing status..."
 
-            // Reload state
-            await loadSetupState()
+            // Reload state (don't update network role - preserve user's selection during setup)
+            await loadSetupState(updateNetworkRole: false)
+
+            isConfiguringUser = false
+            userConfigStep = ""
+            isLoading = false
+            return true
 
         } catch {
             self.error = "Failed to configure user settings: \(error.localizedDescription)"
+            isConfiguringUser = false
+            userConfigStep = ""
+            isLoading = false
+            return false
         }
-
-        isConfiguringUser = false
-        userConfigStep = ""
-        isLoading = false
     }
 
     func setupNetworkDomain() async {
@@ -712,8 +738,12 @@ uidstart=1001
 
         // Initialize NIS maps
         networkConfigStep = "Initializing NIS maps..."
-        // Use yes to auto-confirm the ypinit prompts, redirect stderr to capture any errors
-        _ = try await sshManager.executeCommand("cd /var/yp && yes '' | ypinit -m \(nisDomainName) 2>&1 || true")
+        // Get the hostname for ypinit - it asks for list of NIS servers, we provide just this host
+        let hostname = try await sshManager.executeCommand("hostname -s")
+        let trimmedHostname = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
+        // ypinit -m prompts for: 1) list of servers (one per line, Ctrl+D to end), 2) confirmation (y/n)
+        // We provide the hostname, then empty line to signal done, then 'y' to confirm
+        _ = try await sshManager.executeCommand("cd /var/yp && printf '%s\\n\\ny\\n' '\(trimmedHostname)' | ypinit -m \(nisDomainName) 2>&1 || true")
 
         // Start NIS server
         networkConfigStep = "Starting NIS server..."
@@ -755,20 +785,6 @@ uidstart=1001
             throw NSError(domain: "GershwinSetup", code: 3, userInfo: [NSLocalizedDescriptionKey: "Please enter NIS server address"])
         }
 
-        // Check if /Network is a ZFS dataset (clients should not have this)
-        networkConfigStep = "Checking for local /Network dataset..."
-        let zfsCheck = try await sshManager.executeCommand("zfs list -H -o name /Network 2>/dev/null || echo 'none'")
-        let networkDataset = zfsCheck.trimmingCharacters(in: .whitespacesAndNewlines)
-        var removedLocalDataset = false
-
-        if networkDataset != "none" && !networkDataset.isEmpty {
-            // /Network is a ZFS dataset - need to unmount and destroy it for NFS client
-            networkConfigStep = "Removing local /Network dataset..."
-            _ = try await sshManager.executeCommand("zfs unmount /Network 2>&1 || true")
-            _ = try await sshManager.executeCommand("zfs destroy \(networkDataset) 2>&1 || true")
-            removedLocalDataset = true
-        }
-
         // Configure NIS client
         networkConfigStep = "Configuring NIS client..."
         _ = try await sshManager.executeCommand("sysrc nisdomainname=\"\(nisDomainName)\"")
@@ -808,9 +824,6 @@ rpc: files
             _ = try await sshManager.executeCommand("echo '\(fstabEntry)' >> /etc/fstab")
         }
 
-        // Create /Network directory if it doesn't exist
-        _ = try await sshManager.executeCommand("mkdir -p /Network")
-
         // Start NIS client service
         networkConfigStep = "Starting NIS client service..."
         // Set the NIS domain name directly (faster than /etc/netstart)
@@ -833,18 +846,10 @@ rpc: files
         let ypcatResult = try await sshManager.executeCommand("ypcat passwd 2>&1 || echo 'NIS not responding'")
         let getentResult = try await sshManager.executeCommand("getent passwd 2>&1 | grep -v '^root:' | head -5 || echo 'No network users found'")
 
-        var configSteps = """
+        let configSteps = """
         Configuration completed:
         ✓ NIS domain: \(nisDomainName)
         ✓ NIS server: \(nisServerAddress)
-        """
-
-        if removedLocalDataset {
-            configSteps += "\n✓ Removed local /Network ZFS dataset (clients use NFS mount)"
-        }
-
-        configSteps += """
-
         ✓ Services started (ypbind, nfsclient, lockd)
         ✓ /Network mounted from \(nisServerAddress)
         """
@@ -917,9 +922,9 @@ rpc: files
 """
             _ = try await sshManager.executeCommand("cat > /etc/nsswitch.conf << 'NSSWITCH_EOF'\n\(defaultNsswitchContent)\nNSSWITCH_EOF")
 
-            // Remove /Network directory
-            networkConfigStep = "Removing /Network directory..."
-            _ = try await sshManager.executeCommand("rmdir /Network 2>&1 || true")
+            // Remount /Network ZFS dataset
+            networkConfigStep = "Remounting /Network ZFS dataset..."
+            _ = try await sshManager.executeCommand("zfs mount /Network 2>&1 || true")
 
             networkConfigStep = "Refreshing status..."
 
@@ -932,7 +937,8 @@ rpc: files
             Configuration removed:
             ✓ NIS client disabled
             ✓ NFS client disabled
-            ✓ /Network unmounted and removed from fstab
+            ✓ /Network NFS unmounted and removed from fstab
+            ✓ /Network ZFS dataset remounted
             ✓ nsswitch.conf restored to defaults
 
             This system is now configured as a standalone machine.
@@ -1207,19 +1213,82 @@ struct GershwinSetupView: View {
 struct GershwinSetupContentView: View {
     @StateObject private var viewModel = GershwinSetupViewModel()
 
+    private var isSystemSetupComplete: Bool {
+        let zfsConfigured = viewModel.setupState.zfsDatasets.allSatisfy { $0.status == .configured }
+        let userConfigured = viewModel.setupState.userConfig?.status == .configured
+        let networkRole = viewModel.selectedNetworkRole
+
+        // For Standalone, check ZFS + user config
+        if networkRole == .none {
+            return zfsConfigured && userConfigured
+        }
+
+        // For Server/Client, also check network domain status
+        let networkConfigured = viewModel.setupState.networkDomain?.status == .configured
+        return zfsConfigured && userConfigured && networkConfigured
+    }
+
+    private func domainStatus() -> SetupStatus {
+        let zfsConfigured = viewModel.setupState.zfsDatasets.allSatisfy { $0.status == .configured }
+        let userConfigured = viewModel.setupState.userConfig?.status == .configured
+        let networkRole = viewModel.selectedNetworkRole
+
+        // For Standalone, check ZFS + user config
+        if networkRole == .none {
+            if zfsConfigured && userConfigured {
+                return .configured
+            } else if viewModel.setupState.zfsDatasets.isEmpty && viewModel.setupState.userConfig == nil {
+                return .pending
+            } else {
+                return .partiallyConfigured
+            }
+        }
+
+        // For Server/Client, also check network domain status
+        let networkConfigured = viewModel.setupState.networkDomain?.status == .configured
+        if zfsConfigured && userConfigured && networkConfigured {
+            return .configured
+        } else if viewModel.setupState.zfsDatasets.isEmpty && viewModel.setupState.userConfig == nil {
+            return .pending
+        } else {
+            return .partiallyConfigured
+        }
+    }
+
     var body: some View {
-        TabView {
-            // User Management Tab
-            UserManagementTab(viewModel: viewModel)
-                .tabItem {
-                    Label("User Management", systemImage: "person.2")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                // Error message
+                if let error = viewModel.error {
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.red)
+                        Text(error)
+                            .foregroundColor(.red)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color.red.opacity(0.1))
+                    )
                 }
 
-            // System Setup Tab
-            SystemSetupTab(viewModel: viewModel)
-                .tabItem {
-                    Label("System Setup", systemImage: "wrench.and.screwdriver")
+                // Domain Card (System Setup)
+                SetupPhaseCard(
+                    title: "Domain",
+                    icon: "externaldrive.connected.to.line.below",
+                    status: domainStatus()
+                ) {
+                    DomainPhase(viewModel: viewModel)
                 }
+
+                // User Management Card (only shown after System Setup is complete)
+                if isSystemSetupComplete {
+                    UserManagementCard(viewModel: viewModel)
+                }
+            }
+            .padding()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
@@ -1238,6 +1307,82 @@ struct GershwinSetupContentView: View {
             }
         } message: {
             Text(viewModel.confirmationMessage)
+        }
+    }
+}
+
+// MARK: - User Management Card
+
+struct UserManagementCard: View {
+    @ObservedObject var viewModel: GershwinSetupViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            HStack {
+                Image(systemName: "person.2")
+                    .font(.title2)
+                    .foregroundColor(.blue)
+                    .frame(width: 30)
+
+                Text("User Management")
+                    .font(.title3)
+                    .fontWeight(.semibold)
+
+                Spacer()
+            }
+            .padding()
+            .background(Color(nsColor: .controlBackgroundColor))
+
+            Divider()
+
+            // Content
+            VStack(alignment: .leading, spacing: 16) {
+                if viewModel.selectedNetworkRole == .none {
+                    // Local User Management
+                    Text("Manage local user accounts on this system")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    UserManagementPhase(viewModel: viewModel)
+                } else if viewModel.selectedNetworkRole == .server {
+                    // Network User Management
+                    NetworkUserManagementPhase(viewModel: viewModel)
+                } else if viewModel.selectedNetworkRole == .client {
+                    // Client - no user management
+                    VStack(spacing: 16) {
+                        Image(systemName: "person.2.slash")
+                            .font(.system(size: 40))
+                            .foregroundColor(.secondary)
+
+                        Text("User management not available")
+                            .font(.headline)
+
+                        Text("This system is configured as an NIS client. Users are managed on the NIS server.")
+                            .font(.body)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 20)
+                }
+            }
+            .padding()
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
+        )
+        .onAppear {
+            // Auto-load users when card appears
+            Task {
+                if viewModel.selectedNetworkRole == .none {
+                    await viewModel.loadLocalUsers()
+                } else if viewModel.selectedNetworkRole == .server {
+                    await viewModel.loadNetworkUsers()
+                }
+            }
         }
     }
 }
@@ -1524,8 +1669,8 @@ struct DomainPhase: View {
                 Divider()
                 Button(action: {
                     Task {
-                        await viewModel.setupZFSDatasets()
-                        await viewModel.setupUserConfig()
+                        guard await viewModel.setupZFSDatasets() else { return }
+                        guard await viewModel.setupUserConfig() else { return }
                         await viewModel.setupNetworkDomain()
                     }
                 }) {
@@ -1538,8 +1683,8 @@ struct DomainPhase: View {
                 Divider()
                 Button(action: {
                     Task {
-                        await viewModel.setupZFSDatasets()
-                        await viewModel.setupUserConfig()
+                        guard await viewModel.setupZFSDatasets() else { return }
+                        guard await viewModel.setupUserConfig() else { return }
                         await viewModel.setupNetworkDomain()
                     }
                 }) {
@@ -1559,6 +1704,20 @@ struct DomainPhase: View {
                 }
                 .buttonStyle(.bordered)
                 .tint(.red)
+                .disabled(viewModel.isLoading)
+            }
+
+            // Show "Complete Setup" button if network is configured but packages/user config are incomplete
+            if (isConfiguredAsServer || isConfiguredAsClient) && !localConfigured {
+                Divider()
+                Button(action: {
+                    Task {
+                        await viewModel.setupUserConfig()
+                    }
+                }) {
+                    Label("Complete Setup", systemImage: "checkmark.circle")
+                }
+                .buttonStyle(.borderedProminent)
                 .disabled(viewModel.isLoading)
             }
         }
@@ -1953,7 +2112,7 @@ struct UserRow: View {
                         Text("UID:")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        Text("\(user.id)")
+                        Text(String(user.id))
                             .font(.system(.caption, design: .monospaced))
                     }
 
@@ -2103,9 +2262,24 @@ struct NetworkUserManagementPhase: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Manage network user accounts (NIS):")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            // Info note at top
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "info.circle")
+                    .foregroundColor(.blue)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Network users are shared across all NIS clients")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                    Text("Home directories should be in /Network/Users for NFS access")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.blue.opacity(0.1))
+            )
 
             if viewModel.setupState.networkUsers.isEmpty {
                 VStack(spacing: 8) {
@@ -2146,24 +2320,6 @@ struct NetworkUserManagementPhase: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(viewModel.isLoading)
-
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "info.circle")
-                    .foregroundColor(.blue)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Network users are shared across all NIS clients")
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                    Text("Home directories should be in /Network/Users for NFS access")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-            .padding(8)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.blue.opacity(0.1))
-            )
         }
         .sheet(isPresented: $showCreateUserSheet) {
             CreateNetworkUserSheet(viewModel: viewModel, isPresented: $showCreateUserSheet)
@@ -2208,7 +2364,7 @@ struct NetworkUserRow: View {
                         Text("UID:")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        Text("\(user.id)")
+                        Text(String(user.id))
                             .font(.system(.caption, design: .monospaced))
                     }
 
