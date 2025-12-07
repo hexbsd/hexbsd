@@ -132,6 +132,28 @@ struct Netgroup: Identifiable, Hashable {
     }
 }
 
+struct UserSession: Identifiable, Hashable {
+    var id: String { "\(user)-\(tty)" }
+    let user: String
+    let tty: String
+    let from: String
+    let loginTime: String
+    let idle: String
+    let what: String
+
+    var displayFrom: String {
+        from.isEmpty ? "Local" : from
+    }
+
+    var isLocal: Bool {
+        from.isEmpty || from == "-"
+    }
+
+    var isIdle: Bool {
+        idle != "-" && !idle.isEmpty
+    }
+}
+
 struct UsersAndGroupsState {
     var zfsDatasets: [ZFSDatasetStatus] = []
     var userConfig: UserConfigStatus?
@@ -142,6 +164,7 @@ struct UsersAndGroupsState {
     var localGroups: [LocalGroup] = []
     var networkUsers: [LocalUser] = []
     var netgroups: [Netgroup] = []
+    var activeSessions: [UserSession] = []
 
     var overallProgress: Double {
         var completed = 0
@@ -2017,6 +2040,90 @@ SAVEHIST=10000
 
         isLoading = false
     }
+
+    // MARK: - Active Sessions Management
+
+    func loadActiveSessions() async {
+        isLoading = true
+        error = nil
+
+        do {
+            let sessions = try await sshManager.listUserSessions()
+            setupState.activeSessions = sessions
+        } catch {
+            self.error = "Failed to load active sessions: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+
+    func messageUser(session: UserSession, message: String) async {
+        isLoading = true
+        error = nil
+
+        do {
+            // Use write command to send message to user's terminal
+            // echo "message" | write user tty
+            let escapedMessage = message.replacingOccurrences(of: "'", with: "'\\''")
+            let command = "echo '\(escapedMessage)' | write \(session.user) \(session.tty) 2>&1 || echo 'Failed to send message'"
+            let result = try await sshManager.executeCommand(command)
+
+            if result.contains("Failed") || result.contains("Permission denied") {
+                throw NSError(domain: "UsersAndGroups", code: 20, userInfo: [NSLocalizedDescriptionKey: "Failed to send message: \(result)"])
+            }
+
+            confirmationMessage = "Message sent to \(session.user) on \(session.tty)"
+            showingConfirmation = true
+
+        } catch {
+            self.error = "Failed to message user: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+
+    func terminateSession(session: UserSession) async {
+        isLoading = true
+        error = nil
+
+        do {
+            // Use pkill to terminate all processes on the user's TTY
+            // This effectively logs them out
+            let command = "pkill -9 -t \(session.tty) 2>&1"
+            _ = try await sshManager.executeCommand(command)
+
+            confirmationMessage = "Session for \(session.user) on \(session.tty) has been terminated"
+            showingConfirmation = true
+
+            // Reload sessions list
+            await loadActiveSessions()
+
+        } catch {
+            self.error = "Failed to terminate session: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+
+    func broadcastMessage(message: String) async {
+        isLoading = true
+        error = nil
+
+        do {
+            // Use wall command to broadcast to all users
+            let escapedMessage = message.replacingOccurrences(of: "'", with: "'\\''")
+            let command = "echo '\(escapedMessage)' | wall 2>&1"
+            _ = try await sshManager.executeCommand(command)
+
+            confirmationMessage = "Message broadcast to all logged-in users"
+            showingConfirmation = true
+
+        } catch {
+            self.error = "Failed to broadcast message: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
 }
 
 // MARK: - Main View
@@ -2154,10 +2261,11 @@ struct UserManagementCard: View {
 
             Divider()
 
-            // Tabs for Users and Groups
+            // Tabs for Users, Groups, and Sessions
             Picker("", selection: $selectedTab) {
                 Text("Users").tag(0)
                 Text("Groups").tag(1)
+                Text("Sessions").tag(2)
             }
             .pickerStyle(.segmented)
             .padding(.horizontal)
@@ -2179,7 +2287,7 @@ struct UserManagementCard: View {
                         // Network User Management (read-only for clients)
                         NetworkUserManagementPhase(viewModel: viewModel)
                     }
-                } else {
+                } else if selectedTab == 1 {
                     // Groups Tab
                     if viewModel.selectedNetworkRole == .none {
                         // Local Group Management
@@ -2188,6 +2296,9 @@ struct UserManagementCard: View {
                         // Netgroup Management (read-only for clients)
                         NetgroupManagementPhase(viewModel: viewModel)
                     }
+                } else {
+                    // Sessions Tab
+                    ActiveSessionsPhase(viewModel: viewModel)
                 }
             }
             .padding()
@@ -2216,12 +2327,14 @@ struct UserManagementCard: View {
                     } else {
                         await viewModel.loadNetworkUsers()
                     }
-                } else {
+                } else if newTab == 1 {
                     if viewModel.selectedNetworkRole == .none {
                         await viewModel.loadLocalGroups()
                     } else {
                         await viewModel.loadNetgroups()
                     }
+                } else {
+                    await viewModel.loadActiveSessions()
                 }
             }
         }
@@ -3251,6 +3364,306 @@ struct NetgroupManagementPhase: View {
                 Text("Are you sure you want to delete netgroup '\(netgroup.name)'? This may affect user access.")
             }
         }
+    }
+}
+
+// MARK: - Active Sessions Phase
+
+struct ActiveSessionsPhase: View {
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
+    @State private var selectedSessionID: String?
+    @State private var sessionToMessage: UserSession?
+    @State private var showMessageSheet = false
+    @State private var showBroadcastSheet = false
+    @State private var showTerminateConfirmation = false
+    @State private var sessionToTerminate: UserSession?
+    @State private var autoRefresh = false
+    @State private var searchText = ""
+
+    private var filteredSessions: [UserSession] {
+        if searchText.isEmpty {
+            return viewModel.setupState.activeSessions
+        }
+        return viewModel.setupState.activeSessions.filter { session in
+            session.user.localizedCaseInsensitiveContains(searchText) ||
+            session.tty.localizedCaseInsensitiveContains(searchText) ||
+            session.from.localizedCaseInsensitiveContains(searchText) ||
+            session.what.localizedCaseInsensitiveContains(searchText)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("View and manage active user sessions")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            // Toolbar
+            HStack {
+                // Search field
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
+                    TextField("Search sessions...", text: $searchText)
+                        .textFieldStyle(.plain)
+                }
+                .padding(8)
+                .background(Color(nsColor: .textBackgroundColor))
+                .cornerRadius(8)
+                .frame(maxWidth: 250)
+
+                Spacer()
+
+                // Session count
+                Text("\(filteredSessions.count) session\(filteredSessions.count == 1 ? "" : "s")")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                // Auto-refresh toggle
+                Toggle("Auto-refresh", isOn: $autoRefresh)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+
+                // Broadcast button
+                Button(action: { showBroadcastSheet = true }) {
+                    Label("Broadcast", systemImage: "megaphone")
+                }
+                .buttonStyle(.bordered)
+                .help("Send message to all logged-in users")
+
+                // Refresh button
+                Button(action: {
+                    Task {
+                        await viewModel.loadActiveSessions()
+                    }
+                }) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                .disabled(viewModel.isLoading)
+            }
+
+            // Sessions table
+            if viewModel.isLoading && viewModel.setupState.activeSessions.isEmpty {
+                HStack {
+                    Spacer()
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    Text("Loading sessions...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .padding()
+            } else if filteredSessions.isEmpty {
+                HStack {
+                    Spacer()
+                    VStack(spacing: 8) {
+                        Image(systemName: "person.slash")
+                            .font(.largeTitle)
+                            .foregroundColor(.secondary)
+                        Text(searchText.isEmpty ? "No active sessions" : "No matching sessions")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding()
+            } else {
+                Table(filteredSessions, selection: $selectedSessionID) {
+                    TableColumn("User") { session in
+                        HStack(spacing: 6) {
+                            Image(systemName: session.isLocal ? "person.fill" : "network")
+                                .foregroundColor(session.isLocal ? .blue : .green)
+                                .font(.caption)
+                            Text(session.user)
+                                .fontWeight(.medium)
+                        }
+                    }
+                    .width(min: 80, ideal: 100)
+
+                    TableColumn("TTY", value: \.tty)
+                        .width(min: 60, ideal: 80)
+
+                    TableColumn("From") { session in
+                        Text(session.displayFrom)
+                            .foregroundColor(session.isLocal ? .secondary : .primary)
+                    }
+                    .width(min: 100, ideal: 140)
+
+                    TableColumn("Login Time", value: \.loginTime)
+                        .width(min: 70, ideal: 90)
+
+                    TableColumn("Idle") { session in
+                        Text(session.idle)
+                            .foregroundColor(session.isIdle ? .orange : .secondary)
+                    }
+                    .width(min: 50, ideal: 60)
+
+                    TableColumn("Command") { session in
+                        Text(session.what)
+                            .font(.system(.body, design: .monospaced))
+                            .lineLimit(1)
+                    }
+                    .width(min: 100, ideal: 200)
+
+                    TableColumn("Actions") { session in
+                        HStack(spacing: 8) {
+                            Button(action: {
+                                sessionToMessage = session
+                                showMessageSheet = true
+                            }) {
+                                Image(systemName: "message")
+                                    .foregroundColor(.blue)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Send message to user")
+
+                            Button(action: {
+                                sessionToTerminate = session
+                                showTerminateConfirmation = true
+                            }) {
+                                Image(systemName: "xmark.circle")
+                                    .foregroundColor(.red)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Terminate session")
+                        }
+                    }
+                    .width(min: 70, ideal: 80)
+                }
+                .tableStyle(.inset(alternatesRowBackgrounds: true))
+                .frame(minHeight: 200)
+            }
+        }
+        .onAppear {
+            Task {
+                await viewModel.loadActiveSessions()
+            }
+        }
+        .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
+            if autoRefresh {
+                Task {
+                    await viewModel.loadActiveSessions()
+                }
+            }
+        }
+        .sheet(isPresented: $showMessageSheet) {
+            if let session = sessionToMessage {
+                MessageUserSheet(viewModel: viewModel, session: session, isPresented: $showMessageSheet)
+            }
+        }
+        .sheet(isPresented: $showBroadcastSheet) {
+            BroadcastMessageSheet(viewModel: viewModel, isPresented: $showBroadcastSheet)
+        }
+        .alert("Terminate Session", isPresented: $showTerminateConfirmation) {
+            Button("Cancel", role: .cancel) {
+                sessionToTerminate = nil
+            }
+            Button("Terminate", role: .destructive) {
+                if let session = sessionToTerminate {
+                    Task {
+                        await viewModel.terminateSession(session: session)
+                        sessionToTerminate = nil
+                    }
+                }
+            }
+        } message: {
+            if let session = sessionToTerminate {
+                Text("Are you sure you want to terminate the session for \(session.user) on \(session.tty)? This will forcefully log out the user.")
+            }
+        }
+    }
+}
+
+// MARK: - Message User Sheet
+
+struct MessageUserSheet: View {
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
+    let session: UserSession
+    @Binding var isPresented: Bool
+    @State private var message = ""
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Send Message to \(session.user)")
+                .font(.headline)
+
+            Text("This will send a message to \(session.user)'s terminal (\(session.tty))")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            TextEditor(text: $message)
+                .font(.body)
+                .frame(height: 100)
+                .border(Color.gray.opacity(0.3))
+                .cornerRadius(4)
+
+            HStack {
+                Button("Cancel") {
+                    isPresented = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Button("Send") {
+                    Task {
+                        await viewModel.messageUser(session: session, message: message)
+                        isPresented = false
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding()
+        .frame(width: 400)
+    }
+}
+
+// MARK: - Broadcast Message Sheet
+
+struct BroadcastMessageSheet: View {
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
+    @Binding var isPresented: Bool
+    @State private var message = ""
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Broadcast Message")
+                .font(.headline)
+
+            Text("This will send a message to all logged-in users")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            TextEditor(text: $message)
+                .font(.body)
+                .frame(height: 100)
+                .border(Color.gray.opacity(0.3))
+                .cornerRadius(4)
+
+            HStack {
+                Button("Cancel") {
+                    isPresented = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Button("Broadcast") {
+                    Task {
+                        await viewModel.broadcastMessage(message: message)
+                        isPresented = false
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding()
+        .frame(width: 400)
     }
 }
 
