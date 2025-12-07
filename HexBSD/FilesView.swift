@@ -2,11 +2,12 @@
 //  FilesView.swift
 //  HexBSD
 //
-//  SFTP file browser for remote filesystem
+//  Split-view file browser for local and remote filesystem
 //
 
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 // MARK: - File Models
 
@@ -27,235 +28,764 @@ struct RemoteFile: Identifiable, Hashable {
     }
 
     var icon: String {
-        if isDirectory {
-            return "folder.fill"
-        }
-        // Determine icon by extension
-        let ext = (name as NSString).pathExtension.lowercased()
-        switch ext {
-        case "txt", "md", "log":
-            return "doc.text"
-        case "jpg", "jpeg", "png", "gif", "bmp":
-            return "photo"
-        case "mp4", "mov", "avi", "mkv":
-            return "video"
-        case "mp3", "wav", "m4a", "flac":
-            return "music.note"
-        case "zip", "tar", "gz", "bz2", "xz":
-            return "doc.zipper"
-        case "pdf":
-            return "doc.richtext"
-        case "sh", "py", "js", "swift", "c", "cpp", "h":
-            return "chevron.left.forwardslash.chevron.right"
-        default:
-            return "doc"
-        }
+        fileIcon(for: name, isDirectory: isDirectory)
     }
 
     private func formatFileSize(_ bytes: Int64) -> String {
-        let kb = Double(bytes) / 1024
-        let mb = kb / 1024
-        let gb = mb / 1024
-
-        if gb >= 1 {
-            return String(format: "%.2f GB", gb)
-        } else if mb >= 1 {
-            return String(format: "%.2f MB", mb)
-        } else if kb >= 1 {
-            return String(format: "%.2f KB", kb)
-        } else {
-            return "\(bytes) B"
-        }
+        formatFileSizeHelper(bytes)
     }
 }
 
-// MARK: - Files View
+struct LocalFile: Identifiable, Hashable {
+    let id = UUID()
+    let name: String
+    let path: String
+    let isDirectory: Bool
+    let size: Int64
+    let modifiedDate: Date?
+
+    var displaySize: String {
+        if isDirectory {
+            return "-"
+        }
+        return formatFileSize(size)
+    }
+
+    var icon: String {
+        fileIcon(for: name, isDirectory: isDirectory)
+    }
+
+    private func formatFileSize(_ bytes: Int64) -> String {
+        formatFileSizeHelper(bytes)
+    }
+}
+
+// MARK: - Shared Helpers
+
+private func fileIcon(for name: String, isDirectory: Bool) -> String {
+    if isDirectory {
+        return "folder.fill"
+    }
+    let ext = (name as NSString).pathExtension.lowercased()
+    switch ext {
+    case "txt", "md", "log":
+        return "doc.text"
+    case "jpg", "jpeg", "png", "gif", "bmp":
+        return "photo"
+    case "mp4", "mov", "avi", "mkv":
+        return "video"
+    case "mp3", "wav", "m4a", "flac":
+        return "music.note"
+    case "zip", "tar", "gz", "bz2", "xz":
+        return "doc.zipper"
+    case "pdf":
+        return "doc.richtext"
+    case "sh", "py", "js", "swift", "c", "cpp", "h":
+        return "chevron.left.forwardslash.chevron.right"
+    default:
+        return "doc"
+    }
+}
+
+private func formatFileSizeHelper(_ bytes: Int64) -> String {
+    let kb = Double(bytes) / 1024
+    let mb = kb / 1024
+    let gb = mb / 1024
+
+    if gb >= 1 {
+        return String(format: "%.2f GB", gb)
+    } else if mb >= 1 {
+        return String(format: "%.2f MB", mb)
+    } else if kb >= 1 {
+        return String(format: "%.2f KB", kb)
+    } else {
+        return "\(bytes) B"
+    }
+}
+
+// MARK: - Main Split View
 
 struct FilesContentView: View {
-    @StateObject private var viewModel = FilesViewModel()
+    @StateObject private var localVM = LocalFilesViewModel()
+    @StateObject private var remoteVM = RemoteFilesViewModel()
     @State private var showError = false
+    @State private var errorMessage = ""
+    @State private var isTransferring = false
 
     var body: some View {
         VStack(spacing: 0) {
-            // Navigation bar
-            HStack {
-                Button(action: {
-                    Task {
-                        await viewModel.navigateUp()
+            // Transfer status bar
+            if isTransferring {
+                HStack {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    Text("Transferring...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.vertical, 4)
+                .frame(maxWidth: .infinity)
+                .background(Color.accentColor.opacity(0.1))
+            }
+
+            HSplitView {
+                // Local pane (left)
+                LocalFilePaneView(
+                    currentPath: $localVM.currentPath,
+                    files: localVM.files,
+                    selectedFiles: $localVM.selectedFiles,
+                    isLoading: localVM.isLoading,
+                    error: localVM.error,
+                    onNavigateUp: { await localVM.navigateUp() },
+                    onNavigateHome: { await localVM.navigateHome() },
+                    onRefresh: { await localVM.refresh() },
+                    onNavigateTo: { file in await localVM.navigateTo(file) },
+                    onDelete: { file in await localVM.deleteFile(file) },
+                    onTransfer: { await transferToRemote() },
+                    canTransfer: !localVM.selectedFiles.isEmpty && !isTransferring,
+                    onDropReceived: { path in
+                        Task { await handleDropToLocal(remotePath: path) }
                     }
-                }) {
+                )
+                .frame(minWidth: 300)
+
+                // Remote pane (right)
+                RemoteFilePaneView(
+                    currentPath: $remoteVM.currentPath,
+                    files: remoteVM.files,
+                    selectedFiles: $remoteVM.selectedFiles,
+                    isLoading: remoteVM.isLoading,
+                    onNavigateUp: { await remoteVM.navigateUp() },
+                    onNavigateHome: { await remoteVM.navigateHome() },
+                    onRefresh: { await remoteVM.refresh() },
+                    onNavigateTo: { file in await remoteVM.navigateTo(file) },
+                    onDelete: { file in await remoteVM.deleteFile(file) },
+                    onTransfer: { await transferToLocal() },
+                    canTransfer: !remoteVM.selectedFiles.isEmpty && !isTransferring,
+                    onDropReceived: { path in
+                        Task { await handleDropToRemote(localPath: path) }
+                    }
+                )
+                .frame(minWidth: 300)
+            }
+        }
+        .alert("File Transfer Error", isPresented: $showError) {
+            Button("OK") { showError = false }
+        } message: {
+            Text(errorMessage)
+        }
+        .onAppear {
+            Task {
+                await localVM.loadInitialDirectory()
+                await remoteVM.loadInitialDirectory()
+            }
+        }
+    }
+
+    private func transferToRemote() async {
+        guard !localVM.selectedFiles.isEmpty else { return }
+        isTransferring = true
+
+        let sshManager = SSHConnectionManager.shared
+
+        for fileId in localVM.selectedFiles {
+            guard let file = localVM.files.first(where: { $0.id == fileId }) else { continue }
+            guard !file.isDirectory else { continue } // Skip directories for now
+
+            let remotePath: String
+            if remoteVM.currentPath.hasSuffix("/") {
+                remotePath = remoteVM.currentPath + file.name
+            } else {
+                remotePath = remoteVM.currentPath + "/" + file.name
+            }
+
+            do {
+                let localURL = URL(fileURLWithPath: file.path)
+                try await sshManager.uploadFile(localURL: localURL, remotePath: remotePath)
+            } catch {
+                errorMessage = "Failed to upload \(file.name): \(error.localizedDescription)"
+                showError = true
+            }
+        }
+
+        localVM.selectedFiles.removeAll()
+        await remoteVM.refresh()
+        isTransferring = false
+    }
+
+    private func transferToLocal() async {
+        guard !remoteVM.selectedFiles.isEmpty else { return }
+        isTransferring = true
+
+        let sshManager = SSHConnectionManager.shared
+
+        for fileId in remoteVM.selectedFiles {
+            guard let file = remoteVM.files.first(where: { $0.id == fileId }) else { continue }
+            guard !file.isDirectory else { continue } // Skip directories for now
+
+            let localPath: String
+            if localVM.currentPath.hasSuffix("/") {
+                localPath = localVM.currentPath + file.name
+            } else {
+                localPath = localVM.currentPath + "/" + file.name
+            }
+
+            do {
+                let localURL = URL(fileURLWithPath: localPath)
+                try await sshManager.downloadFile(remotePath: file.path, localURL: localURL)
+            } catch {
+                errorMessage = "Failed to download \(file.name): \(error.localizedDescription)"
+                showError = true
+            }
+        }
+
+        remoteVM.selectedFiles.removeAll()
+        await localVM.refresh()
+        isTransferring = false
+    }
+
+    private func handleDropToRemote(localPath: String) async {
+        // Check if this is actually a local file (not from remote pane)
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: localPath) else { return }
+
+        isTransferring = true
+        let sshManager = SSHConnectionManager.shared
+
+        let fileName = (localPath as NSString).lastPathComponent
+        let remotePath: String
+        if remoteVM.currentPath.hasSuffix("/") {
+            remotePath = remoteVM.currentPath + fileName
+        } else {
+            remotePath = remoteVM.currentPath + "/" + fileName
+        }
+
+        do {
+            let localURL = URL(fileURLWithPath: localPath)
+            try await sshManager.uploadFile(localURL: localURL, remotePath: remotePath)
+            await remoteVM.refresh()
+        } catch {
+            errorMessage = "Failed to upload \(fileName): \(error.localizedDescription)"
+            showError = true
+        }
+
+        isTransferring = false
+    }
+
+    private func handleDropToLocal(remotePath: String) async {
+        // Check if this is actually a remote file (not from local pane)
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: remotePath) { return }
+
+        isTransferring = true
+        let sshManager = SSHConnectionManager.shared
+
+        let fileName = (remotePath as NSString).lastPathComponent
+        let localPath: String
+        if localVM.currentPath.hasSuffix("/") {
+            localPath = localVM.currentPath + fileName
+        } else {
+            localPath = localVM.currentPath + "/" + fileName
+        }
+
+        do {
+            let localURL = URL(fileURLWithPath: localPath)
+            try await sshManager.downloadFile(remotePath: remotePath, localURL: localURL)
+            await localVM.refresh()
+        } catch {
+            errorMessage = "Failed to download \(fileName): \(error.localizedDescription)"
+            showError = true
+        }
+
+        isTransferring = false
+    }
+}
+
+// MARK: - Local File Pane View
+
+struct LocalFilePaneView: View {
+    @Binding var currentPath: String
+    let files: [LocalFile]
+    @Binding var selectedFiles: Set<UUID>
+    let isLoading: Bool
+    let error: String?
+    let onNavigateUp: () async -> Void
+    let onNavigateHome: () async -> Void
+    let onRefresh: () async -> Void
+    let onNavigateTo: (LocalFile) async -> Void
+    let onDelete: (LocalFile) async -> Void
+    let onTransfer: () async -> Void
+    let canTransfer: Bool
+    var onDropReceived: ((String) -> Void)? = nil
+
+    @State private var isDropTargeted = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Image(systemName: "laptopcomputer")
+                    .foregroundColor(.accentColor)
+                Text("Local")
+                    .font(.headline)
+                Spacer()
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .background(Color(NSColor.controlBackgroundColor))
+
+            // Navigation bar
+            HStack(spacing: 8) {
+                Button(action: { Task { await onNavigateUp() } }) {
                     Image(systemName: "chevron.left")
                 }
-                .disabled(viewModel.currentPath == "/")
                 .buttonStyle(.borderless)
+                .disabled(currentPath == "/")
 
-                Button(action: {
-                    Task {
-                        await viewModel.navigateToHome()
-                    }
-                }) {
+                Button(action: { Task { await onNavigateHome() } }) {
                     Image(systemName: "house")
                 }
                 .buttonStyle(.borderless)
 
-                Text(viewModel.currentPath)
-                    .font(.headline)
+                Text(currentPath)
+                    .font(.caption)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .padding(.leading, 8)
+                    .foregroundColor(.secondary)
 
                 Spacer()
 
-                Button(action: {
-                    Task {
-                        await viewModel.refresh()
-                    }
-                }) {
+                Button(action: { Task { await onRefresh() } }) {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.borderless)
 
-                Button(action: {
-                    Task {
-                        await viewModel.uploadFile()
-                    }
-                }) {
-                    Label("Upload", systemImage: "arrow.up.doc")
+                Button(action: { Task { await onTransfer() } }) {
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 14, weight: .bold))
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(!canTransfer)
+                .help("Transfer to remote")
             }
-            .padding()
+            .padding(.horizontal)
+            .padding(.vertical, 6)
 
             Divider()
 
-            // File list
-            if viewModel.isLoading {
-                VStack(spacing: 20) {
-                    ProgressView()
-                        .scaleEffect(1.5)
-                    Text("Loading files...")
-                        .font(.headline)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if viewModel.files.isEmpty {
-                VStack(spacing: 20) {
-                    Image(systemName: "folder")
-                        .font(.system(size: 72))
-                        .foregroundColor(.secondary)
-                    Text("Empty Directory")
-                        .font(.title2)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                Table(viewModel.files) {
-                    TableColumn("Name") { file in
-                        HStack(spacing: 8) {
-                            Image(systemName: file.icon)
-                                .foregroundColor(file.isDirectory ? .blue : .secondary)
-                            Text(file.name)
-                        }
+            // File list - Local pane
+            ZStack {
+                if isLoading {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("Loading...")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
-
-                    TableColumn("Size", value: \.displaySize)
-                        .width(min: 80, ideal: 100, max: 120)
-
-                    TableColumn("Permissions", value: \.permissions)
-                        .width(min: 80, ideal: 100, max: 120)
-
-                    TableColumn("Modified") { file in
-                        if let date = file.modifiedDate {
-                            Text(date, style: .date)
-                        } else {
-                            Text("-")
-                        }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let errorMsg = error {
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 48))
+                            .foregroundColor(.orange)
+                        Text("Access Denied")
+                            .font(.headline)
+                        Text(errorMsg)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
                     }
-                    .width(min: 100, ideal: 120, max: 150)
-                }
-                .onTapGesture { }
-                .contextMenu(forSelectionType: RemoteFile.ID.self) { items in
-                    // Context menu for selected files
-                    if items.count == 1, let id = items.first,
-                       let file = viewModel.files.first(where: { $0.id == id }) {
-                        if file.isDirectory {
-                            Button("Open") {
-                                Task {
-                                    await viewModel.navigateTo(file)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if files.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "folder")
+                            .font(.system(size: 48))
+                            .foregroundColor(.secondary)
+                        Text("Empty")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    Table(files, selection: $selectedFiles) {
+                        TableColumn("Name") { file in
+                            HStack(spacing: 8) {
+                                Image(systemName: file.icon)
+                                    .foregroundColor(file.isDirectory ? .blue : .secondary)
+                                    .frame(width: 20)
+                                Text(file.name)
+                                    .lineLimit(1)
+                            }
+                            .draggable(file.path) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: file.icon)
+                                        .foregroundColor(file.isDirectory ? .blue : .secondary)
+                                    Text(file.name)
                                 }
-                            }
-                        } else {
-                            Button("Download...") {
-                                Task {
-                                    await viewModel.downloadFile(file)
-                                }
+                                .padding(6)
+                                .background(Color(NSColor.controlBackgroundColor))
+                                .cornerRadius(4)
                             }
                         }
 
-                        Divider()
-
-                        Button("Delete") {
-                            Task {
-                                await viewModel.deleteFile(file)
-                            }
+                        TableColumn("Size") { file in
+                            Text(file.displaySize)
+                                .foregroundColor(.secondary)
                         }
-                    }
+                        .width(min: 60, ideal: 80, max: 100)
 
-                    Divider()
-
-                    Button("Upload File...") {
-                        Task {
-                            await viewModel.uploadFile()
-                        }
-                    }
-
-                    Button("Refresh") {
-                        Task {
-                            await viewModel.refresh()
-                        }
-                    }
-                } primaryAction: { items in
-                    // Double-click action
-                    if let id = items.first,
-                       let file = viewModel.files.first(where: { $0.id == id }) {
-                        Task {
-                            if file.isDirectory {
-                                await viewModel.navigateTo(file)
+                        TableColumn("Modified") { file in
+                            if let date = file.modifiedDate {
+                                Text(date, style: .date)
+                                    .foregroundColor(.secondary)
                             } else {
-                                await viewModel.downloadFile(file)
+                                Text("-")
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .width(min: 80, ideal: 100, max: 120)
+                    }
+                    .contextMenu(forSelectionType: LocalFile.ID.self) { items in
+                        if items.count == 1, let id = items.first,
+                           let file = files.first(where: { $0.id == id }) {
+                            if file.isDirectory {
+                                Button("Open") {
+                                    Task { await onNavigateTo(file) }
+                                }
+                                Divider()
+                            }
+                            Button("Delete", role: .destructive) {
+                                Task { await onDelete(file) }
+                            }
+                        }
+                    } primaryAction: { items in
+                        if let id = items.first,
+                           let file = files.first(where: { $0.id == id }) {
+                            if file.isDirectory {
+                                Task { await onNavigateTo(file) }
                             }
                         }
                     }
                 }
+
+                // Drop highlight overlay
+                if isDropTargeted {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.accentColor, lineWidth: 3)
+                        .background(Color.accentColor.opacity(0.1))
+                        .padding(4)
+                }
             }
         }
-        .alert("Files Error", isPresented: $showError) {
-            Button("OK") {
-                showError = false
+        .background(Color(NSColor.textBackgroundColor))
+        .dropDestination(for: String.self) { items, _ in
+            for path in items {
+                onDropReceived?(path)
             }
-        } message: {
-            Text(viewModel.error ?? "Unknown error")
-        }
-        .onChange(of: viewModel.error) { oldValue, newValue in
-            if newValue != nil {
-                showError = true
-            }
-        }
-        .onAppear {
-            Task {
-                await viewModel.loadInitialDirectory()
-            }
+            return !items.isEmpty
+        } isTargeted: { targeted in
+            isDropTargeted = targeted
         }
     }
 }
 
-// MARK: - View Model
+// MARK: - Remote File Pane View
+
+struct RemoteFilePaneView: View {
+    @Binding var currentPath: String
+    let files: [RemoteFile]
+    @Binding var selectedFiles: Set<UUID>
+    let isLoading: Bool
+    let onNavigateUp: () async -> Void
+    let onNavigateHome: () async -> Void
+    let onRefresh: () async -> Void
+    let onNavigateTo: (RemoteFile) async -> Void
+    let onDelete: (RemoteFile) async -> Void
+    let onTransfer: () async -> Void
+    let canTransfer: Bool
+    var onDropReceived: ((String) -> Void)? = nil
+
+    @State private var isDropTargeted = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Image(systemName: "server.rack")
+                    .foregroundColor(.accentColor)
+                Text("Remote")
+                    .font(.headline)
+                Spacer()
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .background(Color(NSColor.controlBackgroundColor))
+
+            // Navigation bar
+            HStack(spacing: 8) {
+                Button(action: { Task { await onNavigateUp() } }) {
+                    Image(systemName: "chevron.left")
+                }
+                .buttonStyle(.borderless)
+                .disabled(currentPath == "/" || currentPath == "~")
+
+                Button(action: { Task { await onNavigateHome() } }) {
+                    Image(systemName: "house")
+                }
+                .buttonStyle(.borderless)
+
+                Text(currentPath)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundColor(.secondary)
+
+                Spacer()
+
+                Button(action: { Task { await onRefresh() } }) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+
+                Button(action: { Task { await onTransfer() } }) {
+                    Image(systemName: "arrow.left")
+                        .font(.system(size: 14, weight: .bold))
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canTransfer)
+                .help("Transfer to local")
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 6)
+
+            Divider()
+
+            // File list
+            ZStack {
+                if isLoading {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("Loading...")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if files.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "folder")
+                            .font(.system(size: 48))
+                            .foregroundColor(.secondary)
+                        Text("Empty")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    Table(files, selection: $selectedFiles) {
+                        TableColumn("Name") { file in
+                            HStack(spacing: 8) {
+                                Image(systemName: file.icon)
+                                    .foregroundColor(file.isDirectory ? .blue : .secondary)
+                                    .frame(width: 20)
+                                Text(file.name)
+                                    .lineLimit(1)
+                            }
+                            .draggable(file.path) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: file.icon)
+                                        .foregroundColor(file.isDirectory ? .blue : .secondary)
+                                    Text(file.name)
+                                }
+                                .padding(6)
+                                .background(Color(NSColor.controlBackgroundColor))
+                                .cornerRadius(4)
+                            }
+                        }
+
+                        TableColumn("Size") { file in
+                            Text(file.displaySize)
+                                .foregroundColor(.secondary)
+                        }
+                        .width(min: 60, ideal: 80, max: 100)
+
+                        TableColumn("Modified") { file in
+                            if let date = file.modifiedDate {
+                                Text(date, style: .date)
+                                    .foregroundColor(.secondary)
+                            } else {
+                                Text("-")
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .width(min: 80, ideal: 100, max: 120)
+                    }
+                    .contextMenu(forSelectionType: RemoteFile.ID.self) { items in
+                        if items.count == 1, let id = items.first,
+                           let file = files.first(where: { $0.id == id }) {
+                            if file.isDirectory {
+                                Button("Open") {
+                                    Task { await onNavigateTo(file) }
+                                }
+                                Divider()
+                            }
+                            Button("Delete", role: .destructive) {
+                                Task { await onDelete(file) }
+                            }
+                        }
+                    } primaryAction: { items in
+                        if let id = items.first,
+                           let file = files.first(where: { $0.id == id }) {
+                            if file.isDirectory {
+                                Task { await onNavigateTo(file) }
+                            }
+                        }
+                    }
+                }
+
+                // Drop highlight overlay
+                if isDropTargeted {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.accentColor, lineWidth: 3)
+                        .background(Color.accentColor.opacity(0.1))
+                        .padding(4)
+                }
+            }
+        }
+        .background(Color(NSColor.textBackgroundColor))
+        .dropDestination(for: String.self) { items, _ in
+            for path in items {
+                onDropReceived?(path)
+            }
+            return !items.isEmpty
+        } isTargeted: { targeted in
+            isDropTargeted = targeted
+        }
+    }
+}
+
+// MARK: - Local Files View Model
 
 @MainActor
-class FilesViewModel: ObservableObject {
+class LocalFilesViewModel: ObservableObject {
+    @Published var files: [LocalFile] = []
+    @Published var currentPath: String = ""
+    @Published var isLoading = false
+    @Published var selectedFiles: Set<UUID> = []
+    @Published var error: String?
+
+    private let fileManager = FileManager.default
+
+    // Get real home directory from passwd database
+    private var realHomeDirectory: String {
+        if let pw = getpwuid(getuid()), let home = pw.pointee.pw_dir {
+            return String(cString: home)
+        }
+        return "/Users/\(NSUserName())"
+    }
+
+    func loadInitialDirectory() async {
+        // Start with real home directory
+        currentPath = realHomeDirectory
+        await loadDirectory(currentPath)
+    }
+
+    func navigateHome() async {
+        currentPath = realHomeDirectory
+        await loadDirectory(currentPath)
+    }
+
+    func navigateUp() async {
+        let url = URL(fileURLWithPath: currentPath)
+        let parent = url.deletingLastPathComponent()
+        if parent.path != currentPath {
+            currentPath = parent.path
+            await loadDirectory(currentPath)
+        }
+    }
+
+    func navigateTo(_ file: LocalFile) async {
+        guard file.isDirectory else { return }
+        currentPath = file.path
+        await loadDirectory(currentPath)
+    }
+
+    func refresh() async {
+        await loadDirectory(currentPath)
+    }
+
+    func loadDirectory(_ path: String) async {
+        isLoading = true
+        error = nil
+        selectedFiles.removeAll()
+
+        do {
+            let url = URL(fileURLWithPath: path)
+            let contents = try fileManager.contentsOfDirectory(
+                at: url,
+                includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            )
+
+            var loadedFiles: [LocalFile] = []
+
+            for itemURL in contents {
+                let resourceValues = try itemURL.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey])
+
+                let file = LocalFile(
+                    name: itemURL.lastPathComponent,
+                    path: itemURL.path,
+                    isDirectory: resourceValues.isDirectory ?? false,
+                    size: Int64(resourceValues.fileSize ?? 0),
+                    modifiedDate: resourceValues.contentModificationDate
+                )
+                loadedFiles.append(file)
+            }
+
+            // Sort: directories first, then alphabetically
+            files = loadedFiles.sorted { lhs, rhs in
+                if lhs.isDirectory != rhs.isDirectory {
+                    return lhs.isDirectory
+                }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+        } catch {
+            self.error = "Failed to load directory: \(error.localizedDescription)"
+            files = []
+        }
+
+        isLoading = false
+    }
+
+    func deleteFile(_ file: LocalFile) async {
+        let alert = NSAlert()
+        alert.messageText = "Delete \(file.name)?"
+        alert.informativeText = file.isDirectory
+            ? "This will permanently delete the directory and all its contents."
+            : "This will permanently delete the file."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        do {
+            try fileManager.removeItem(atPath: file.path)
+            await refresh()
+        } catch {
+            self.error = "Failed to delete: \(error.localizedDescription)"
+        }
+    }
+}
+
+// MARK: - Remote Files View Model
+
+@MainActor
+class RemoteFilesViewModel: ObservableObject {
     @Published var files: [RemoteFile] = []
     @Published var currentPath: String = "~"
     @Published var isLoading = false
+    @Published var selectedFiles: Set<UUID> = []
     @Published var error: String?
 
     private let sshManager = SSHConnectionManager.shared
@@ -265,7 +795,7 @@ class FilesViewModel: ObservableObject {
         await loadDirectory(currentPath)
     }
 
-    func navigateToHome() async {
+    func navigateHome() async {
         currentPath = "~"
         await loadDirectory(currentPath)
     }
@@ -293,6 +823,7 @@ class FilesViewModel: ObservableObject {
     func loadDirectory(_ path: String) async {
         isLoading = true
         error = nil
+        selectedFiles.removeAll()
 
         do {
             files = try await sshManager.listDirectory(path: path)
@@ -304,66 +835,7 @@ class FilesViewModel: ObservableObject {
         isLoading = false
     }
 
-    func downloadFile(_ file: RemoteFile) async {
-        // Show save panel
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = file.name
-        panel.message = "Choose where to save the file"
-
-        guard panel.runModal() == .OK, let url = panel.url else {
-            return
-        }
-
-        isLoading = true
-        error = nil
-
-        do {
-            try await sshManager.downloadFile(remotePath: file.path, localURL: url)
-        } catch {
-            self.error = "Failed to download file: \(error.localizedDescription)"
-        }
-
-        isLoading = false
-    }
-
-    func uploadFile() async {
-        // Show open panel to select file to upload
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.message = "Choose a file to upload"
-
-        guard panel.runModal() == .OK, let url = panel.url else {
-            return
-        }
-
-        let fileName = url.lastPathComponent
-
-        // Build remote path
-        let remotePath: String
-        if currentPath.hasSuffix("/") {
-            remotePath = currentPath + fileName
-        } else {
-            remotePath = currentPath + "/" + fileName
-        }
-
-        isLoading = true
-        error = nil
-
-        do {
-            try await sshManager.uploadFile(localURL: url, remotePath: remotePath)
-            // Refresh directory to show the uploaded file
-            await refresh()
-        } catch {
-            self.error = "Failed to upload file: \(error.localizedDescription)"
-        }
-
-        isLoading = false
-    }
-
     func deleteFile(_ file: RemoteFile) async {
-        // Confirm deletion
         let alert = NSAlert()
         alert.messageText = "Delete \(file.name)?"
         alert.informativeText = file.isDirectory
@@ -373,21 +845,13 @@ class FilesViewModel: ObservableObject {
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
 
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            return
-        }
-
-        isLoading = true
-        error = nil
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         do {
             try await sshManager.deleteFile(path: file.path, isDirectory: file.isDirectory)
-            // Refresh directory to remove the deleted file
             await refresh()
         } catch {
-            self.error = "Failed to delete file: \(error.localizedDescription)"
+            self.error = "Failed to delete: \(error.localizedDescription)"
         }
-
-        isLoading = false
     }
 }
