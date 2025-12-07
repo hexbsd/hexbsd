@@ -112,6 +112,26 @@ struct LocalUser: Identifiable, Hashable {
     }
 }
 
+struct LocalGroup: Identifiable, Hashable {
+    let id: Int // GID
+    let name: String
+    let members: [String]
+
+    var displayName: String {
+        "\(name) (\(members.count) members)"
+    }
+}
+
+struct Netgroup: Identifiable, Hashable {
+    let id: String // name is the id
+    let name: String
+    let members: [String] // usernames
+
+    var displayName: String {
+        "\(name) (\(members.count) members)"
+    }
+}
+
 struct UsersAndGroupsState {
     var zfsDatasets: [ZFSDatasetStatus] = []
     var userConfig: UserConfigStatus?
@@ -119,7 +139,9 @@ struct UsersAndGroupsState {
     var bootEnvironment: String?
     var zpoolRoot: String?
     var localUsers: [LocalUser] = []
+    var localGroups: [LocalGroup] = []
     var networkUsers: [LocalUser] = []
+    var netgroups: [Netgroup] = []
 
     var overallProgress: Double {
         var completed = 0
@@ -1246,6 +1268,71 @@ SAVEHIST=10000
         isLoading = false
     }
 
+    func loadLocalGroups() async {
+        isLoading = true
+        error = nil
+
+        do {
+            // Get list of groups from /etc/group
+            let groupOutput = try await sshManager.executeCommand("cat /etc/group")
+
+            // Also get passwd to find primary group members (users whose GID matches)
+            let passwdOutput = try await sshManager.executeCommand("cat /etc/passwd")
+
+            // Build a map of GID -> primary users (users who have this as their primary group)
+            var primaryUsersByGid: [Int: [String]] = [:]
+            for line in passwdOutput.split(separator: "\n") {
+                let parts = line.split(separator: ":")
+                guard parts.count >= 4 else { continue }
+                let username = String(parts[0])
+                let gid = Int(parts[3]) ?? 0
+                if gid >= 1001 && gid < 60000 {
+                    primaryUsersByGid[gid, default: []].append(username)
+                }
+            }
+
+            var groups: [LocalGroup] = []
+
+            for line in groupOutput.split(separator: "\n") {
+                // group format: name:password:gid:members
+                let parts = line.split(separator: ":", omittingEmptySubsequences: false)
+                guard parts.count >= 4 else { continue }
+
+                let name = String(parts[0])
+                let gid = Int(parts[2]) ?? 0
+
+                // Only show groups with GID >= 1001 and < 60000
+                guard gid >= 1001 && gid < 60000 else { continue }
+
+                // Parse supplementary members (comma-separated from /etc/group)
+                let membersString = String(parts[3])
+                var members = membersString.isEmpty ? [] : membersString.split(separator: ",").map { String($0) }
+
+                // Add primary users (users whose primary GID matches this group)
+                if let primaryUsers = primaryUsersByGid[gid] {
+                    for user in primaryUsers {
+                        if !members.contains(user) {
+                            members.append(user)
+                        }
+                    }
+                }
+
+                groups.append(LocalGroup(
+                    id: gid,
+                    name: name,
+                    members: members
+                ))
+            }
+
+            setupState.localGroups = groups.sorted { $0.name < $1.name }
+
+        } catch {
+            self.error = "Failed to load local groups: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+
     func createUser(username: String, fullName: String, password: String, addToWheel: Bool) async {
         isLoading = true
         error = nil
@@ -1351,6 +1438,76 @@ SAVEHIST=10000
 
         } catch {
             self.error = "Failed to edit user: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+
+    // MARK: - Local Group Management
+
+    func createGroup(name: String, members: [String]) async {
+        isLoading = true
+        error = nil
+
+        do {
+            // Use pw command to create group
+            var createCommand = "pw groupadd \(name)"
+            if !members.isEmpty {
+                createCommand += " -M \(members.joined(separator: ","))"
+            }
+
+            _ = try await sshManager.executeCommand(createCommand)
+
+            confirmationMessage = "Group '\(name)' created successfully!"
+            showingConfirmation = true
+
+            // Reload groups list
+            await loadLocalGroups()
+
+        } catch {
+            self.error = "Failed to create group: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+
+    func editGroup(group: LocalGroup, newMembers: [String]) async {
+        isLoading = true
+        error = nil
+
+        do {
+            // Update group members using pw groupmod -M (replaces all members)
+            let membersStr = newMembers.isEmpty ? "" : newMembers.joined(separator: ",")
+            _ = try await sshManager.executeCommand("pw groupmod \(group.name) -M '\(membersStr)'")
+
+            confirmationMessage = "Group '\(group.name)' updated successfully!"
+            showingConfirmation = true
+
+            // Reload groups list
+            await loadLocalGroups()
+
+        } catch {
+            self.error = "Failed to edit group: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+
+    func removeGroup(group: LocalGroup) async {
+        isLoading = true
+        error = nil
+
+        do {
+            _ = try await sshManager.executeCommand("pw groupdel \(group.name)")
+
+            confirmationMessage = "Group '\(group.name)' removed successfully!"
+            showingConfirmation = true
+
+            // Reload groups list
+            await loadLocalGroups()
+
+        } catch {
+            self.error = "Failed to remove group: \(error.localizedDescription)"
         }
 
         isLoading = false
@@ -1475,6 +1632,191 @@ SAVEHIST=10000
 
         } catch {
             self.error = "Failed to load network users: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+
+    func loadNetgroups() async {
+        isLoading = true
+        error = nil
+
+        do {
+            var netgroups: [Netgroup] = []
+            let isServer = setupState.networkDomain?.role == .server
+
+            if isServer {
+                // Server: read from /var/yp/netgroup
+                let netgroupOutput = try await sshManager.executeCommand("cat /var/yp/netgroup 2>/dev/null || echo ''")
+
+                for line in netgroupOutput.split(separator: "\n") {
+                    let lineStr = String(line)
+                    // Skip empty lines and comments
+                    guard !lineStr.isEmpty && !lineStr.hasPrefix("#") else { continue }
+
+                    // Parse netgroup format: groupname (,user1,) (,user2,)
+                    let parts = lineStr.split(separator: " ", maxSplits: 1)
+                    guard !parts.isEmpty else { continue }
+
+                    let name = String(parts[0])
+
+                    // Parse members using regex
+                    var members: [String] = []
+                    if parts.count > 1 {
+                        let membersPart = String(parts[1])
+                        let regex = try? NSRegularExpression(pattern: "\\(,([^,]+),\\)", options: [])
+                        if let regex = regex {
+                            let range = NSRange(membersPart.startIndex..., in: membersPart)
+                            let matches = regex.matches(in: membersPart, options: [], range: range)
+                            for match in matches {
+                                if let userRange = Range(match.range(at: 1), in: membersPart) {
+                                    members.append(String(membersPart[userRange]))
+                                }
+                            }
+                        }
+                    }
+
+                    netgroups.append(Netgroup(
+                        id: name,
+                        name: name,
+                        members: members
+                    ))
+                }
+            } else {
+                // Client: use ypcat netgroup to list all netgroups
+                let netgroupList = try await sshManager.executeCommand("ypcat -k netgroup 2>/dev/null || echo ''")
+
+                for line in netgroupList.split(separator: "\n") {
+                    let lineStr = String(line)
+                    guard !lineStr.isEmpty else { continue }
+
+                    // Parse: groupname (,user1,) (,user2,)
+                    let parts = lineStr.split(separator: " ", maxSplits: 1)
+                    guard !parts.isEmpty else { continue }
+
+                    let name = String(parts[0])
+
+                    // Parse members
+                    var members: [String] = []
+                    if parts.count > 1 {
+                        let membersPart = String(parts[1])
+                        let regex = try? NSRegularExpression(pattern: "\\(,([^,]+),\\)", options: [])
+                        if let regex = regex {
+                            let range = NSRange(membersPart.startIndex..., in: membersPart)
+                            let matches = regex.matches(in: membersPart, options: [], range: range)
+                            for match in matches {
+                                if let userRange = Range(match.range(at: 1), in: membersPart) {
+                                    members.append(String(membersPart[userRange]))
+                                }
+                            }
+                        }
+                    }
+
+                    netgroups.append(Netgroup(
+                        id: name,
+                        name: name,
+                        members: members
+                    ))
+                }
+            }
+
+            setupState.netgroups = netgroups.sorted { $0.name < $1.name }
+
+        } catch {
+            self.error = "Failed to load netgroups: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+
+    // MARK: - Netgroup Management (NIS)
+
+    func createNetgroup(name: String, members: [String]) async {
+        isLoading = true
+        error = nil
+
+        do {
+            // Create netgroup entry in /var/yp/netgroup
+            // Format: groupname (,user1,) (,user2,)
+            var netgroupEntry = name
+            for member in members {
+                netgroupEntry += " (,\(member),)"
+            }
+
+            // Check if netgroup already exists
+            let exists = try await sshManager.executeCommand("grep -q '^\(name)' /var/yp/netgroup 2>/dev/null && echo 'exists' || echo 'missing'")
+            if exists.trimmingCharacters(in: .whitespacesAndNewlines) == "exists" {
+                throw NSError(domain: "UsersAndGroups", code: 10, userInfo: [NSLocalizedDescriptionKey: "Netgroup '\(name)' already exists"])
+            }
+
+            // Append new netgroup
+            _ = try await sshManager.executeCommand("echo '\(netgroupEntry)' >> /var/yp/netgroup")
+
+            // Rebuild NIS maps
+            _ = try await sshManager.executeCommand("cd /var/yp && make NETGROUP=/var/yp/netgroup 2>&1")
+
+            confirmationMessage = "Netgroup '\(name)' created successfully!"
+            showingConfirmation = true
+
+            // Reload netgroups list
+            await loadNetgroups()
+
+        } catch {
+            self.error = "Failed to create netgroup: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+
+    func editNetgroup(netgroup: Netgroup, newMembers: [String]) async {
+        isLoading = true
+        error = nil
+
+        do {
+            // Build new netgroup entry
+            var netgroupEntry = netgroup.name
+            for member in newMembers {
+                netgroupEntry += " (,\(member),)"
+            }
+
+            // Replace the netgroup line in /var/yp/netgroup
+            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' 's/^\(netgroup.name).*$/\(netgroupEntry)/' /var/yp/netgroup")
+
+            // Rebuild NIS maps
+            _ = try await sshManager.executeCommand("cd /var/yp && make NETGROUP=/var/yp/netgroup 2>&1")
+
+            confirmationMessage = "Netgroup '\(netgroup.name)' updated successfully!"
+            showingConfirmation = true
+
+            // Reload netgroups list
+            await loadNetgroups()
+
+        } catch {
+            self.error = "Failed to edit netgroup: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+
+    func removeNetgroup(netgroup: Netgroup) async {
+        isLoading = true
+        error = nil
+
+        do {
+            // Remove the netgroup line from /var/yp/netgroup
+            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/^\(netgroup.name)/d' /var/yp/netgroup")
+
+            // Rebuild NIS maps
+            _ = try await sshManager.executeCommand("cd /var/yp && make NETGROUP=/var/yp/netgroup 2>&1")
+
+            confirmationMessage = "Netgroup '\(netgroup.name)' removed successfully!"
+            showingConfirmation = true
+
+            // Reload netgroups list
+            await loadNetgroups()
+
+        } catch {
+            self.error = "Failed to remove netgroup: \(error.localizedDescription)"
         }
 
         isLoading = false
@@ -1790,6 +2132,7 @@ struct UsersAndGroupsContentView: View {
 
 struct UserManagementCard: View {
     @ObservedObject var viewModel: UsersAndGroupsViewModel
+    @State private var selectedTab = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1800,7 +2143,7 @@ struct UserManagementCard: View {
                     .foregroundColor(.blue)
                     .frame(width: 30)
 
-                Text("User Management")
+                Text("Users & Groups")
                     .font(.title3)
                     .fontWeight(.semibold)
 
@@ -1811,18 +2154,40 @@ struct UserManagementCard: View {
 
             Divider()
 
-            // Content
-            VStack(alignment: .leading, spacing: 16) {
-                if viewModel.selectedNetworkRole == .none {
-                    // Local User Management
-                    Text("Manage local user accounts on this system")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+            // Tabs for Users and Groups
+            Picker("", selection: $selectedTab) {
+                Text("Users").tag(0)
+                Text("Groups").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal)
+            .padding(.top)
+            .padding(.bottom, 8)
 
-                    UserManagementPhase(viewModel: viewModel)
-                } else if viewModel.selectedNetworkRole == .server || viewModel.selectedNetworkRole == .client {
-                    // Network User Management (read-only for clients)
-                    NetworkUserManagementPhase(viewModel: viewModel)
+            // Content based on selected tab
+            VStack(alignment: .leading, spacing: 16) {
+                if selectedTab == 0 {
+                    // Users Tab
+                    if viewModel.selectedNetworkRole == .none {
+                        // Local User Management
+                        Text("Manage local user accounts on this system")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        UserManagementPhase(viewModel: viewModel)
+                    } else if viewModel.selectedNetworkRole == .server || viewModel.selectedNetworkRole == .client {
+                        // Network User Management (read-only for clients)
+                        NetworkUserManagementPhase(viewModel: viewModel)
+                    }
+                } else {
+                    // Groups Tab
+                    if viewModel.selectedNetworkRole == .none {
+                        // Local Group Management
+                        GroupManagementPhase(viewModel: viewModel)
+                    } else if viewModel.selectedNetworkRole == .server || viewModel.selectedNetworkRole == .client {
+                        // Netgroup Management (read-only for clients)
+                        NetgroupManagementPhase(viewModel: viewModel)
+                    }
                 }
             }
             .padding()
@@ -1839,6 +2204,24 @@ struct UserManagementCard: View {
                     await viewModel.loadLocalUsers()
                 } else if viewModel.selectedNetworkRole == .server || viewModel.selectedNetworkRole == .client {
                     await viewModel.loadNetworkUsers()
+                }
+            }
+        }
+        .onChange(of: selectedTab) { newTab in
+            // Load data when switching tabs
+            Task {
+                if newTab == 0 {
+                    if viewModel.selectedNetworkRole == .none {
+                        await viewModel.loadLocalUsers()
+                    } else {
+                        await viewModel.loadNetworkUsers()
+                    }
+                } else {
+                    if viewModel.selectedNetworkRole == .none {
+                        await viewModel.loadLocalGroups()
+                    } else {
+                        await viewModel.loadNetgroups()
+                    }
                 }
             }
         }
@@ -2259,101 +2642,198 @@ struct ConfigDetailRow: View {
 
 struct UserManagementTab: View {
     @ObservedObject var viewModel: UsersAndGroupsViewModel
+    @State private var selectedTab = 0
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                // Error message
-                if let error = viewModel.error {
-                    HStack {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(.red)
-                        Text(error)
-                            .foregroundColor(.red)
-                    }
-                    .padding()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(Color.red.opacity(0.1))
-                    )
+        VStack(spacing: 0) {
+            // Error message
+            if let error = viewModel.error {
+                HStack {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.red)
+                    Text(error)
+                        .foregroundColor(.red)
                 }
-
-                // Show appropriate user management based on selected network role
-                if viewModel.selectedNetworkRole == .none {
-                    // Local User Management
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text("Local User Management")
-                            .font(.title2)
-                            .bold()
-
-                        Text("Manage local user accounts on this system")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        Divider()
-
-                        UserManagementPhase(viewModel: viewModel)
-                    }
-                    .padding()
-                    .background(
-                        RoundedRectangle(cornerRadius: 16)
-                            .fill(Color(nsColor: .controlBackgroundColor))
-                            .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
-                    )
-                } else if viewModel.selectedNetworkRole == .server {
-                    // Network User Management
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text("Network User Management")
-                            .font(.title2)
-                            .bold()
-
-                        Text("Manage NIS network users shared across all clients")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        Divider()
-
-                        NetworkUserManagementPhase(viewModel: viewModel)
-                    }
-                    .padding()
-                    .background(
-                        RoundedRectangle(cornerRadius: 16)
-                            .fill(Color(nsColor: .controlBackgroundColor))
-                            .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
-                    )
-                } else if viewModel.selectedNetworkRole == .client {
-                    // Client - read-only network user management
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text("Network Users")
-                            .font(.title2)
-                            .bold()
-
-                        Text("View NIS network users (managed on server)")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        Divider()
-
-                        NetworkUserManagementPhase(viewModel: viewModel)
-                    }
-                    .padding()
-                    .background(
-                        RoundedRectangle(cornerRadius: 16)
-                            .fill(Color(nsColor: .controlBackgroundColor))
-                            .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
-                    )
-                }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color.red.opacity(0.1))
+                )
+                .padding(.horizontal)
+                .padding(.top)
             }
-            .padding()
-        }
-        .onAppear {
-            // Auto-load users when navigating to User Management tab
-            Task {
-                if viewModel.selectedNetworkRole == .none {
-                    await viewModel.loadLocalUsers()
-                } else if viewModel.selectedNetworkRole == .server || viewModel.selectedNetworkRole == .client {
-                    await viewModel.loadNetworkUsers()
+
+            // Tabs for Users and Groups
+            Picker("", selection: $selectedTab) {
+                Text("Users").tag(0)
+                Text("Groups").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal)
+            .padding(.top)
+            .padding(.bottom, 8)
+
+            // Tab content based on selection
+            if selectedTab == 0 {
+                // Users Tab
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        if viewModel.selectedNetworkRole == .none {
+                            // Local User Management
+                            VStack(alignment: .leading, spacing: 16) {
+                                Text("Local Users")
+                                    .font(.title2)
+                                    .bold()
+
+                                Text("Manage local user accounts on this system")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+
+                                Divider()
+
+                                UserManagementPhase(viewModel: viewModel)
+                            }
+                            .padding()
+                            .background(
+                                RoundedRectangle(cornerRadius: 16)
+                                    .fill(Color(nsColor: .controlBackgroundColor))
+                                    .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
+                            )
+                        } else if viewModel.selectedNetworkRole == .server {
+                            // Network User Management
+                            VStack(alignment: .leading, spacing: 16) {
+                                Text("Network Users")
+                                    .font(.title2)
+                                    .bold()
+
+                                Text("Manage NIS network users shared across all clients")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+
+                                Divider()
+
+                                NetworkUserManagementPhase(viewModel: viewModel)
+                            }
+                            .padding()
+                            .background(
+                                RoundedRectangle(cornerRadius: 16)
+                                    .fill(Color(nsColor: .controlBackgroundColor))
+                                    .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
+                            )
+                        } else if viewModel.selectedNetworkRole == .client {
+                            // Client - read-only network user management
+                            VStack(alignment: .leading, spacing: 16) {
+                                Text("Network Users")
+                                    .font(.title2)
+                                    .bold()
+
+                                Text("View NIS network users (managed on server)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+
+                                Divider()
+
+                                NetworkUserManagementPhase(viewModel: viewModel)
+                            }
+                            .padding()
+                            .background(
+                                RoundedRectangle(cornerRadius: 16)
+                                    .fill(Color(nsColor: .controlBackgroundColor))
+                                    .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
+                            )
+                        }
+                    }
+                    .padding()
+                }
+                .onAppear {
+                    Task {
+                        if viewModel.selectedNetworkRole == .none {
+                            await viewModel.loadLocalUsers()
+                        } else {
+                            await viewModel.loadNetworkUsers()
+                        }
+                    }
+                }
+            } else {
+                // Groups Tab
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        if viewModel.selectedNetworkRole == .none {
+                            // Local Group Management
+                            VStack(alignment: .leading, spacing: 16) {
+                                Text("Local Groups")
+                                    .font(.title2)
+                                    .bold()
+
+                                Text("Manage local groups on this system")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+
+                                Divider()
+
+                                GroupManagementPhase(viewModel: viewModel)
+                            }
+                            .padding()
+                            .background(
+                                RoundedRectangle(cornerRadius: 16)
+                                    .fill(Color(nsColor: .controlBackgroundColor))
+                                    .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
+                            )
+                        } else if viewModel.selectedNetworkRole == .server {
+                            // Netgroup Management
+                            VStack(alignment: .leading, spacing: 16) {
+                                Text("Netgroups")
+                                    .font(.title2)
+                                    .bold()
+
+                                Text("Manage NIS netgroups for access control")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+
+                                Divider()
+
+                                NetgroupManagementPhase(viewModel: viewModel)
+                            }
+                            .padding()
+                            .background(
+                                RoundedRectangle(cornerRadius: 16)
+                                    .fill(Color(nsColor: .controlBackgroundColor))
+                                    .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
+                            )
+                        } else if viewModel.selectedNetworkRole == .client {
+                            // Client - read-only netgroup view
+                            VStack(alignment: .leading, spacing: 16) {
+                                Text("Netgroups")
+                                    .font(.title2)
+                                    .bold()
+
+                                Text("View NIS netgroups (managed on server)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+
+                                Divider()
+
+                                NetgroupManagementPhase(viewModel: viewModel)
+                            }
+                            .padding()
+                            .background(
+                                RoundedRectangle(cornerRadius: 16)
+                                    .fill(Color(nsColor: .controlBackgroundColor))
+                                    .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
+                            )
+                        }
+                    }
+                    .padding()
+                }
+                .onAppear {
+                    Task {
+                        if viewModel.selectedNetworkRole == .none {
+                            await viewModel.loadLocalGroups()
+                        } else {
+                            await viewModel.loadNetgroups()
+                        }
+                    }
                 }
             }
         }
@@ -2575,6 +3055,902 @@ struct UserManagementPhase: View {
             if let user = userToDelete {
                 Text("Are you sure you want to delete '\(user.username)'?\n\nHome directory: \(user.homeDirectory)")
             }
+        }
+    }
+}
+
+struct GroupManagementPhase: View {
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
+    @State private var showCreateGroupSheet = false
+    @State private var groupToEdit: LocalGroup?
+    @State private var groupToDelete: LocalGroup?
+    @State private var showDeleteConfirmation = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Manage local groups:")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            if viewModel.setupState.localGroups.isEmpty {
+                VStack(spacing: 8) {
+                    Text("No local groups found")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("(Only showing groups with GID 1001-59999)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding()
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+                )
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(viewModel.setupState.localGroups) { group in
+                            GroupRow(
+                                group: group,
+                                onEdit: {
+                                    groupToEdit = group
+                                },
+                                onDelete: {
+                                    groupToDelete = group
+                                    showDeleteConfirmation = true
+                                }
+                            )
+                        }
+                    }
+                }
+                .frame(maxHeight: 300)
+            }
+
+            Button(action: {
+                showCreateGroupSheet = true
+            }) {
+                Label("Create New Group", systemImage: "plus.circle.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(viewModel.isLoading)
+        }
+        .sheet(isPresented: $showCreateGroupSheet) {
+            CreateGroupSheet(viewModel: viewModel, isPresented: $showCreateGroupSheet)
+        }
+        .sheet(item: $groupToEdit) { group in
+            EditGroupSheet(viewModel: viewModel, isPresented: Binding(
+                get: { groupToEdit != nil },
+                set: { if !$0 { groupToEdit = nil } }
+            ), group: group)
+        }
+        .alert("Delete Group", isPresented: $showDeleteConfirmation) {
+            Button("Cancel", role: .cancel) {
+                groupToDelete = nil
+            }
+            Button("Delete Group", role: .destructive) {
+                if let group = groupToDelete {
+                    Task {
+                        await viewModel.removeGroup(group: group)
+                        groupToDelete = nil
+                    }
+                }
+            }
+        } message: {
+            if let group = groupToDelete {
+                Text("Are you sure you want to delete group '\(group.name)'?")
+            }
+        }
+    }
+}
+
+// MARK: - Netgroup Management (NIS)
+
+struct NetgroupManagementPhase: View {
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
+    @State private var showCreateNetgroupSheet = false
+    @State private var netgroupToEdit: Netgroup?
+    @State private var netgroupToDelete: Netgroup?
+    @State private var showDeleteConfirmation = false
+
+    private var isReadOnly: Bool {
+        viewModel.selectedNetworkRole == .client
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if isReadOnly {
+                Text("View netgroups from NIS server:")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                Text("Manage netgroups for access control:")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            if viewModel.setupState.netgroups.isEmpty {
+                VStack(spacing: 8) {
+                    Text("No netgroups found")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    if !isReadOnly {
+                        Text("Create a netgroup to manage user access")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding()
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+                )
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(viewModel.setupState.netgroups) { netgroup in
+                            NetgroupRow(
+                                netgroup: netgroup,
+                                isReadOnly: isReadOnly,
+                                onEdit: {
+                                    netgroupToEdit = netgroup
+                                },
+                                onDelete: {
+                                    netgroupToDelete = netgroup
+                                    showDeleteConfirmation = true
+                                }
+                            )
+                        }
+                    }
+                }
+                .frame(maxHeight: 300)
+            }
+
+            if !isReadOnly {
+                Button(action: {
+                    showCreateNetgroupSheet = true
+                }) {
+                    Label("Create New Netgroup", systemImage: "plus.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.isLoading)
+            }
+
+            // Info about netgroups
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "info.circle")
+                    .foregroundColor(.blue)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("About Netgroups")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                    Text("Netgroups define user groups for NIS. They can be used for sudo access, NFS exports, and login restrictions.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.blue.opacity(0.1))
+            )
+        }
+        .sheet(isPresented: $showCreateNetgroupSheet) {
+            CreateNetgroupSheet(viewModel: viewModel, isPresented: $showCreateNetgroupSheet)
+        }
+        .sheet(item: $netgroupToEdit) { netgroup in
+            EditNetgroupSheet(viewModel: viewModel, isPresented: Binding(
+                get: { netgroupToEdit != nil },
+                set: { if !$0 { netgroupToEdit = nil } }
+            ), netgroup: netgroup)
+        }
+        .alert("Delete Netgroup", isPresented: $showDeleteConfirmation) {
+            Button("Cancel", role: .cancel) {
+                netgroupToDelete = nil
+            }
+            Button("Delete Netgroup", role: .destructive) {
+                if let netgroup = netgroupToDelete {
+                    Task {
+                        await viewModel.removeNetgroup(netgroup: netgroup)
+                        netgroupToDelete = nil
+                    }
+                }
+            }
+        } message: {
+            if let netgroup = netgroupToDelete {
+                Text("Are you sure you want to delete netgroup '\(netgroup.name)'? This may affect user access.")
+            }
+        }
+    }
+}
+
+struct NetgroupRow: View {
+    let netgroup: Netgroup
+    let isReadOnly: Bool
+    let onEdit: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(netgroup.name)
+                        .font(.body)
+                        .fontWeight(.medium)
+
+                    if netgroup.name == "sudo-users" {
+                        Text("sudo")
+                            .font(.caption2)
+                            .fontWeight(.medium)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.orange.opacity(0.2))
+                            .foregroundColor(.orange)
+                            .cornerRadius(4)
+                    }
+                }
+
+                HStack(spacing: 4) {
+                    Text("Members:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    if netgroup.members.isEmpty {
+                        Text("none")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text(netgroup.members.joined(separator: ", "))
+                            .font(.system(.caption, design: .monospaced))
+                            .lineLimit(1)
+                    }
+                }
+            }
+
+            Spacer()
+
+            if !isReadOnly {
+                Button(action: onEdit) {
+                    Image(systemName: "pencil")
+                        .foregroundColor(.blue)
+                }
+                .buttonStyle(.borderless)
+                .help("Edit netgroup")
+
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(.borderless)
+                .help("Delete netgroup")
+            }
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        )
+    }
+}
+
+struct CreateNetgroupSheet: View {
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
+    @Binding var isPresented: Bool
+
+    @State private var netgroupName = ""
+    @State private var selectedMembers: [String] = []
+    @State private var newMember = ""
+
+    private var isFormValid: Bool {
+        !netgroupName.isEmpty && netgroupName.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
+    }
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Create New Netgroup")
+                .font(.title2)
+                .bold()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Netgroup Name")
+                    .font(.caption)
+                TextField("Netgroup name", text: $netgroupName)
+                    .textFieldStyle(.roundedBorder)
+
+                Divider()
+
+                Text("Members")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                Text("Add usernames to this netgroup")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                HStack {
+                    TextField("Username", text: $newMember)
+                        .textFieldStyle(.roundedBorder)
+                    Button(action: {
+                        if !newMember.isEmpty && !selectedMembers.contains(newMember) {
+                            selectedMembers.append(newMember)
+                            newMember = ""
+                        }
+                    }) {
+                        Image(systemName: "plus.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(newMember.isEmpty)
+                }
+
+                if !selectedMembers.isEmpty {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(selectedMembers, id: \.self) { member in
+                                HStack {
+                                    Text(member)
+                                        .font(.system(.body, design: .monospaced))
+                                    Spacer()
+                                    Button(action: {
+                                        selectedMembers.removeAll { $0 == member }
+                                    }) {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundColor(.red)
+                                    }
+                                    .buttonStyle(.borderless)
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .fill(Color(nsColor: .controlBackgroundColor))
+                                )
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 120)
+                }
+            }
+            .padding()
+
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "info.circle")
+                    .foregroundColor(.blue)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Changes will be applied to the NIS database")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                    Text("NIS maps will be rebuilt after creating the netgroup.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.blue.opacity(0.1))
+            )
+            .padding(.horizontal)
+
+            HStack {
+                Button("Cancel") {
+                    isPresented = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button(action: {
+                    Task {
+                        await viewModel.createNetgroup(name: netgroupName, members: selectedMembers)
+                        isPresented = false
+                    }
+                }) {
+                    Text("Create Netgroup")
+                        .frame(minWidth: 80)
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!isFormValid)
+                .opacity(isFormValid ? 1.0 : 0.5)
+            }
+        }
+        .padding()
+        .frame(width: 450)
+    }
+}
+
+struct EditNetgroupSheet: View {
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
+    @Binding var isPresented: Bool
+    let netgroup: Netgroup
+
+    @State private var selectedMembers: [String] = []
+    @State private var newMember = ""
+
+    private var hasChanges: Bool {
+        Set(selectedMembers) != Set(netgroup.members)
+    }
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Edit Netgroup")
+                .font(.title2)
+                .bold()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Netgroup Name")
+                    .font(.caption)
+                TextField("Netgroup name", text: .constant(netgroup.name))
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(true)
+                    .foregroundColor(.secondary)
+
+                if netgroup.name == "sudo-users" {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                        Text("Members of this group have sudo access")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
+                }
+
+                Divider()
+
+                Text("Members")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                Text("Add or remove usernames from this netgroup")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                HStack {
+                    TextField("Username", text: $newMember)
+                        .textFieldStyle(.roundedBorder)
+                    Button(action: {
+                        if !newMember.isEmpty && !selectedMembers.contains(newMember) {
+                            selectedMembers.append(newMember)
+                            newMember = ""
+                        }
+                    }) {
+                        Image(systemName: "plus.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(newMember.isEmpty)
+                }
+
+                if !selectedMembers.isEmpty {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(selectedMembers, id: \.self) { member in
+                                HStack {
+                                    Text(member)
+                                        .font(.system(.body, design: .monospaced))
+                                    Spacer()
+                                    Button(action: {
+                                        selectedMembers.removeAll { $0 == member }
+                                    }) {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundColor(.red)
+                                    }
+                                    .buttonStyle(.borderless)
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .fill(Color(nsColor: .controlBackgroundColor))
+                                )
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 120)
+                } else {
+                    Text("No members")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding()
+                }
+            }
+            .padding()
+
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "info.circle")
+                    .foregroundColor(.blue)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Changes will be applied to the NIS database")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                    Text("NIS maps will be rebuilt after saving changes.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.blue.opacity(0.1))
+            )
+            .padding(.horizontal)
+
+            HStack {
+                Button("Cancel") {
+                    isPresented = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button(action: {
+                    Task {
+                        await viewModel.editNetgroup(netgroup: netgroup, newMembers: selectedMembers)
+                        isPresented = false
+                    }
+                }) {
+                    Text("Save Changes")
+                        .frame(minWidth: 80)
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!hasChanges)
+                .opacity(hasChanges ? 1.0 : 0.5)
+            }
+        }
+        .padding()
+        .frame(width: 450)
+        .onAppear {
+            selectedMembers = netgroup.members
+        }
+    }
+}
+
+struct GroupRow: View {
+    let group: LocalGroup
+    let onEdit: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(group.name)
+                    .font(.body)
+                    .fontWeight(.medium)
+
+                HStack(spacing: 12) {
+                    HStack(spacing: 4) {
+                        Text("GID:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(String(group.id))
+                            .font(.system(.caption, design: .monospaced))
+                    }
+
+                    HStack(spacing: 4) {
+                        Text("Members:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        if group.members.isEmpty {
+                            Text("none")
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text(group.members.joined(separator: ", "))
+                                .font(.system(.caption, design: .monospaced))
+                                .lineLimit(1)
+                        }
+                    }
+                }
+            }
+
+            Spacer()
+
+            Button(action: onEdit) {
+                Image(systemName: "pencil")
+                    .foregroundColor(.blue)
+            }
+            .buttonStyle(.borderless)
+            .help("Edit group")
+
+            Button(action: onDelete) {
+                Image(systemName: "trash")
+                    .foregroundColor(.red)
+            }
+            .buttonStyle(.borderless)
+            .help("Delete group")
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        )
+    }
+}
+
+struct CreateGroupSheet: View {
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
+    @Binding var isPresented: Bool
+
+    @State private var groupName = ""
+    @State private var selectedMembers: Set<String> = []
+    @State private var selectedAvailable: String?
+    @State private var selectedMember: String?
+
+    private var isFormValid: Bool {
+        !groupName.isEmpty && groupName.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
+    }
+
+    // Get available users (not already selected)
+    private var availableUsers: [LocalUser] {
+        viewModel.setupState.localUsers.filter { !selectedMembers.contains($0.username) }
+    }
+
+    // Get selected members as sorted array
+    private var membersList: [String] {
+        Array(selectedMembers).sorted()
+    }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Create New Group")
+                .font(.title2)
+                .bold()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Group Name")
+                    .font(.caption)
+                TextField("Group name", text: $groupName)
+                    .textFieldStyle(.roundedBorder)
+            }
+            .padding(.horizontal)
+
+            Divider()
+
+            Text("Members (optional)")
+                .font(.caption)
+                .fontWeight(.medium)
+
+            // Two-column layout
+            HStack(spacing: 12) {
+                // Available Users column
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Available Users")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    List(availableUsers, id: \.username, selection: $selectedAvailable) { user in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(user.username)
+                                .font(.system(.body, design: .monospaced))
+                            if !user.fullName.isEmpty {
+                                Text(user.fullName)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .tag(user.username)
+                    }
+                    .listStyle(.bordered)
+                    .frame(height: 200)
+                }
+
+                // Add/Remove buttons
+                VStack(spacing: 8) {
+                    Button(action: {
+                        if let user = selectedAvailable {
+                            selectedMembers.insert(user)
+                            selectedAvailable = nil
+                        }
+                    }) {
+                        Image(systemName: "chevron.right")
+                            .frame(width: 24, height: 24)
+                    }
+                    .disabled(selectedAvailable == nil)
+
+                    Button(action: {
+                        if let member = selectedMember {
+                            selectedMembers.remove(member)
+                            selectedMember = nil
+                        }
+                    }) {
+                        Image(systemName: "chevron.left")
+                            .frame(width: 24, height: 24)
+                    }
+                    .disabled(selectedMember == nil)
+                }
+
+                // Group Members column
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Group Members (\(selectedMembers.count))")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    List(membersList, id: \.self, selection: $selectedMember) { username in
+                        Text(username)
+                            .font(.system(.body, design: .monospaced))
+                            .tag(username)
+                    }
+                    .listStyle(.bordered)
+                    .frame(height: 200)
+                }
+            }
+            .padding(.horizontal)
+
+            Divider()
+
+            HStack {
+                Button("Cancel") {
+                    isPresented = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button(action: {
+                    Task {
+                        await viewModel.createGroup(name: groupName, members: Array(selectedMembers))
+                        isPresented = false
+                    }
+                }) {
+                    Text("Create Group")
+                        .frame(minWidth: 80)
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!isFormValid)
+                .opacity(isFormValid ? 1.0 : 0.5)
+            }
+            .padding(.bottom)
+        }
+        .padding(.top)
+        .frame(width: 500, height: 420)
+    }
+}
+
+struct EditGroupSheet: View {
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
+    @Binding var isPresented: Bool
+    let group: LocalGroup
+
+    @State private var selectedMembers: Set<String> = []
+    @State private var selectedAvailable: String?
+    @State private var selectedMember: String?
+
+    private var hasChanges: Bool {
+        selectedMembers != Set(group.members)
+    }
+
+    // Get available users (not already selected)
+    private var availableUsers: [LocalUser] {
+        viewModel.setupState.localUsers.filter { !selectedMembers.contains($0.username) }
+    }
+
+    // Get selected members as sorted array
+    private var membersList: [String] {
+        Array(selectedMembers).sorted()
+    }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Edit Group")
+                .font(.title2)
+                .bold()
+
+            HStack(spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Group Name")
+                        .font(.caption)
+                    TextField("Group name", text: .constant(group.name))
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(true)
+                        .foregroundColor(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("GID")
+                        .font(.caption)
+                    TextField("GID", text: .constant(String(group.id)))
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(true)
+                        .foregroundColor(.secondary)
+                        .frame(width: 80)
+                }
+            }
+            .padding(.horizontal)
+
+            Divider()
+
+            Text("Members")
+                .font(.caption)
+                .fontWeight(.medium)
+
+            // Two-column layout
+            HStack(spacing: 12) {
+                // Available Users column
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Available Users")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    List(availableUsers, id: \.username, selection: $selectedAvailable) { user in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(user.username)
+                                .font(.system(.body, design: .monospaced))
+                            if !user.fullName.isEmpty {
+                                Text(user.fullName)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .tag(user.username)
+                    }
+                    .listStyle(.bordered)
+                    .frame(height: 200)
+                }
+
+                // Add/Remove buttons
+                VStack(spacing: 8) {
+                    Button(action: {
+                        if let user = selectedAvailable {
+                            selectedMembers.insert(user)
+                            selectedAvailable = nil
+                        }
+                    }) {
+                        Image(systemName: "chevron.right")
+                            .frame(width: 24, height: 24)
+                    }
+                    .disabled(selectedAvailable == nil)
+
+                    Button(action: {
+                        if let member = selectedMember {
+                            selectedMembers.remove(member)
+                            selectedMember = nil
+                        }
+                    }) {
+                        Image(systemName: "chevron.left")
+                            .frame(width: 24, height: 24)
+                    }
+                    .disabled(selectedMember == nil)
+                }
+
+                // Group Members column
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Group Members (\(selectedMembers.count))")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    List(membersList, id: \.self, selection: $selectedMember) { username in
+                        Text(username)
+                            .font(.system(.body, design: .monospaced))
+                            .tag(username)
+                    }
+                    .listStyle(.bordered)
+                    .frame(height: 200)
+                }
+            }
+            .padding(.horizontal)
+
+            Divider()
+
+            HStack {
+                Button("Cancel") {
+                    isPresented = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button(action: {
+                    Task {
+                        await viewModel.editGroup(group: group, newMembers: Array(selectedMembers))
+                        isPresented = false
+                    }
+                }) {
+                    Text("Save Changes")
+                        .frame(minWidth: 80)
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!hasChanges)
+                .opacity(hasChanges ? 1.0 : 0.5)
+            }
+            .padding(.bottom)
+        }
+        .padding(.top)
+        .frame(width: 500, height: 420)
+        .onAppear {
+            selectedMembers = Set(group.members)
         }
     }
 }
