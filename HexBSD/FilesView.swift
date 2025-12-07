@@ -157,6 +157,7 @@ struct FilesContentView: View {
                     isLoading: remoteVM.isLoading,
                     onNavigateUp: { await remoteVM.navigateUp() },
                     onNavigateHome: { await remoteVM.navigateHome() },
+                    onNavigateRoot: { await remoteVM.navigateRoot() },
                     onRefresh: { await remoteVM.refresh() },
                     onNavigateTo: { file in await remoteVM.navigateTo(file) },
                     onDelete: { file in await remoteVM.deleteFile(file) },
@@ -408,15 +409,34 @@ struct LocalFilePaneView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    Table(files, selection: $selectedFiles) {
-                        TableColumn("Name") { file in
+                    List(selection: $selectedFiles) {
+                        ForEach(files) { file in
                             HStack(spacing: 8) {
                                 Image(systemName: file.icon)
                                     .foregroundColor(file.isDirectory ? .blue : .secondary)
                                     .frame(width: 20)
                                 Text(file.name)
                                     .lineLimit(1)
+                                Spacer()
+                                Text(file.displaySize)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .frame(width: 70, alignment: .trailing)
                             }
+                            .tag(file.id)
+                            .contentShape(Rectangle())
+                            .gesture(
+                                TapGesture(count: 2).onEnded {
+                                    if file.isDirectory {
+                                        Task { await onNavigateTo(file) }
+                                    }
+                                }
+                            )
+                            .simultaneousGesture(
+                                TapGesture(count: 1).onEnded {
+                                    selectedFiles = [file.id]
+                                }
+                            )
                             .draggable(file.path) {
                                 HStack(spacing: 6) {
                                     Image(systemName: file.icon)
@@ -427,46 +447,20 @@ struct LocalFilePaneView: View {
                                 .background(Color(NSColor.controlBackgroundColor))
                                 .cornerRadius(4)
                             }
-                        }
-
-                        TableColumn("Size") { file in
-                            Text(file.displaySize)
-                                .foregroundColor(.secondary)
-                        }
-                        .width(min: 60, ideal: 80, max: 100)
-
-                        TableColumn("Modified") { file in
-                            if let date = file.modifiedDate {
-                                Text(date, style: .date)
-                                    .foregroundColor(.secondary)
-                            } else {
-                                Text("-")
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                        .width(min: 80, ideal: 100, max: 120)
-                    }
-                    .contextMenu(forSelectionType: LocalFile.ID.self) { items in
-                        if items.count == 1, let id = items.first,
-                           let file = files.first(where: { $0.id == id }) {
-                            if file.isDirectory {
-                                Button("Open") {
-                                    Task { await onNavigateTo(file) }
+                            .contextMenu {
+                                if file.isDirectory {
+                                    Button("Open") {
+                                        Task { await onNavigateTo(file) }
+                                    }
+                                    Divider()
                                 }
-                                Divider()
-                            }
-                            Button("Delete", role: .destructive) {
-                                Task { await onDelete(file) }
-                            }
-                        }
-                    } primaryAction: { items in
-                        if let id = items.first,
-                           let file = files.first(where: { $0.id == id }) {
-                            if file.isDirectory {
-                                Task { await onNavigateTo(file) }
+                                Button("Delete", role: .destructive) {
+                                    Task { await onDelete(file) }
+                                }
                             }
                         }
                     }
+                    .listStyle(.plain)
                 }
 
                 // Drop highlight overlay
@@ -499,6 +493,7 @@ struct RemoteFilePaneView: View {
     let isLoading: Bool
     let onNavigateUp: () async -> Void
     let onNavigateHome: () async -> Void
+    let onNavigateRoot: () async -> Void
     let onRefresh: () async -> Void
     let onNavigateTo: (RemoteFile) async -> Void
     let onDelete: (RemoteFile) async -> Void
@@ -528,12 +523,19 @@ struct RemoteFilePaneView: View {
                     Image(systemName: "chevron.left")
                 }
                 .buttonStyle(.borderless)
-                .disabled(currentPath == "/" || currentPath == "~")
+                .disabled(currentPath == "/")
 
                 Button(action: { Task { await onNavigateHome() } }) {
                     Image(systemName: "house")
                 }
                 .buttonStyle(.borderless)
+                .help("Go to home directory")
+
+                Button(action: { Task { await onNavigateRoot() } }) {
+                    Image(systemName: "slash.circle")
+                }
+                .buttonStyle(.borderless)
+                .help("Go to root directory")
 
                 Text(currentPath)
                     .font(.caption)
@@ -582,15 +584,34 @@ struct RemoteFilePaneView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    Table(files, selection: $selectedFiles) {
-                        TableColumn("Name") { file in
+                    List(selection: $selectedFiles) {
+                        ForEach(files) { file in
                             HStack(spacing: 8) {
                                 Image(systemName: file.icon)
                                     .foregroundColor(file.isDirectory ? .blue : .secondary)
                                     .frame(width: 20)
                                 Text(file.name)
                                     .lineLimit(1)
+                                Spacer()
+                                Text(file.displaySize)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .frame(width: 70, alignment: .trailing)
                             }
+                            .tag(file.id)
+                            .contentShape(Rectangle())
+                            .gesture(
+                                TapGesture(count: 2).onEnded {
+                                    if file.isDirectory {
+                                        Task { await onNavigateTo(file) }
+                                    }
+                                }
+                            )
+                            .simultaneousGesture(
+                                TapGesture(count: 1).onEnded {
+                                    selectedFiles = [file.id]
+                                }
+                            )
                             .draggable(file.path) {
                                 HStack(spacing: 6) {
                                     Image(systemName: file.icon)
@@ -601,46 +622,20 @@ struct RemoteFilePaneView: View {
                                 .background(Color(NSColor.controlBackgroundColor))
                                 .cornerRadius(4)
                             }
-                        }
-
-                        TableColumn("Size") { file in
-                            Text(file.displaySize)
-                                .foregroundColor(.secondary)
-                        }
-                        .width(min: 60, ideal: 80, max: 100)
-
-                        TableColumn("Modified") { file in
-                            if let date = file.modifiedDate {
-                                Text(date, style: .date)
-                                    .foregroundColor(.secondary)
-                            } else {
-                                Text("-")
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                        .width(min: 80, ideal: 100, max: 120)
-                    }
-                    .contextMenu(forSelectionType: RemoteFile.ID.self) { items in
-                        if items.count == 1, let id = items.first,
-                           let file = files.first(where: { $0.id == id }) {
-                            if file.isDirectory {
-                                Button("Open") {
-                                    Task { await onNavigateTo(file) }
+                            .contextMenu {
+                                if file.isDirectory {
+                                    Button("Open") {
+                                        Task { await onNavigateTo(file) }
+                                    }
+                                    Divider()
                                 }
-                                Divider()
-                            }
-                            Button("Delete", role: .destructive) {
-                                Task { await onDelete(file) }
-                            }
-                        }
-                    } primaryAction: { items in
-                        if let id = items.first,
-                           let file = files.first(where: { $0.id == id }) {
-                            if file.isDirectory {
-                                Task { await onNavigateTo(file) }
+                                Button("Delete", role: .destructive) {
+                                    Task { await onDelete(file) }
+                                }
                             }
                         }
                     }
+                    .listStyle(.plain)
                 }
 
                 // Drop highlight overlay
@@ -800,7 +795,18 @@ class RemoteFilesViewModel: ObservableObject {
         await loadDirectory(currentPath)
     }
 
+    func navigateRoot() async {
+        currentPath = "/"
+        await loadDirectory(currentPath)
+    }
+
     func navigateUp() async {
+        if currentPath == "~" {
+            // Go to parent of home directory (e.g., /home or /Users)
+            currentPath = "/"
+            await loadDirectory(currentPath)
+            return
+        }
         let components = currentPath.split(separator: "/")
         if components.count > 1 {
             currentPath = "/" + components.dropLast().joined(separator: "/")
