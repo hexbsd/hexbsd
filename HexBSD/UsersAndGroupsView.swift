@@ -1,8 +1,8 @@
 //
-//  GershwinSetupView.swift
+//  UsersAndGroupsView.swift
 //  HexBSD
 //
-//  Gershwin GNUstep environment setup wizard
+//  Users and Groups management
 //
 
 import SwiftUI
@@ -112,7 +112,7 @@ struct LocalUser: Identifiable, Hashable {
     }
 }
 
-struct GershwinSetupState {
+struct UsersAndGroupsState {
     var zfsDatasets: [ZFSDatasetStatus] = []
     var userConfig: UserConfigStatus?
     var networkDomain: NetworkDomainStatus?
@@ -148,8 +148,8 @@ struct GershwinSetupState {
 // MARK: - View Model
 
 @MainActor
-class GershwinSetupViewModel: ObservableObject {
-    @Published var setupState = GershwinSetupState()
+class UsersAndGroupsViewModel: ObservableObject {
+    @Published var setupState = UsersAndGroupsState()
     @Published var isLoading = false
     @Published var error: String?
     @Published var selectedNetworkRole: NetworkRole = .none
@@ -375,7 +375,7 @@ class GershwinSetupViewModel: ObservableObject {
         do {
             guard let bootEnv = setupState.bootEnvironment,
                   let zpoolRoot = setupState.zpoolRoot else {
-                throw NSError(domain: "GershwinSetup", code: 1, userInfo: [NSLocalizedDescriptionKey: "Boot environment not detected"])
+                throw NSError(domain: "UsersAndGroups", code: 1, userInfo: [NSLocalizedDescriptionKey: "Boot environment not detected"])
             }
 
             // Create /System dataset in boot environment
@@ -432,7 +432,7 @@ class GershwinSetupViewModel: ObservableObject {
                 pkgCheck = try await sshManager.executeCommand("which pkg 2>/dev/null || echo 'missing'")
                 print("DEBUG: pkg check after bootstrap: '\(pkgCheck.trimmingCharacters(in: .whitespacesAndNewlines))'")
                 if pkgCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
-                    throw NSError(domain: "GershwinSetup", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to bootstrap pkg - package manager not available"])
+                    throw NSError(domain: "UsersAndGroups", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to bootstrap pkg - package manager not available"])
                 }
             }
 
@@ -651,7 +651,7 @@ SAVEHIST=10000
             case .client:
                 try await setupNetworkClient()
             case .none:
-                throw NSError(domain: "GershwinSetup", code: 2, userInfo: [NSLocalizedDescriptionKey: "Please select Server or Client role"])
+                throw NSError(domain: "UsersAndGroups", code: 2, userInfo: [NSLocalizedDescriptionKey: "Please select Server or Client role"])
             }
 
             networkConfigStep = "Refreshing status..."
@@ -870,7 +870,7 @@ SAVEHIST=10000
 
         guard !nisServerAddress.isEmpty else {
             print("DEBUG CLIENT: ERROR - NIS server address is empty")
-            throw NSError(domain: "GershwinSetup", code: 3, userInfo: [NSLocalizedDescriptionKey: "Please enter NIS server address"])
+            throw NSError(domain: "UsersAndGroups", code: 3, userInfo: [NSLocalizedDescriptionKey: "Please enter NIS server address"])
         }
 
         // Configure NIS client
@@ -1221,7 +1221,7 @@ SAVEHIST=10000
                 let homeDirectory = String(parts[5])
                 let shell = String(parts[6])
 
-                // Only show users with UID >= 1001 (Gershwin uidstart) and < 60000 (exclude special high-UID system accounts like nobody)
+                // Only show users with UID >= 1001 (standard uidstart) and < 60000 (exclude special high-UID system accounts like nobody)
                 guard uid >= 1001 && uid < 60000 else {
                     continue
                 }
@@ -1421,7 +1421,7 @@ SAVEHIST=10000
                     let homeDirectory = String(parts[8]) // home field
                     let shell = String(parts[9])         // shell field
 
-                    // Only show users with UID >= 1001 (Gershwin uidstart) and < 60000
+                    // Only show users with UID >= 1001 (standard uidstart) and < 60000
                     guard uid >= 1001 && uid < 60000 else { continue }
 
                     users.append(LocalUser(
@@ -1456,7 +1456,7 @@ SAVEHIST=10000
                     let homeDirectory = String(parts[5]) // home field
                     let shell = String(parts[6])         // shell field
 
-                    // Only show users with UID >= 1001 (Gershwin uidstart) and < 60000
+                    // Only show users with UID >= 1001 (standard uidstart) and < 60000
                     guard uid >= 1001 && uid < 60000 else { continue }
 
                     users.append(LocalUser(
@@ -1488,7 +1488,7 @@ SAVEHIST=10000
             // Check if /var/yp/master.passwd exists
             let checkFile = try await sshManager.executeCommand("test -f /var/yp/master.passwd && echo 'exists' || echo 'missing'")
             if checkFile.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
-                throw NSError(domain: "GershwinSetup", code: 6, userInfo: [NSLocalizedDescriptionKey: "NIS not initialized. Please run 'ypinit -m' first."])
+                throw NSError(domain: "UsersAndGroups", code: 6, userInfo: [NSLocalizedDescriptionKey: "NIS not initialized. Please run 'ypinit -m' first."])
             }
 
             // Hardcoded settings for network users
@@ -1541,7 +1541,7 @@ SAVEHIST=10000
 
             // Rebuild NIS maps
             guard let domain = setupState.networkDomain?.domainName else {
-                throw NSError(domain: "GershwinSetup", code: 7, userInfo: [NSLocalizedDescriptionKey: "NIS domain name not found"])
+                throw NSError(domain: "UsersAndGroups", code: 7, userInfo: [NSLocalizedDescriptionKey: "NIS domain name not found"])
             }
 
             // Regenerate /var/yp/passwd from /var/yp/master.passwd (7-field format from 10-field format)
@@ -1612,7 +1612,7 @@ SAVEHIST=10000
             // Rebuild NIS maps if any changes were made
             if !changes.isEmpty {
                 guard let domain = setupState.networkDomain?.domainName else {
-                    throw NSError(domain: "GershwinSetup", code: 7, userInfo: [NSLocalizedDescriptionKey: "NIS domain name not found"])
+                    throw NSError(domain: "UsersAndGroups", code: 7, userInfo: [NSLocalizedDescriptionKey: "NIS domain name not found"])
                 }
 
                 // Regenerate /var/yp/passwd from /var/yp/master.passwd
@@ -1654,7 +1654,7 @@ SAVEHIST=10000
 
             // Rebuild NIS maps
             guard let domain = setupState.networkDomain?.domainName else {
-                throw NSError(domain: "GershwinSetup", code: 7, userInfo: [NSLocalizedDescriptionKey: "NIS domain name not found"])
+                throw NSError(domain: "UsersAndGroups", code: 7, userInfo: [NSLocalizedDescriptionKey: "NIS domain name not found"])
             }
 
             // Regenerate /var/yp/passwd from /var/yp/master.passwd (7-field format from 10-field format)
@@ -1679,14 +1679,14 @@ SAVEHIST=10000
 
 // MARK: - Main View
 
-struct GershwinSetupView: View {
+struct UsersAndGroupsView: View {
     var body: some View {
-        GershwinSetupContentView()
+        UsersAndGroupsContentView()
     }
 }
 
-struct GershwinSetupContentView: View {
-    @StateObject private var viewModel = GershwinSetupViewModel()
+struct UsersAndGroupsContentView: View {
+    @StateObject private var viewModel = UsersAndGroupsViewModel()
 
     private var isSystemSetupComplete: Bool {
         let zfsConfigured = viewModel.setupState.zfsDatasets.allSatisfy { $0.status == .configured }
@@ -1789,7 +1789,7 @@ struct GershwinSetupContentView: View {
 // MARK: - User Management Card
 
 struct UserManagementCard: View {
-    @ObservedObject var viewModel: GershwinSetupViewModel
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1848,7 +1848,7 @@ struct UserManagementCard: View {
 // MARK: - System Setup Tab
 
 struct SystemSetupTab: View {
-    @ObservedObject var viewModel: GershwinSetupViewModel
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
 
     var body: some View {
         ScrollView {
@@ -1891,7 +1891,7 @@ struct SystemSetupTab: View {
         }
     }
 
-    private func domainStatus(viewModel: GershwinSetupViewModel) -> SetupStatus {
+    private func domainStatus(viewModel: UsersAndGroupsViewModel) -> SetupStatus {
         let zfsConfigured = viewModel.setupState.zfsDatasets.allSatisfy { $0.status == .configured }
         let userConfigured = viewModel.setupState.userConfig?.status == .configured
         let networkRole = viewModel.selectedNetworkRole
@@ -1923,7 +1923,7 @@ struct SystemSetupTab: View {
 // MARK: - Domain Phase (Combined Local + Network)
 
 struct DomainPhase: View {
-    @ObservedObject var viewModel: GershwinSetupViewModel
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
     @State private var packagesExpanded = false
     @State private var userConfigExpanded = false
 
@@ -2258,7 +2258,7 @@ struct ConfigDetailRow: View {
 // MARK: - User Management Tab
 
 struct UserManagementTab: View {
-    @ObservedObject var viewModel: GershwinSetupViewModel
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
 
     var body: some View {
         ScrollView {
@@ -2485,7 +2485,7 @@ struct NetworkConfigProgressSheet: View {
 }
 
 struct UserManagementPhase: View {
-    @ObservedObject var viewModel: GershwinSetupViewModel
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
     @State private var showCreateUserSheet = false
     @State private var showDeleteConfirmation = false
     @State private var userToEdit: LocalUser?
@@ -2656,7 +2656,7 @@ struct UserRow: View {
 }
 
 struct CreateUserSheet: View {
-    @ObservedObject var viewModel: GershwinSetupViewModel
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
     @Binding var isPresented: Bool
 
     @State private var username = ""
@@ -2808,7 +2808,7 @@ struct CreateUserSheet: View {
 }
 
 struct EditUserSheet: View {
-    @ObservedObject var viewModel: GershwinSetupViewModel
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
     @Binding var isPresented: Bool
     let user: LocalUser
 
@@ -2919,7 +2919,7 @@ struct EditUserSheet: View {
 }
 
 struct NetworkUserManagementPhase: View {
-    @ObservedObject var viewModel: GershwinSetupViewModel
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
     @State private var showCreateUserSheet = false
     @State private var showDeleteConfirmation = false
     @State private var userToEdit: LocalUser?
@@ -3119,7 +3119,7 @@ struct NetworkUserRow: View {
 }
 
 struct CreateNetworkUserSheet: View {
-    @ObservedObject var viewModel: GershwinSetupViewModel
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
     @Binding var isPresented: Bool
 
     @State private var username = ""
@@ -3274,7 +3274,7 @@ struct CreateNetworkUserSheet: View {
 }
 
 struct EditNetworkUserSheet: View {
-    @ObservedObject var viewModel: GershwinSetupViewModel
+    @ObservedObject var viewModel: UsersAndGroupsViewModel
     @Binding var isPresented: Bool
     let user: LocalUser
 
@@ -3404,5 +3404,5 @@ struct EditNetworkUserSheet: View {
 }
 
 #Preview {
-    GershwinSetupView()
+    UsersAndGroupsView()
 }

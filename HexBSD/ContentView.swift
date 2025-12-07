@@ -596,7 +596,6 @@ struct SavedServer: Identifiable, Codable {
 enum SidebarSection: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"
     case files = "Files"
-    case gershwin = "Gershwin"
     case jails = "Jails"
     case logs = "Logs"
     case packages = "Packages"
@@ -607,6 +606,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case sockstat = "Sockets"
     case tasks = "Tasks"
     case terminal = "Terminal"
+    case usersAndGroups = "Users & Groups"
     case vms = "Virtual Machines"
     case zfs = "ZFS"
 
@@ -616,7 +616,6 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         switch self {
         case .dashboard: return "chart.bar"
         case .files: return "folder"
-        case .gershwin: return "wrench.and.screwdriver"
         case .jails: return "building.2"
         case .logs: return "doc.text"
         case .packages: return "shippingbox.fill"
@@ -627,6 +626,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .sockstat: return "network"
         case .tasks: return "clock"
         case .terminal: return "terminal"
+        case .usersAndGroups: return "person.2"
         case .vms: return "desktopcomputer"
         case .zfs: return "cylinder.split.1x2"
         }
@@ -963,9 +963,9 @@ struct DetailView: View {
             } else if section == .files {
                 // Files browser view
                 FilesContentView()
-            } else if section == .gershwin {
-                // Gershwin GNUstep setup wizard
-                GershwinSetupView()
+            } else if section == .usersAndGroups {
+                // Users and Groups management
+                UsersAndGroupsView()
             } else if section == .jails {
                 // Jails management
                 JailsContentView()
