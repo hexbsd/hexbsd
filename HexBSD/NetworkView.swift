@@ -59,7 +59,7 @@ struct NetworkContentView: View {
             // Toolbar
             HStack {
                 // Protocol filter
-                Picker("Protocol", selection: $selectedProtocol) {
+                Picker("", selection: $selectedProtocol) {
                     Text("All").tag("all")
                     Text("TCP").tag("tcp")
                     Text("UDP").tag("udp")
