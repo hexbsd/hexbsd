@@ -1751,17 +1751,42 @@ extension SSHConnectionManager {
     }
 
     /// Fetch available FreeBSD releases from the configured mirror
-    /// Releases are organized by architecture, so we check the amd64 directory for available versions
-    func getAvailableFreeBSDReleases(mirror: String = "https://download.FreeBSD.org", arch: String = "amd64") async throws -> [String] {
+    /// Releases are organized by architecture, auto-detects host architecture if not specified
+    func getAvailableFreeBSDReleases(mirror: String = "https://download.FreeBSD.org", arch: String? = nil) async throws -> [String] {
         guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
+        // Use provided arch or detect host architecture
+        let archPath: String
+        if let providedArch = arch {
+            // Map architecture names to FreeBSD mirror paths
+            switch providedArch {
+            case "aarch64", "arm64":
+                archPath = "arm64/aarch64"
+            case "amd64", "x86_64":
+                archPath = "amd64"
+            default:
+                archPath = providedArch
+            }
+        } else {
+            // Auto-detect host architecture
+            let hostArch = try await executeCommand("uname -m").trimmingCharacters(in: .whitespacesAndNewlines)
+            switch hostArch {
+            case "aarch64", "arm64":
+                archPath = "arm64/aarch64"
+            case "amd64", "x86_64":
+                archPath = "amd64"
+            default:
+                archPath = hostArch
+            }
+        }
+
         // Fetch the releases directory listing from the mirror
         // Releases are at /releases/<arch>/ e.g., /releases/amd64/14.2-RELEASE/
         let command = """
-        fetch -qo - '\(mirror)/releases/\(arch)/' 2>/dev/null | \
+        fetch -qo - '\(mirror)/releases/\(archPath)/' 2>/dev/null | \
         grep -oE 'href="[0-9]+\\.[0-9]+-RELEASE/"' | \
         sed 's/href="//;s/\\/"$//' | \
         sort -t. -k1,1rn -k2,2rn | \
@@ -2917,6 +2942,823 @@ extension SSHConnectionManager {
         } else {
             return "\(bytes) B"
         }
+    }
+}
+
+// MARK: - Extended Jail Management Operations
+
+extension SSHConnectionManager {
+
+    /// Jail setup status structure
+    struct JailSetupStatus {
+        var directoriesExist: Bool = false
+        var jailEnabled: Bool = false
+        var parallelStart: Bool = false
+        var hasTemplates: Bool = false
+        var basePath: String = "/jails"
+        var jailsEnabled: Bool = false
+        var jailConfExists: Bool = false
+        var jailConfIncludeExists: Bool = false
+        var jailConfdExists: Bool = false
+        var templatesPath: String = "/jails/templates"
+        var hasZFS: Bool = false
+        var zfsDataset: String?
+
+        init() {}
+    }
+
+    /// List available jail templates
+    func listJailTemplates() async throws -> [JailTemplate] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Check jail template location
+        let command = """
+        {
+            # Check for templates in /jails/templates
+            if [ -d /jails/templates ]; then
+                for template in /jails/templates/*/; do
+                    if [ -d "$template" ] && [ -x "$template/bin/sh" ]; then
+                        name=$(basename "$template")
+                        path="$template"
+                        # Check if it's a ZFS dataset
+                        zfs_info=$(zfs list -H -o name "$template" 2>/dev/null || echo "")
+                        if [ -n "$zfs_info" ]; then
+                            # Check for snapshot
+                            snapshot=$(zfs list -H -t snapshot -o name "$zfs_info@template" 2>/dev/null || echo "")
+                            echo "TEMPLATE:$name:$path:zfs:${snapshot:+yes}"
+                        else
+                            echo "TEMPLATE:$name:$path:ufs:no"
+                        fi
+                    fi
+                done
+            fi
+        }
+        """
+
+        let output = try await executeCommand(command)
+        print("DEBUG: Template discovery output: \(output)")
+
+        var templates: [JailTemplate] = []
+
+        for line in output.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("TEMPLATE:") else { continue }
+
+            let parts = trimmed.dropFirst(9).components(separatedBy: ":")
+            guard parts.count >= 4 else { continue }
+
+            let name = parts[0]
+            let path = parts[1]
+            let isZFS = parts[2] == "zfs"
+            let hasSnapshot = parts.count >= 4 && parts[3] == "yes"
+
+            // Try to extract version from path or name
+            let version = extractVersion(from: name) ?? extractVersion(from: path) ?? "Unknown"
+
+            templates.append(JailTemplate(
+                name: name,
+                path: path,
+                version: version,
+                isZFS: isZFS,
+                hasSnapshot: hasSnapshot
+            ))
+        }
+
+        return templates
+    }
+
+    private func extractVersion(from string: String) -> String? {
+        // Match FreeBSD version patterns like 14.0-RELEASE, 13.2-RELEASE
+        let pattern = #"(\d+\.\d+)-RELEASE"#
+        if let range = string.range(of: pattern, options: .regularExpression) {
+            return String(string[range])
+        }
+        return nil
+    }
+
+    /// Check jail setup status
+    func checkJailSetup() async throws -> JailSetupStatus {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = """
+        {
+            # Check if jails are enabled in rc.conf
+            jail_enable=$(sysrc -n jail_enable 2>/dev/null || echo "NO")
+            echo "JAILS_ENABLED:$jail_enable"
+
+            # Check for parallel start
+            jail_parallel=$(sysrc -n jail_parallel_start 2>/dev/null || echo "NO")
+            echo "PARALLEL_START:$jail_parallel"
+
+            # Check if jail.conf exists
+            if [ -f /etc/jail.conf ]; then
+                echo "JAIL_CONF:yes"
+                if grep -q '.include.*jail.conf.d' /etc/jail.conf 2>/dev/null; then
+                    echo "JAIL_CONF_INCLUDE:yes"
+                else
+                    echo "JAIL_CONF_INCLUDE:no"
+                fi
+            else
+                echo "JAIL_CONF:no"
+                echo "JAIL_CONF_INCLUDE:no"
+            fi
+
+            # Check if jail.conf.d directory exists
+            if [ -d /etc/jail.conf.d ]; then
+                echo "JAIL_CONFD:yes"
+            else
+                echo "JAIL_CONFD:no"
+            fi
+
+            # Determine base path and check if full directory structure exists
+            echo "BASE_PATH:/jails"
+            if [ -d /jails/templates ] && [ -d /jails/containers ] && [ -d /jails/media ]; then
+                echo "DIRS_EXIST:yes"
+            else
+                echo "DIRS_EXIST:no"
+            fi
+
+            # Check for templates (must have actual base system content, not just empty directories)
+            template_count=0
+            if [ -d /jails/templates ]; then
+                for tpl in /jails/templates/*/; do
+                    # Check if template has base system files (bin/sh is always present)
+                    if [ -x "$tpl/bin/sh" ]; then
+                        template_count=$((template_count + 1))
+                    fi
+                done
+            fi
+            if [ "$template_count" -gt 0 ]; then
+                echo "HAS_TEMPLATES:yes"
+            else
+                echo "HAS_TEMPLATES:no"
+            fi
+
+            # Check for ZFS
+            if kldstat -q -m zfs 2>/dev/null; then
+                echo "HAS_ZFS:yes"
+                # Try to find jail-related ZFS dataset
+                zfs_dataset=$(zfs list -H -o name 2>/dev/null | grep -E 'jails?$' | head -1 || true)
+                if [ -n "$zfs_dataset" ]; then
+                    echo "ZFS_DATASET:$zfs_dataset"
+                fi
+            else
+                echo "HAS_ZFS:no"
+            fi
+        }
+        """
+
+        let output = try await executeCommand(command)
+        print("DEBUG: Jail setup check output: \(output)")
+
+        var status = JailSetupStatus()
+
+        for line in output.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let parts = trimmed.components(separatedBy: ":")
+            guard parts.count >= 2 else { continue }
+
+            let key = parts[0]
+            let value = parts.dropFirst().joined(separator: ":")
+
+            switch key {
+            case "JAILS_ENABLED":
+                let enabled = value.uppercased() == "YES"
+                status.jailsEnabled = enabled
+                status.jailEnabled = enabled
+            case "PARALLEL_START":
+                status.parallelStart = value.uppercased() == "YES"
+            case "JAIL_CONF":
+                status.jailConfExists = value == "yes"
+            case "JAIL_CONF_INCLUDE":
+                status.jailConfIncludeExists = value == "yes"
+            case "JAIL_CONFD":
+                status.jailConfdExists = value == "yes"
+            case "DIRS_EXIST":
+                status.directoriesExist = value == "yes"
+            case "HAS_TEMPLATES":
+                status.hasTemplates = value == "yes"
+            case "BASE_PATH":
+                status.basePath = value
+                status.templatesPath = value + "/templates"
+            case "HAS_ZFS":
+                status.hasZFS = value == "yes"
+            case "ZFS_DATASET":
+                status.zfsDataset = value
+            default:
+                break
+            }
+        }
+
+        return status
+    }
+
+    /// Create a new jail (Thick or Thin ZFS-based)
+    func createJail(
+        name: String,
+        hostname: String,
+        type: JailType,
+        ipMode: JailIPMode,
+        ipAddress: String,
+        networkInterface: String,
+        template: JailTemplate?,
+        freebsdVersion: String
+    ) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        print("DEBUG: Creating jail '\(name)' of type \(type.rawValue)")
+
+        // Determine jail path
+        let basePath = "/jails/containers"
+        let path = "\(basePath)/\(name)"
+
+        // Get next available jail ID for epair numbering
+        let jailId = try await getNextJailId()
+        print("DEBUG: Using jail ID \(jailId) for epair numbering")
+
+        // Generate jail configuration
+        let configContent = generateJailConfig(
+            name: name,
+            hostname: hostname,
+            path: path,
+            type: type,
+            ipMode: ipMode,
+            ipAddress: ipAddress,
+            networkInterface: networkInterface,
+            jailId: jailId
+        )
+
+        // Ensure jail.conf.d directory exists
+        _ = try await executeCommand("mkdir -p /etc/jail.conf.d")
+
+        // Write the jail configuration file
+        let writeConfigCommand = """
+        cat > '/etc/jail.conf.d/\(name).conf' << 'JAILCONF'
+        \(configContent)
+        JAILCONF
+        """
+        _ = try await executeCommand(writeConfigCommand)
+        print("DEBUG: Wrote jail config to /etc/jail.conf.d/\(name).conf")
+
+        // Create jail directory structure based on type (all use ZFS)
+        switch type {
+        case .thick:
+            // Thick jail: dedicated ZFS dataset with full copy
+            try await createThickZFSJail(name: name, path: path, template: template?.name, freebsdVersion: freebsdVersion)
+
+        case .thin:
+            // Thin jail: ZFS clone from template snapshot
+            try await createThinZFSJail(name: name, path: path, template: template?.name)
+        }
+
+        print("DEBUG: Jail '\(name)' created successfully")
+    }
+
+    /// Generate jail.conf content for a jail
+    /// Get next available jail ID for epair numbering
+    func getNextJailId() async throws -> Int {
+        // Check existing jail configs to find used IDs
+        let result = try await executeCommand("grep -h '\\$id.*=' /etc/jail.conf.d/*.conf 2>/dev/null | grep -oE '[0-9]+' | sort -n | tail -1")
+        let lastId = Int(result.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        return lastId + 1
+    }
+
+    private func generateJailConfig(
+        name: String,
+        hostname: String,
+        path: String,
+        type: JailType,
+        ipMode: JailIPMode,
+        ipAddress: String,
+        networkInterface: String,
+        jailId: Int = 1
+    ) -> String {
+        // networkInterface is the physical interface (e.g., vtnet0, em0)
+        let physIface = networkInterface.isEmpty ? "vtnet0" : networkInterface
+
+        // Simple vNET config following FreeBSD Handbook pattern
+        var config = """
+        \(name) {
+            path = "\(path)";
+            host.hostname = "\(hostname.isEmpty ? name : hostname)";
+
+            # vNET
+            vnet;
+            vnet.interface = "${epair}b";
+
+            $id = "\(jailId)";
+            $epair = "epair${id}";
+
+            # Create bridge if needed, add physical interface and epair
+            exec.prestart  = "/sbin/ifconfig ${epair} create up";
+            exec.prestart += "/sbin/ifconfig bridge0 create 2>/dev/null || true";
+            exec.prestart += "/sbin/ifconfig bridge0 addm \(physIface) 2>/dev/null || true";
+            exec.prestart += "/sbin/ifconfig bridge0 addm ${epair}a up";
+
+        """
+
+        // Network: DHCP by default, static IP if specified
+        switch ipMode {
+        case .dhcp:
+            config += """
+                exec.start     = "/sbin/dhclient ${epair}b";
+                exec.start    += "/bin/sh /etc/rc";
+
+            """
+        case .staticIP:
+            let ip = ipAddress.isEmpty ? "192.168.1.100/24" : ipAddress
+            // Extract gateway from IP (assume .1 on same subnet)
+            let gateway: String
+            if let slashIndex = ip.firstIndex(of: "/"),
+               let lastDot = ip[..<slashIndex].lastIndex(of: ".") {
+                gateway = String(ip[..<lastDot]) + ".1"
+            } else {
+                gateway = "192.168.1.1"
+            }
+            config += """
+                exec.start     = "/sbin/ifconfig ${epair}b \(ip) up";
+                exec.start    += "/sbin/route add default \(gateway)";
+                exec.start    += "/bin/sh /etc/rc";
+
+            """
+        }
+
+        config += """
+            exec.stop      = "/bin/sh /etc/rc.shutdown jail";
+            exec.poststop  = "/sbin/ifconfig ${epair}a destroy";
+
+            exec.clean;
+            mount.devfs;
+            devfs_ruleset = 11;
+        }
+
+        """
+
+        return config
+    }
+
+    /// Create a thick jail with dedicated ZFS dataset
+    private func createThickZFSJail(name: String, path: String, template: String?, freebsdVersion: String) async throws {
+        print("DEBUG: Creating thick ZFS jail '\(name)' at \(path)")
+
+        // Find ZFS pool for jails
+        let poolCommand = "zfs list -H -o name 2>/dev/null | grep -E 'jails?$' | head -1 || zpool list -H -o name | head -1"
+        let pool = try await executeCommand(poolCommand).trimmingCharacters(in: .whitespacesAndNewlines)
+        let jailDataset = "\(pool)/containers/\(name)"
+
+        let version = freebsdVersion.isEmpty ? "14.2-RELEASE" : freebsdVersion
+
+        // Detect host architecture for correct download URL
+        let archCommand = "uname -m"
+        let hostArch = try await executeCommand(archCommand).trimmingCharacters(in: .whitespacesAndNewlines)
+        let archPath: String
+        switch hostArch {
+        case "aarch64", "arm64":
+            archPath = "arm64/aarch64"
+        case "amd64", "x86_64":
+            archPath = "amd64"
+        default:
+            archPath = hostArch
+        }
+        let baseUrl = "https://download.freebsd.org/releases/\(archPath)/\(version)"
+
+        let createCommand = """
+        {
+            # Create ZFS dataset for jail
+            zfs create '\(jailDataset)'
+            zfs set mountpoint='\(path)' '\(jailDataset)'
+
+            # Download and extract base if needed
+            media_dir="/jails/media/\(version)"
+            mkdir -p "$media_dir"
+
+            if [ ! -f "$media_dir/base.txz" ]; then
+                echo "Downloading base.txz for \(version)..."
+                fetch -o "$media_dir/base.txz" "\(baseUrl)/base.txz" || exit 1
+            fi
+
+            echo "Extracting base system to \(path)..."
+            tar -xf "$media_dir/base.txz" -C '\(path)'
+
+            # Copy resolv.conf and localtime
+            cp /etc/resolv.conf '\(path)/etc/resolv.conf' 2>/dev/null || true
+            cp /etc/localtime '\(path)/etc/localtime' 2>/dev/null || true
+
+            echo "Thick ZFS jail '\(name)' created with dataset \(jailDataset)"
+        }
+        """
+        _ = try await executeCommand(createCommand)
+    }
+
+    /// Create a thin jail by cloning a ZFS template snapshot
+    private func createThinZFSJail(name: String, path: String, template: String?) async throws {
+        guard let template = template else {
+            throw NSError(domain: "SSHConnectionManager", code: 2,
+                         userInfo: [NSLocalizedDescriptionKey: "Thin ZFS jail requires a template with snapshot"])
+        }
+
+        print("DEBUG: Creating thin ZFS jail '\(name)' from template '\(template)'")
+
+        // Find ZFS pool for jails
+        let poolCommand = "zfs list -H -o name 2>/dev/null | grep -E 'jails?$' | head -1 || zpool list -H -o name | head -1"
+        let pool = try await executeCommand(poolCommand).trimmingCharacters(in: .whitespacesAndNewlines)
+        print("DEBUG: Pool detected: '\(pool)'")
+
+        let templateDataset = "\(pool)/templates/\(template)"
+        let jailDataset = "\(pool)/containers/\(name)"
+
+        print("DEBUG: Template dataset: \(templateDataset)")
+        print("DEBUG: Jail dataset: \(jailDataset)")
+
+        // Clone from template snapshot
+        let cloneCommand = """
+        {
+            # Check if template snapshot exists
+            if ! zfs list -H -t snapshot '\(templateDataset)@template' >/dev/null 2>&1; then
+                echo "ERROR: Template snapshot \(templateDataset)@template does not exist" >&2
+                exit 1
+            fi
+
+            # Clone the snapshot
+            echo "Cloning \(templateDataset)@template to \(jailDataset)..."
+            zfs clone '\(templateDataset)@template' '\(jailDataset)' 2>&1
+
+            # Set mountpoint
+            zfs set mountpoint='\(path)' '\(jailDataset)' 2>&1
+
+            # Copy fresh resolv.conf
+            cp /etc/resolv.conf '\(path)/etc/resolv.conf' 2>/dev/null || true
+
+            echo "Thin ZFS jail '\(name)' created from template '\(template)'"
+        }
+        """
+        let output = try await executeCommand(cloneCommand)
+        print("DEBUG: Clone command output: \(output)")
+    }
+
+    /// Delete a jail
+    func deleteJail(name: String, removePath: Bool) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        print("DEBUG: Deleting jail '\(name)', removePath: \(removePath)")
+
+        // Stop jail if running
+        _ = try? await executeCommand("service jail stop \(name) 2>/dev/null || jail -r \(name) 2>/dev/null || true")
+
+        // Get jail path from config before removing
+        var jailPath = ""
+        if removePath {
+            let pathCommand = """
+            grep -h 'path.*=' /etc/jail.conf.d/\(name).conf 2>/dev/null | head -1 | sed 's/.*=[ ]*"\\{0,1\\}\\([^";]*\\).*/\\1/' || true
+            """
+            jailPath = try await executeCommand(pathCommand).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        // Remove config file
+        _ = try await executeCommand("rm -f '/etc/jail.conf.d/\(name).conf'")
+        print("DEBUG: Removed config /etc/jail.conf.d/\(name).conf")
+
+        // Remove jail path if requested
+        if removePath && !jailPath.isEmpty && jailPath != "/" {
+            // Check if it's a ZFS dataset
+            let zfsCheck = "zfs list -H -o name '\(jailPath)' 2>/dev/null || echo ''"
+            let dataset = try await executeCommand(zfsCheck).trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if !dataset.isEmpty {
+                // It's a ZFS dataset, destroy it
+                print("DEBUG: Destroying ZFS dataset \(dataset)")
+                _ = try await executeCommand("zfs destroy -r '\(dataset)' 2>/dev/null || rm -rf '\(jailPath)'")
+            } else {
+                // Regular directory
+                print("DEBUG: Removing jail directory \(jailPath)")
+                _ = try await executeCommand("rm -rf '\(jailPath)'")
+            }
+        }
+
+        print("DEBUG: Jail '\(name)' deleted")
+    }
+
+    /// Get jail config file content
+    func getJailConfigFile(name: String) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Try jail.conf.d first, then main jail.conf
+        let command = """
+        if [ -f '/etc/jail.conf.d/\(name).conf' ]; then
+            cat '/etc/jail.conf.d/\(name).conf'
+        elif [ -f /etc/jail.conf ]; then
+            # Extract specific jail block from main config
+            awk '
+                /^[[:space:]]*\(name)[[:space:]]*\\{/ { found=1 }
+                found { print }
+                found && /^[[:space:]]*\\}/ { exit }
+            ' /etc/jail.conf
+        else
+            echo "# No configuration found for jail: \(name)"
+        fi
+        """
+
+        return try await executeCommand(command)
+    }
+
+    /// Save jail config file content
+    func saveJailConfigFile(name: String, content: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Ensure directory exists
+        _ = try await executeCommand("mkdir -p /etc/jail.conf.d")
+
+        // Write the config
+        let writeCommand = """
+        cat > '/etc/jail.conf.d/\(name).conf' << 'JAILCONF'
+        \(content)
+        JAILCONF
+        """
+
+        _ = try await executeCommand(writeCommand)
+        print("DEBUG: Saved jail config to /etc/jail.conf.d/\(name).conf")
+    }
+
+    /// Setup jail directories (ZFS-only)
+    func setupJailDirectories(basePath: String, zfsDataset: String) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        print("DEBUG: Setting up ZFS jail directories at \(basePath) with dataset \(zfsDataset)")
+
+        guard !zfsDataset.isEmpty else {
+            throw NSError(domain: "SSHConnectionManager", code: 2,
+                         userInfo: [NSLocalizedDescriptionKey: "ZFS dataset is required"])
+        }
+
+        // Create ZFS datasets
+        let zfsCommand = """
+        {
+            # Create base dataset if needed
+            zfs list '\(zfsDataset)' >/dev/null 2>&1 || zfs create '\(zfsDataset)'
+
+            # Create subdirectories as datasets
+            zfs list '\(zfsDataset)/templates' >/dev/null 2>&1 || zfs create '\(zfsDataset)/templates'
+            zfs list '\(zfsDataset)/media' >/dev/null 2>&1 || zfs create '\(zfsDataset)/media'
+            zfs list '\(zfsDataset)/containers' >/dev/null 2>&1 || zfs create '\(zfsDataset)/containers'
+
+            # Set mountpoints
+            zfs set mountpoint='\(basePath)' '\(zfsDataset)'
+
+            mkdir -p /etc/jail.conf.d
+
+            echo "Created ZFS datasets:"
+            echo "  \(zfsDataset) -> \(basePath)"
+            echo "  \(zfsDataset)/templates"
+            echo "  \(zfsDataset)/media"
+            echo "  \(zfsDataset)/containers"
+        }
+        """
+        return try await executeCommand(zfsCommand)
+    }
+
+    /// Create a jail template from base system (ZFS-only with snapshot) - streaming version
+    func createJailTemplateStreaming(version: String, name: String, basePath: String, zfsDataset: String, onOutput: @escaping (String) -> Void) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        guard !zfsDataset.isEmpty else {
+            throw NSError(domain: "SSHConnectionManager", code: 2,
+                         userInfo: [NSLocalizedDescriptionKey: "ZFS dataset is required"])
+        }
+
+        let templatePath = "\(basePath)/templates/\(name)"
+        print("DEBUG: Creating ZFS template '\(name)' at \(templatePath)")
+
+        // Detect host architecture for correct download URL
+        let hostArch = try await executeCommand("uname -m").trimmingCharacters(in: .whitespacesAndNewlines)
+        let archPath: String
+        switch hostArch {
+        case "aarch64", "arm64":
+            archPath = "arm64/aarch64"
+        case "amd64", "x86_64":
+            archPath = "amd64"
+        default:
+            archPath = hostArch
+        }
+        let baseUrl = "https://download.freebsd.org/releases/\(archPath)/\(version)"
+
+        // Create ZFS template with snapshot - use fetch -v for verbose download progress
+        let zfsCommand = """
+        # Create template dataset
+        template_ds="\(zfsDataset)/templates/\(name)"
+        zfs list "$template_ds" >/dev/null 2>&1 || zfs create "$template_ds"
+        zfs set mountpoint='\(templatePath)' "$template_ds"
+
+        # Download and extract base
+        media_dir="\(basePath)/media/\(version)"
+        mkdir -p "$media_dir"
+
+        if [ ! -f "$media_dir/base.txz" ]; then
+            echo "Downloading base.txz from \(baseUrl)..."
+            fetch -v -o "$media_dir/base.txz" "\(baseUrl)/base.txz" || exit 1
+            echo ""
+        else
+            echo "Using cached base.txz from $media_dir"
+        fi
+
+        echo "Extracting base system to \(templatePath)..."
+        tar -xvf "$media_dir/base.txz" -C '\(templatePath)' 2>&1 | while read line; do
+            # Show progress every 100 files
+            count=$((count + 1))
+            if [ $((count % 100)) -eq 0 ]; then
+                echo "Extracted $count files..."
+            fi
+        done
+
+        # Copy timezone and resolv.conf
+        echo "Configuring template..."
+        cp /etc/resolv.conf '\(templatePath)/etc/resolv.conf' 2>/dev/null || true
+        cp /etc/localtime '\(templatePath)/etc/localtime' 2>/dev/null || true
+
+        # Create template snapshot for thin jails
+        echo "Creating template snapshot..."
+        zfs snapshot "$template_ds@template"
+
+        echo ""
+        echo "Template '\(name)' created successfully:"
+        echo "  Dataset: $template_ds"
+        echo "  Path: \(templatePath)"
+        echo "  Snapshot: $template_ds@template"
+        """
+
+        let exitCode = try await executeCommandStreaming(zfsCommand, onOutput: onOutput)
+        if exitCode != 0 {
+            throw NSError(domain: "SSHConnectionManager", code: exitCode,
+                         userInfo: [NSLocalizedDescriptionKey: "Template creation failed with exit code \(exitCode)"])
+        }
+    }
+
+    /// Create a jail template from base system (ZFS-only with snapshot)
+    func createJailTemplate(version: String, name: String, basePath: String, zfsDataset: String) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        guard !zfsDataset.isEmpty else {
+            throw NSError(domain: "SSHConnectionManager", code: 2,
+                         userInfo: [NSLocalizedDescriptionKey: "ZFS dataset is required"])
+        }
+
+        let templatePath = "\(basePath)/templates/\(name)"
+        print("DEBUG: Creating ZFS template '\(name)' at \(templatePath)")
+
+        // Detect host architecture for correct download URL
+        let hostArch = try await executeCommand("uname -m").trimmingCharacters(in: .whitespacesAndNewlines)
+        let archPath: String
+        switch hostArch {
+        case "aarch64", "arm64":
+            archPath = "arm64/aarch64"
+        case "amd64", "x86_64":
+            archPath = "amd64"
+        default:
+            archPath = hostArch
+        }
+        let baseUrl = "https://download.freebsd.org/releases/\(archPath)/\(version)"
+
+        // Create ZFS template with snapshot
+        let zfsCommand = """
+        {
+            # Create template dataset
+            template_ds="\(zfsDataset)/templates/\(name)"
+            zfs list "$template_ds" >/dev/null 2>&1 || zfs create "$template_ds"
+            zfs set mountpoint='\(templatePath)' "$template_ds"
+
+            # Download and extract base
+            media_dir="\(basePath)/media/\(version)"
+            mkdir -p "$media_dir"
+
+            if [ ! -f "$media_dir/base.txz" ]; then
+                echo "Downloading base.txz from \(baseUrl)..."
+                fetch -o "$media_dir/base.txz" "\(baseUrl)/base.txz" || exit 1
+            fi
+
+            echo "Extracting base system to \(templatePath)..."
+            tar -xf "$media_dir/base.txz" -C '\(templatePath)'
+
+            # Copy timezone and resolv.conf
+            cp /etc/resolv.conf '\(templatePath)/etc/resolv.conf' 2>/dev/null || true
+            cp /etc/localtime '\(templatePath)/etc/localtime' 2>/dev/null || true
+
+            # Create template snapshot for thin jails
+            echo "Creating template snapshot..."
+            zfs snapshot "$template_ds@template"
+
+            echo ""
+            echo "Template '\(name)' created successfully:"
+            echo "  Dataset: $template_ds"
+            echo "  Path: \(templatePath)"
+            echo "  Snapshot: $template_ds@template"
+        }
+        """
+        return try await executeCommand(zfsCommand)
+    }
+
+    /// Delete a jail template
+    func deleteJailTemplate(_ template: JailTemplate) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        print("DEBUG: Deleting template '\(template.name)' at \(template.path)")
+
+        // Try to find and destroy the ZFS dataset, then remove the directory
+        let command = """
+        {
+            # Try to find ZFS dataset for this template
+            dataset=$(zfs list -H -o name,mountpoint 2>/dev/null | grep '\(template.path)$' | cut -f1)
+
+            if [ -n "$dataset" ]; then
+                # Destroy any snapshots first
+                zfs list -H -t snapshot -o name -r "$dataset" 2>/dev/null | while read snap; do
+                    zfs destroy "$snap" 2>/dev/null || true
+                done
+                # Destroy the dataset
+                zfs destroy -r "$dataset"
+                echo "Destroyed ZFS dataset: $dataset"
+            elif [ -d '\(template.path)' ]; then
+                # Fallback: just remove the directory
+                rm -rf '\(template.path)'
+                echo "Removed directory: \(template.path)"
+            else
+                echo "Template not found"
+                exit 1
+            fi
+        }
+        """
+        _ = try await executeCommand(command)
+        print("DEBUG: Template deleted")
+    }
+
+    /// Enable jails in rc.conf
+    func enableJailsInRcConf() async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = """
+        {
+            sysrc jail_enable=YES
+            sysrc jail_parallel_start=YES
+            echo "SUCCESS"
+        }
+        """
+        _ = try await executeCommand(command)
+        print("DEBUG: Enabled jails in rc.conf")
+    }
+
+    /// Ensure jail.conf includes jail.conf.d directory
+    func ensureJailConfInclude() async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = #"""
+        {
+            mkdir -p /etc/jail.conf.d
+            if [ ! -f /etc/jail.conf ]; then
+                printf '%s\n' '# FreeBSD Jail Configuration' '# Individual jail configs are in /etc/jail.conf.d/' '' '.include "/etc/jail.conf.d/*.conf";' > /etc/jail.conf
+            fi
+            # Add devfs rule for vnet jails with DHCP (need bpf access)
+            if ! grep -q 'devfsrules_jail_bpf=11' /etc/devfs.rules 2>/dev/null; then
+                printf '\n[devfsrules_jail_bpf=11]\nadd include $devfsrules_jail\nadd path '\''bpf*'\'' unhide\n' >> /etc/devfs.rules
+                service devfs restart
+            fi
+        }
+        """#
+        _ = try await executeCommand(command)
+        print("DEBUG: Ensured jail config and devfs rules are set up")
     }
 }
 
@@ -5303,6 +6145,866 @@ EOFPKG
             return .stopped
         } else {
             return .unknown
+        }
+    }
+
+    // MARK: - Network Interface Management
+
+    /// List all network interfaces with detailed information
+    func listNetworkInterfaces() async throws -> [NetworkInterfaceInfo] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var interfaces: [NetworkInterfaceInfo] = []
+
+        // Get interface list with ifconfig -a
+        let ifconfigOutput = try await executeCommand("ifconfig -a 2>/dev/null")
+
+        // Get interface statistics from netstat
+        let netstatOutput = try await executeCommand("netstat -ibn 2>/dev/null")
+
+        // Parse netstat for traffic statistics
+        var interfaceStats: [String: (rxBytes: UInt64, txBytes: UInt64, rxPackets: UInt64, txPackets: UInt64, rxErrors: UInt64, txErrors: UInt64)] = [:]
+        for line in netstatOutput.components(separatedBy: .newlines) {
+            let components = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            // Format: Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll
+            if components.count >= 11 {
+                let name = components[0]
+                // Skip header and link-level entries we already have
+                if name == "Name" || name.isEmpty { continue }
+
+                if let rxPackets = UInt64(components[4]),
+                   let rxErrors = UInt64(components[5]),
+                   let rxBytes = UInt64(components[6]),
+                   let txPackets = UInt64(components[7]),
+                   let txErrors = UInt64(components[8]),
+                   let txBytes = UInt64(components[9]) {
+                    // Only store the first entry per interface (link-level stats)
+                    if interfaceStats[name] == nil {
+                        interfaceStats[name] = (rxBytes: rxBytes, txBytes: txBytes, rxPackets: rxPackets, txPackets: txPackets, rxErrors: rxErrors, txErrors: txErrors)
+                    }
+                }
+            }
+        }
+
+        // Check which interfaces use DHCP from rc.conf
+        let rcConfOutput = try await executeCommand("sysrc -a 2>/dev/null | grep -E 'ifconfig_|dhcp' || echo ''")
+        var dhcpInterfaces: Set<String> = []
+        for line in rcConfOutput.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.contains("DHCP") || trimmed.contains("dhcp") {
+                // Extract interface name from ifconfig_em0="DHCP" style
+                if let match = trimmed.range(of: "ifconfig_") {
+                    let afterPrefix = String(trimmed[match.upperBound...])
+                    if let equalsRange = afterPrefix.range(of: "=") {
+                        let ifaceName = String(afterPrefix[..<equalsRange.lowerBound])
+                        dhcpInterfaces.insert(ifaceName)
+                    }
+                }
+            }
+        }
+
+        // Parse ifconfig output
+        let interfaceBlocks = ifconfigOutput.components(separatedBy: "\n").reduce(into: [[String]]()) { result, line in
+            if !line.isEmpty && !line.hasPrefix("\t") && !line.hasPrefix(" ") {
+                result.append([line])
+            } else if !result.isEmpty {
+                result[result.count - 1].append(line)
+            }
+        }
+
+        for block in interfaceBlocks {
+            guard !block.isEmpty else { continue }
+
+            let firstLine = block[0]
+            guard let colonIndex = firstLine.firstIndex(of: ":") else { continue }
+
+            let name = String(firstLine[..<colonIndex])
+            let flagsLine = String(firstLine[firstLine.index(after: colonIndex)...])
+
+            // Parse flags
+            var flags: [String] = []
+            var mtu = 1500
+            if let flagsMatch = flagsLine.range(of: "flags=") {
+                let afterFlags = String(flagsLine[flagsMatch.upperBound...])
+                if let angleStart = afterFlags.firstIndex(of: "<"),
+                   let angleEnd = afterFlags.firstIndex(of: ">") {
+                    let flagStr = String(afterFlags[afterFlags.index(after: angleStart)..<angleEnd])
+                    flags = flagStr.components(separatedBy: ",")
+                }
+            }
+            if let mtuMatch = flagsLine.range(of: "mtu ") {
+                let afterMtu = String(flagsLine[mtuMatch.upperBound...])
+                let mtuStr = afterMtu.components(separatedBy: .whitespaces).first ?? ""
+                mtu = Int(mtuStr) ?? 1500
+            }
+
+            // Determine interface type
+            let type: InterfaceType
+            if name.hasPrefix("lo") {
+                type = .loopback
+            } else if name.hasPrefix("wlan") || name.hasPrefix("ath") || name.hasPrefix("iwn") || name.hasPrefix("iwm") || name.hasPrefix("bwn") || name.hasPrefix("rum") || name.hasPrefix("run") || name.hasPrefix("ural") || name.hasPrefix("zyd") || name.hasPrefix("upgt") || name.hasPrefix("urtw") || name.hasPrefix("urtwn") {
+                type = .wireless
+            } else if name.hasPrefix("bridge") {
+                type = .bridge
+            } else if name.hasPrefix("vlan") || name.contains(".") {
+                type = .vlan
+            } else if name.hasPrefix("lagg") {
+                type = .lagg
+            } else if name.hasPrefix("em") || name.hasPrefix("igb") || name.hasPrefix("ix") || name.hasPrefix("ixl") || name.hasPrefix("ixv") || name.hasPrefix("bge") || name.hasPrefix("re") || name.hasPrefix("fxp") || name.hasPrefix("bce") || name.hasPrefix("msk") || name.hasPrefix("xl") || name.hasPrefix("dc") || name.hasPrefix("rl") || name.hasPrefix("sis") || name.hasPrefix("ste") || name.hasPrefix("sk") || name.hasPrefix("sf") || name.hasPrefix("vr") || name.hasPrefix("wb") || name.hasPrefix("vtnet") || name.hasPrefix("vmx") || name.hasPrefix("hn") || name.hasPrefix("mlx") || name.hasPrefix("cxgb") || name.hasPrefix("cxl") || name.hasPrefix("oce") || name.hasPrefix("qlnx") || name.hasPrefix("bnxt") || name.hasPrefix("axe") || name.hasPrefix("axge") || name.hasPrefix("cdce") || name.hasPrefix("cue") || name.hasPrefix("kue") || name.hasPrefix("mos") || name.hasPrefix("rue") || name.hasPrefix("smsc") || name.hasPrefix("udav") || name.hasPrefix("ure") || name.hasPrefix("urndis") {
+                type = .ethernet
+            } else {
+                type = .other
+            }
+
+            // Determine status
+            let status: InterfaceStatus
+            if flags.contains("UP") && flags.contains("RUNNING") {
+                status = .up
+            } else if flags.contains("UP") && !flags.contains("RUNNING") {
+                status = .noCarrier
+            } else {
+                status = .down
+            }
+
+            // Parse remaining lines for addresses and media
+            var macAddress = ""
+            var ipv4Address = "N/A"
+            var ipv4Netmask = "N/A"
+            var ipv6Address = "N/A"
+            var ipv6Prefix = ""
+            var mediaType = ""
+            var mediaOptions = ""
+            var description = ""
+
+            for line in block.dropFirst() {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+                if trimmed.hasPrefix("ether ") {
+                    macAddress = String(trimmed.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+                } else if trimmed.hasPrefix("inet ") {
+                    let parts = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+                    if parts.count >= 2 {
+                        ipv4Address = parts[1]
+                    }
+                    if let netmaskIdx = parts.firstIndex(of: "netmask"), netmaskIdx + 1 < parts.count {
+                        // Convert hex netmask to dotted decimal
+                        let hexNetmask = parts[netmaskIdx + 1]
+                        ipv4Netmask = hexNetmaskToDotted(hexNetmask)
+                    }
+                } else if trimmed.hasPrefix("inet6 ") && !trimmed.contains("scopeid") {
+                    let parts = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+                    if parts.count >= 2 {
+                        let addr = parts[1]
+                        // Skip link-local addresses for primary display
+                        if !addr.hasPrefix("fe80:") && ipv6Address == "N/A" {
+                            if let prefixIdx = parts.firstIndex(of: "prefixlen"), prefixIdx + 1 < parts.count {
+                                ipv6Address = addr
+                                ipv6Prefix = "/\(parts[prefixIdx + 1])"
+                            } else {
+                                ipv6Address = addr
+                            }
+                        }
+                    }
+                } else if trimmed.hasPrefix("media:") {
+                    mediaType = String(trimmed.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+                } else if trimmed.hasPrefix("status:") {
+                    // Already handled via flags
+                } else if trimmed.hasPrefix("description:") {
+                    description = String(trimmed.dropFirst(12)).trimmingCharacters(in: .whitespaces)
+                } else if trimmed.hasPrefix("options=") {
+                    if let start = trimmed.firstIndex(of: "<"), let end = trimmed.firstIndex(of: ">") {
+                        mediaOptions = String(trimmed[trimmed.index(after: start)..<end])
+                    }
+                }
+            }
+
+            // Get stats from netstat
+            let stats = interfaceStats[name] ?? (rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0, rxErrors: 0, txErrors: 0)
+
+            let interface = NetworkInterfaceInfo(
+                name: name,
+                type: type,
+                status: status,
+                macAddress: macAddress,
+                ipv4Address: ipv4Address,
+                ipv4Netmask: ipv4Netmask,
+                ipv6Address: ipv6Address,
+                ipv6Prefix: ipv6Prefix,
+                mtu: mtu,
+                dhcp: dhcpInterfaces.contains(name),
+                mediaType: mediaType,
+                mediaOptions: mediaOptions,
+                rxBytes: stats.rxBytes,
+                txBytes: stats.txBytes,
+                rxPackets: stats.rxPackets,
+                txPackets: stats.txPackets,
+                rxErrors: stats.rxErrors,
+                txErrors: stats.txErrors,
+                flags: flags,
+                description: description
+            )
+
+            interfaces.append(interface)
+        }
+
+        return interfaces.sorted { $0.name < $1.name }
+    }
+
+    /// Helper to convert hex netmask to dotted decimal
+    private func hexNetmaskToDotted(_ hex: String) -> String {
+        let cleanHex = hex.hasPrefix("0x") ? String(hex.dropFirst(2)) : hex
+        guard cleanHex.count == 8 else { return hex }
+
+        var octets: [String] = []
+        var index = cleanHex.startIndex
+        for _ in 0..<4 {
+            let nextIndex = cleanHex.index(index, offsetBy: 2)
+            let octetHex = String(cleanHex[index..<nextIndex])
+            if let value = UInt8(octetHex, radix: 16) {
+                octets.append(String(value))
+            } else {
+                return hex
+            }
+            index = nextIndex
+        }
+
+        return octets.joined(separator: ".")
+    }
+
+    /// Set network interface up
+    func setNetworkInterfaceUp(_ name: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let output = try await executeCommand("ifconfig \(name) up 2>&1")
+        if output.contains("Permission denied") || output.contains("Operation not permitted") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
+        }
+    }
+
+    /// Set network interface down
+    func setNetworkInterfaceDown(_ name: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let output = try await executeCommand("ifconfig \(name) down 2>&1")
+        if output.contains("Permission denied") || output.contains("Operation not permitted") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
+        }
+    }
+
+    /// Renew DHCP lease for interface
+    func renewDHCP(_ name: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Kill existing dhclient for this interface and restart
+        _ = try await executeCommand("pkill -f 'dhclient.*\(name)' 2>/dev/null || true")
+        let output = try await executeCommand("dhclient \(name) 2>&1")
+        if output.contains("Permission denied") || output.contains("Operation not permitted") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
+        }
+    }
+
+    /// Configure interface for DHCP
+    func configureInterfaceDHCP(_ name: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Update rc.conf
+        var output = try await executeCommand("sysrc ifconfig_\(name)=\"DHCP\" 2>&1")
+        if output.contains("Permission denied") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
+        }
+
+        // Apply immediately
+        _ = try await executeCommand("pkill -f 'dhclient.*\(name)' 2>/dev/null || true")
+        output = try await executeCommand("dhclient \(name) 2>&1")
+    }
+
+    /// Configure interface with static IP
+    func configureInterfaceStatic(_ name: String, ipAddress: String, netmask: String, gateway: String?) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Update rc.conf
+        var output = try await executeCommand("sysrc ifconfig_\(name)=\"inet \(ipAddress) netmask \(netmask)\" 2>&1")
+        if output.contains("Permission denied") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
+        }
+
+        // Kill any dhclient
+        _ = try await executeCommand("pkill -f 'dhclient.*\(name)' 2>/dev/null || true")
+
+        // Apply immediately
+        output = try await executeCommand("ifconfig \(name) inet \(ipAddress) netmask \(netmask) 2>&1")
+
+        // Set default gateway if provided
+        if let gw = gateway, !gw.isEmpty {
+            _ = try await executeCommand("sysrc defaultrouter=\"\(gw)\" 2>&1")
+            _ = try await executeCommand("route delete default 2>/dev/null || true")
+            _ = try await executeCommand("route add default \(gw) 2>&1")
+        }
+    }
+
+    /// Set interface MTU
+    func setInterfaceMTU(_ name: String, mtu: Int) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let output = try await executeCommand("ifconfig \(name) mtu \(mtu) 2>&1")
+        if output.contains("Permission denied") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
+        }
+    }
+
+    /// Set interface description
+    func setInterfaceDescription(_ name: String, description: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let escapedDesc = description.replacingOccurrences(of: "\"", with: "\\\"")
+        let output = try await executeCommand("ifconfig \(name) description \"\(escapedDesc)\" 2>&1")
+        if output.contains("Permission denied") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
+        }
+    }
+
+    // MARK: - Wireless Network Management
+
+    /// Get the primary wireless interface name
+    func getWirelessInterface() async throws -> String? {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Check for wlan interfaces first (use || true to handle case where none exist)
+        let wlanOutput = try await executeCommand("ifconfig -l 2>/dev/null | tr ' ' '\\n' | grep -E '^wlan' | head -1 || true")
+        let wlan = wlanOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !wlan.isEmpty {
+            return wlan
+        }
+
+        // Check for hardware wireless interfaces
+        let hwOutput = try await executeCommand("sysctl -n net.wlan.devices 2>/dev/null || echo ''")
+        let devices = hwOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !devices.isEmpty {
+            // There's a wireless device but no wlan interface configured
+            return nil
+        }
+
+        return nil
+    }
+
+    /// Get current wireless connection status
+    func getWirelessStatus() async throws -> WirelessStatus? {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        guard let wlanIface = try await getWirelessInterface() else {
+            return nil
+        }
+
+        let output = try await executeCommand("ifconfig \(wlanIface) 2>/dev/null")
+
+        // Parse ssid, bssid, channel, etc.
+        var ssid = ""
+        var bssid = ""
+        var channel = 0
+        var rssi = -100
+        var rate = ""
+        var authMode = ""
+
+        for line in output.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if trimmed.hasPrefix("ssid ") {
+                // Parse: ssid "NetworkName" channel 6 bssid aa:bb:cc:dd:ee:ff
+                if let ssidStart = trimmed.range(of: "ssid \""),
+                   let ssidEnd = trimmed[ssidStart.upperBound...].firstIndex(of: "\"") {
+                    ssid = String(trimmed[ssidStart.upperBound..<ssidEnd])
+                }
+                if let channelMatch = trimmed.range(of: "channel ") {
+                    let afterChannel = String(trimmed[channelMatch.upperBound...])
+                    let channelStr = afterChannel.components(separatedBy: .whitespaces).first ?? ""
+                    channel = Int(channelStr) ?? 0
+                }
+                if let bssidMatch = trimmed.range(of: "bssid ") {
+                    let afterBssid = String(trimmed[bssidMatch.upperBound...])
+                    bssid = afterBssid.components(separatedBy: .whitespaces).first ?? ""
+                }
+            } else if trimmed.contains("authmode") {
+                if let authMatch = trimmed.range(of: "authmode ") {
+                    let afterAuth = String(trimmed[authMatch.upperBound...])
+                    authMode = afterAuth.components(separatedBy: .whitespaces).first ?? ""
+                }
+            }
+        }
+
+        // Get signal strength
+        let rssiOutput = try await executeCommand("ifconfig \(wlanIface) list sta 2>/dev/null | tail -1")
+        let rssComponents = rssiOutput.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+        if rssComponents.count >= 5 {
+            rssi = Int(rssComponents[4]) ?? -100
+            rate = rssComponents[3]
+        }
+
+        if ssid.isEmpty {
+            return nil
+        }
+
+        return WirelessStatus(
+            interfaceName: wlanIface,
+            ssid: ssid,
+            bssid: bssid,
+            channel: channel,
+            rssi: rssi,
+            rate: rate,
+            authMode: authMode
+        )
+    }
+
+    /// Scan for available wireless networks
+    func scanWirelessNetworks() async throws -> [WirelessNetwork] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        guard let wlanIface = try await getWirelessInterface() else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "No wireless interface found"])
+        }
+
+        // Trigger a scan
+        _ = try await executeCommand("ifconfig \(wlanIface) scan 2>/dev/null || true")
+
+        // Wait a moment for scan to complete
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+
+        // Get scan results
+        let output = try await executeCommand("ifconfig \(wlanIface) list scan 2>/dev/null")
+
+        var networks: [WirelessNetwork] = []
+        var currentStatus: WirelessStatus? = try await getWirelessStatus()
+
+        for line in output.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // Skip header
+            if trimmed.hasPrefix("SSID/MESH") || trimmed.isEmpty { continue }
+
+            // Parse scan results - format varies but typically:
+            // SSID                          BSSID              CHAN RATE  S:N     INT CAPS
+            let parts = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            guard parts.count >= 5 else { continue }
+
+            // Find BSSID (MAC address pattern)
+            var ssid = ""
+            var bssid = ""
+            var channel = 0
+            var rate = ""
+            var rssi = -80
+            var security = "OPEN"
+
+            // Look for the MAC address to identify the BSSID position
+            for (index, part) in parts.enumerated() {
+                if part.contains(":") && part.count == 17 {
+                    // Found BSSID
+                    bssid = part
+                    // Everything before it is the SSID
+                    ssid = parts[0..<index].joined(separator: " ")
+                    // Channel is typically after BSSID
+                    if index + 1 < parts.count {
+                        channel = Int(parts[index + 1]) ?? 0
+                    }
+                    if index + 2 < parts.count {
+                        rate = parts[index + 2]
+                    }
+                    if index + 3 < parts.count {
+                        // S:N format like "-65:-95"
+                        let snr = parts[index + 3]
+                        if let colonIdx = snr.firstIndex(of: ":") {
+                            rssi = Int(snr[..<colonIdx]) ?? -80
+                        }
+                    }
+                    break
+                }
+            }
+
+            // Check for security in CAPS field
+            let capsStr = parts.joined(separator: " ").uppercased()
+            if capsStr.contains("RSN") || capsStr.contains("WPA2") {
+                security = "WPA2"
+            } else if capsStr.contains("WPA") {
+                security = "WPA"
+            } else if capsStr.contains("WEP") {
+                security = "WEP"
+            }
+
+            if !bssid.isEmpty {
+                let isConnected = currentStatus?.bssid == bssid
+
+                networks.append(WirelessNetwork(
+                    ssid: ssid,
+                    bssid: bssid,
+                    channel: channel,
+                    rssi: rssi,
+                    noiseFloor: -95,
+                    rate: rate,
+                    security: security,
+                    isConnected: isConnected
+                ))
+            }
+        }
+
+        return networks.sorted { $0.rssi > $1.rssi }
+    }
+
+    /// Connect to a wireless network
+    func connectToWirelessNetwork(ssid: String, password: String?) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        guard let wlanIface = try await getWirelessInterface() else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "No wireless interface found"])
+        }
+
+        let escapedSSID = ssid.replacingOccurrences(of: "\"", with: "\\\"")
+
+        if let pass = password {
+            // WPA/WPA2 connection using wpa_supplicant
+            let escapedPass = pass.replacingOccurrences(of: "\"", with: "\\\"")
+
+            // Create wpa_supplicant.conf entry
+            let config = """
+            network={
+                ssid="\(escapedSSID)"
+                psk="\(escapedPass)"
+            }
+            """
+
+            // Write config
+            _ = try await executeCommand("echo '\(config)' >> /etc/wpa_supplicant.conf 2>&1")
+
+            // Restart wpa_supplicant
+            _ = try await executeCommand("pkill wpa_supplicant 2>/dev/null || true")
+            let output = try await executeCommand("wpa_supplicant -i \(wlanIface) -c /etc/wpa_supplicant.conf -B 2>&1")
+
+            if output.contains("Failed") || output.contains("error") {
+                throw NSError(domain: "SSHConnectionManager", code: 1,
+                             userInfo: [NSLocalizedDescriptionKey: "Failed to connect: \(output)"])
+            }
+
+            // Get DHCP lease
+            _ = try await executeCommand("dhclient \(wlanIface) 2>&1")
+        } else {
+            // Open network
+            let output = try await executeCommand("ifconfig \(wlanIface) ssid \"\(escapedSSID)\" 2>&1")
+            if output.contains("Permission denied") {
+                throw NSError(domain: "SSHConnectionManager", code: 1,
+                             userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
+            }
+            // Get DHCP lease
+            _ = try await executeCommand("dhclient \(wlanIface) 2>&1")
+        }
+    }
+
+    /// Disconnect from wireless network
+    func disconnectWireless() async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        guard let wlanIface = try await getWirelessInterface() else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "No wireless interface found"])
+        }
+
+        // Kill wpa_supplicant and dhclient
+        _ = try await executeCommand("pkill wpa_supplicant 2>/dev/null || true")
+        _ = try await executeCommand("pkill -f 'dhclient.*\(wlanIface)' 2>/dev/null || true")
+
+        // Clear the ssid
+        let output = try await executeCommand("ifconfig \(wlanIface) ssid \"\" 2>&1")
+        if output.contains("Permission denied") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
+        }
+    }
+
+    // MARK: - Bridge Management
+
+    /// List all bridge interfaces
+    func listBridges() async throws -> [BridgeInterface] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var bridges: [BridgeInterface] = []
+
+        // Get list of bridge interfaces (use || true to handle case where no bridges exist)
+        let listOutput = try await executeCommand("ifconfig -l 2>/dev/null | tr ' ' '\\n' | grep -E '^bridge' || true")
+
+        for line in listOutput.components(separatedBy: .newlines) {
+            let name = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if name.isEmpty { continue }
+
+            // Get bridge details
+            let ifconfigOutput = try await executeCommand("ifconfig \(name) 2>/dev/null")
+
+            var members: [String] = []
+            var ipv4Address = ""
+            var ipv4Netmask = ""
+            var status: InterfaceStatus = .down
+            var stp = false
+
+            for ifLine in ifconfigOutput.components(separatedBy: .newlines) {
+                let trimmed = ifLine.trimmingCharacters(in: .whitespaces)
+
+                if trimmed.contains("flags=") {
+                    if trimmed.contains("UP") && trimmed.contains("RUNNING") {
+                        status = .up
+                    } else if trimmed.contains("UP") {
+                        status = .noCarrier
+                    }
+                } else if trimmed.hasPrefix("member:") {
+                    let parts = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+                    if parts.count >= 2 {
+                        members.append(parts[1])
+                    }
+                } else if trimmed.hasPrefix("inet ") {
+                    let parts = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+                    if parts.count >= 2 {
+                        ipv4Address = parts[1]
+                    }
+                    if let netmaskIdx = parts.firstIndex(of: "netmask"), netmaskIdx + 1 < parts.count {
+                        ipv4Netmask = hexNetmaskToDotted(parts[netmaskIdx + 1])
+                    }
+                } else if trimmed.contains("stp") {
+                    stp = true
+                }
+            }
+
+            bridges.append(BridgeInterface(
+                name: name,
+                members: members,
+                ipv4Address: ipv4Address,
+                ipv4Netmask: ipv4Netmask,
+                status: status,
+                stp: stp
+            ))
+        }
+
+        return bridges.sorted { $0.name < $1.name }
+    }
+
+    /// List interfaces that can be added to a bridge
+    func listBridgeableInterfaces() async throws -> [String] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let output = try await executeCommand("ifconfig -l 2>/dev/null | tr ' ' '\\n' | grep -vE '^(lo|bridge|pflog|pfsync|enc|gif|stf)' || true")
+
+        return output.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// Create a new bridge interface
+    func createBridge(name: String, members: [String], ipAddress: String?, netmask: String?, stp: Bool) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Create the bridge interface
+        var output = try await executeCommand("ifconfig \(name) create 2>&1")
+        if output.contains("Permission denied") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
+        }
+        if output.contains("already exists") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Bridge \(name) already exists"])
+        }
+
+        // Add member interfaces
+        for member in members {
+            output = try await executeCommand("ifconfig \(name) addm \(member) 2>&1")
+        }
+
+        // Enable STP if requested
+        if stp {
+            _ = try await executeCommand("ifconfig \(name) stp \(members.first ?? "") 2>&1")
+        }
+
+        // Set IP address if provided
+        if let ip = ipAddress, let mask = netmask {
+            _ = try await executeCommand("ifconfig \(name) inet \(ip) netmask \(mask) 2>&1")
+        }
+
+        // Bring up the bridge
+        _ = try await executeCommand("ifconfig \(name) up 2>&1")
+
+        // Make persistent in rc.conf
+        var rcConfig = "cloned_interfaces=\"\(name)\""
+        _ = try await executeCommand("sysrc \(rcConfig) 2>&1")
+
+        if !members.isEmpty {
+            rcConfig = "ifconfig_\(name)=\""
+            for member in members {
+                rcConfig += "addm \(member) "
+            }
+            if stp {
+                rcConfig += "stp \(members.first ?? "") "
+            }
+            rcConfig += "up\""
+            _ = try await executeCommand("sysrc \(rcConfig) 2>&1")
+        }
+    }
+
+    /// Delete a bridge interface
+    func deleteBridge(_ name: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Bring down and destroy the bridge
+        _ = try await executeCommand("ifconfig \(name) down 2>&1")
+        let output = try await executeCommand("ifconfig \(name) destroy 2>&1")
+
+        if output.contains("Permission denied") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
+        }
+
+        // Remove from rc.conf
+        _ = try await executeCommand("sysrc -x cloned_interfaces 2>/dev/null || true")
+        _ = try await executeCommand("sysrc -x ifconfig_\(name) 2>/dev/null || true")
+    }
+
+    /// Remove a member from a bridge
+    func removeBridgeMember(_ bridgeName: String, member: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let output = try await executeCommand("ifconfig \(bridgeName) deletem \(member) 2>&1")
+        if output.contains("Permission denied") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
+        }
+    }
+
+    // MARK: - Routing Management
+
+    /// List routing table entries
+    func listRoutes(ipv6: Bool) async throws -> [RouteEntry] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let flag = ipv6 ? "-6" : "-4"
+        let output = try await executeCommand("netstat -rn \(flag) 2>/dev/null")
+
+        var routes: [RouteEntry] = []
+
+        for line in output.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // Skip headers and empty lines
+            if trimmed.isEmpty || trimmed.hasPrefix("Routing") || trimmed.hasPrefix("Destination") || trimmed.hasPrefix("Internet") { continue }
+
+            let parts = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            // Format: Destination Gateway Flags Netif Expire
+            guard parts.count >= 4 else { continue }
+
+            routes.append(RouteEntry(
+                destination: parts[0],
+                gateway: parts[1],
+                flags: parts[2],
+                netif: parts[3],
+                expire: parts.count > 4 ? parts[4] : ""
+            ))
+        }
+
+        return routes
+    }
+
+    /// Add a route
+    func addRoute(destination: String, gateway: String, netif: String?) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var cmd = "route add \(destination) \(gateway)"
+        if let iface = netif {
+            cmd += " -interface \(iface)"
+        }
+
+        let output = try await executeCommand("\(cmd) 2>&1")
+        if output.contains("Permission denied") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
+        }
+        if output.contains("File exists") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Route already exists"])
+        }
+    }
+
+    /// Delete a route
+    func deleteRoute(destination: String, gateway: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let output = try await executeCommand("route delete \(destination) \(gateway) 2>&1")
+        if output.contains("Permission denied") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
+        }
+        if output.contains("not in table") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Route not found"])
         }
     }
 }
