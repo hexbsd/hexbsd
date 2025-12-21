@@ -743,27 +743,33 @@ class VMsViewModel: ObservableObject {
     @Published var templatesInstalled = false
     @Published var firmwareInstalled = false
     @Published var publicSwitchConfigured = false
+    @Published var bridges: [BridgeInterface] = []
 
     private let sshManager = SSHConnectionManager.shared
 
-    /// Check if setup is complete (all requirements met)
+    /// Check if any bridges exist (required before VM setup)
+    var hasBridges: Bool {
+        !bridges.isEmpty
+    }
+
+    /// Check if setup is complete (all requirements met, including bridge)
     var setupComplete: Bool {
-        isInstalled && serviceEnabled && templatesInstalled && firmwareInstalled && publicSwitchConfigured
+        hasBridges && isInstalled && serviceEnabled && templatesInstalled && firmwareInstalled && publicSwitchConfigured
     }
 
     /// Setup vm-bhyve with streaming output
-    func setupVMBhyve(zfsDataset: String, networkInterface: String?, onOutput: @escaping (String) -> Void) async throws {
-        try await sshManager.setupVMBhyveStreaming(zfsDataset: zfsDataset, networkInterface: networkInterface, onOutput: onOutput)
+    func setupVMBhyve(zfsDataset: String, bridgeName: String?, onOutput: @escaping (String) -> Void) async throws {
+        try await sshManager.setupVMBhyveStreaming(zfsDataset: zfsDataset, bridgeName: bridgeName, onOutput: onOutput)
         // Reload status after setup
         await loadVMs()
     }
 
-    /// List network interfaces suitable for bridging (excludes bridge interfaces)
-    func listBridgeableInterfaces() async -> [String] {
+    /// List existing bridges that can be used for VM networking
+    func listBridges() async -> [BridgeInterface] {
         do {
-            return try await sshManager.listBridgeableInterfaces()
+            return try await sshManager.listBridges()
         } catch {
-            print("Failed to list bridgeable interfaces: \(error.localizedDescription)")
+            print("Failed to list bridges: \(error.localizedDescription)")
             return []
         }
     }
@@ -783,7 +789,10 @@ class VMsViewModel: ObservableObject {
         error = nil
 
         do {
-            // First check if vm-bhyve is installed and enabled
+            // First check if bridges exist (required for VM networking)
+            bridges = try await sshManager.listBridges()
+
+            // Then check if vm-bhyve is installed and enabled
             let info = try await sshManager.checkVMBhyve()
             isInstalled = info.isInstalled
             serviceEnabled = info.serviceEnabled
@@ -1757,8 +1766,7 @@ struct BhyveSetupWizardView: View {
     @State private var selectedPool: ZFSPool?
     @State private var datasetName = "vms"
     @State private var pools: [ZFSPool] = []
-    @State private var interfaces: [String] = []
-    @State private var selectedInterface: String?
+    @State private var selectedBridge: BridgeInterface?
     @State private var isLoadingPools = false
     @State private var isSettingUp = false
     @State private var setupOutput = ""
@@ -1772,8 +1780,8 @@ struct BhyveSetupWizardView: View {
     private var canStartSetup: Bool {
         // Need pool selected
         guard selectedPool != nil, !zfsDataset.isEmpty else { return false }
-        // Need interface selected unless switch already exists
-        if !viewModel.publicSwitchConfigured && selectedInterface == nil {
+        // Need bridge selected unless switch already exists
+        if !viewModel.publicSwitchConfigured && selectedBridge == nil {
             return false
         }
         return true
@@ -1781,53 +1789,91 @@ struct BhyveSetupWizardView: View {
 
     var body: some View {
         VStack(spacing: 24) {
-            // Header
-            VStack(spacing: 8) {
-                Image(systemName: "desktopcomputer")
-                    .font(.system(size: 48))
-                    .foregroundColor(.blue)
-                Text("Virtual Machine Setup Required")
-                    .font(.title)
-                    .fontWeight(.semibold)
-                Text("Configure bhyve infrastructure before creating virtual machines")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-            }
-            .padding(.top, 20)
+            // Check for bridges first - this is required before any other setup
+            if !viewModel.hasBridges {
+                // No bridges exist - show message and navigation button
+                VStack(spacing: 20) {
+                    Image(systemName: "network.slash")
+                        .font(.system(size: 64))
+                        .foregroundColor(.orange)
 
-            Divider()
+                    Text("Network Bridge Required")
+                        .font(.title)
+                        .fontWeight(.semibold)
 
-            // Status indicators
-            VStack(alignment: .leading, spacing: 12) {
-                VMStatusRow(
-                    title: "vm-bhyve",
-                    isComplete: viewModel.isInstalled,
-                    detail: viewModel.isInstalled ? "Installed" : "Not installed"
-                )
-                VMStatusRow(
-                    title: "bhyve-firmware",
-                    isComplete: viewModel.firmwareInstalled,
-                    detail: viewModel.firmwareInstalled ? "Installed" : "Not installed"
-                )
-                VMStatusRow(
-                    title: "VM Service",
-                    isComplete: viewModel.serviceEnabled,
-                    detail: viewModel.serviceEnabled ? "Enabled in rc.conf" : "Not enabled"
-                )
-                VMStatusRow(
-                    title: "VM Templates",
-                    isComplete: viewModel.templatesInstalled,
-                    detail: viewModel.templatesInstalled ? "Installed" : "Not installed"
-                )
-                VMStatusRow(
-                    title: "Network Switch",
-                    isComplete: viewModel.publicSwitchConfigured,
-                    detail: viewModel.publicSwitchConfigured ? "'public' switch configured" : "Not configured"
-                )
-            }
-            .padding()
-            .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(8)
+                    Text("Virtual machines require a network bridge for connectivity.\nPlease create a bridge in the Network section first.")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+
+                    Button(action: {
+                        NotificationCenter.default.post(name: .navigateToNetworkBridges, object: nil)
+                    }) {
+                        HStack {
+                            Image(systemName: "network")
+                            Text("Setup Network Bridge")
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.top, 10)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                // Bridges exist - show normal setup wizard
+                // Header
+                VStack(spacing: 8) {
+                    Image(systemName: "desktopcomputer")
+                        .font(.system(size: 48))
+                        .foregroundColor(.blue)
+                    Text("Virtual Machine Setup Required")
+                        .font(.title)
+                        .fontWeight(.semibold)
+                    Text("Configure bhyve infrastructure before creating virtual machines")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.top, 20)
+
+                Divider()
+
+                // Status indicators
+                VStack(alignment: .leading, spacing: 12) {
+                    VMStatusRow(
+                        title: "Network Bridge",
+                        isComplete: viewModel.hasBridges,
+                        detail: viewModel.hasBridges ? "\(viewModel.bridges.count) bridge(s) available" : "No bridges configured"
+                    )
+                    VMStatusRow(
+                        title: "vm-bhyve",
+                        isComplete: viewModel.isInstalled,
+                        detail: viewModel.isInstalled ? "Installed" : "Not installed"
+                    )
+                    VMStatusRow(
+                        title: "bhyve-firmware",
+                        isComplete: viewModel.firmwareInstalled,
+                        detail: viewModel.firmwareInstalled ? "Installed" : "Not installed"
+                    )
+                    VMStatusRow(
+                        title: "VM Service",
+                        isComplete: viewModel.serviceEnabled,
+                        detail: viewModel.serviceEnabled ? "Enabled in rc.conf" : "Not enabled"
+                    )
+                    VMStatusRow(
+                        title: "VM Templates",
+                        isComplete: viewModel.templatesInstalled,
+                        detail: viewModel.templatesInstalled ? "Installed" : "Not installed"
+                    )
+                    VMStatusRow(
+                        title: "Network Switch",
+                        isComplete: viewModel.publicSwitchConfigured,
+                        detail: viewModel.publicSwitchConfigured ? "'public' switch configured" : "Not configured"
+                    )
+                }
+                .padding()
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(8)
 
             // Setup form
             Form {
@@ -1889,24 +1935,23 @@ struct BhyveSetupWizardView: View {
                             Text("'public' switch already configured")
                                 .foregroundColor(.secondary)
                         }
-                    } else if interfaces.isEmpty {
-                        HStack {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundColor(.orange)
-                            Text("No network interfaces found")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
                     } else {
-                        Picker("Network Interface:", selection: $selectedInterface) {
-                            Text("Select an interface...").tag(nil as String?)
-                            ForEach(interfaces, id: \.self) { iface in
-                                Text(iface).tag(iface as String?)
+                        Picker("Network Bridge:", selection: $selectedBridge) {
+                            Text("Select a bridge...").tag(nil as BridgeInterface?)
+                            ForEach(viewModel.bridges) { bridge in
+                                HStack {
+                                    Text(bridge.name)
+                                    if !bridge.members.isEmpty {
+                                        Text("(\(bridge.members.joined(separator: ", ")))")
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                                .tag(bridge as BridgeInterface?)
                             }
                         }
                         .pickerStyle(.menu)
 
-                        Text("A 'public' switch will be created using this interface for VM networking")
+                        Text("A 'public' switch will be created using the selected bridge for VM networking")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -1971,6 +2016,7 @@ struct BhyveSetupWizardView: View {
             }
 
             Spacer()
+            } // end else (bridges exist)
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1983,21 +2029,17 @@ struct BhyveSetupWizardView: View {
         isLoadingPools = true
         setupError = nil
 
-        // Load pools and interfaces in parallel
-        async let poolsTask = viewModel.listZFSPools()
-        async let interfacesTask = viewModel.listBridgeableInterfaces()
-
-        pools = await poolsTask
-        interfaces = await interfacesTask
+        // Load pools (bridges are already loaded in viewModel)
+        pools = await viewModel.listZFSPools()
 
         // Auto-select if only one pool
         if pools.count == 1 {
             selectedPool = pools.first
         }
 
-        // Auto-select first interface if only one
-        if interfaces.count == 1 {
-            selectedInterface = interfaces.first
+        // Auto-select first bridge if only one
+        if viewModel.bridges.count == 1 {
+            selectedBridge = viewModel.bridges.first
         }
 
         isLoadingPools = false
@@ -2009,7 +2051,7 @@ struct BhyveSetupWizardView: View {
         setupOutput = ""
 
         do {
-            try await viewModel.setupVMBhyve(zfsDataset: zfsDataset, networkInterface: selectedInterface) { output in
+            try await viewModel.setupVMBhyve(zfsDataset: zfsDataset, bridgeName: selectedBridge?.name) { output in
                 Task { @MainActor in
                     setupOutput += output
                 }

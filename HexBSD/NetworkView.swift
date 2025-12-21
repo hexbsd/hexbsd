@@ -373,6 +373,10 @@ struct NetworkContentView: View {
                 RoutingTabView()
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .navigateToNetworkBridges)) { _ in
+            // Switch to bridges tab when requested from VMs or Jails
+            selectedTab = .bridges
+        }
     }
 }
 
@@ -2325,27 +2329,29 @@ struct SwitchDetailView: View {
                     .padding(.vertical, 8)
                 }
 
-                // Ports
-                GroupBox("Physical Interfaces") {
-                    if vmSwitch.ports.isEmpty {
-                        Text("No physical interfaces attached")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .padding(.vertical, 8)
-                    } else {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(vmSwitch.ports, id: \.self) { port in
-                                HStack {
-                                    Image(systemName: "cable.connector")
-                                        .foregroundColor(.blue)
-                                    Text(port)
-                                        .font(.system(.body, design: .monospaced))
-                                    Spacer()
+                // Only show Physical Interfaces section for standard switches (not manual switches which use existing bridges)
+                if vmSwitch.type != "manual" {
+                    GroupBox("Physical Interfaces") {
+                        if vmSwitch.ports.isEmpty {
+                            Text("No physical interfaces attached")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(.vertical, 8)
+                        } else {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(vmSwitch.ports, id: \.self) { port in
+                                    HStack {
+                                        Image(systemName: "cable.connector")
+                                            .foregroundColor(.blue)
+                                        Text(port)
+                                            .font(.system(.body, design: .monospaced))
+                                        Spacer()
+                                    }
+                                    .padding(.vertical, 4)
                                 }
-                                .padding(.vertical, 4)
                             }
+                            .padding(.vertical, 8)
                         }
-                        .padding(.vertical, 8)
                     }
                 }
             }
@@ -2359,7 +2365,11 @@ struct SwitchDetailView: View {
                 }
             }
         } message: {
-            Text("Are you sure you want to delete the '\(vmSwitch.name)' switch? This will also remove the associated bridge interface.")
+            if vmSwitch.type == "manual" {
+                Text("Are you sure you want to delete the '\(vmSwitch.name)' switch? The underlying bridge interface will not be affected.")
+            } else {
+                Text("Are you sure you want to delete the '\(vmSwitch.name)' switch? This will also remove the associated bridge interface.")
+            }
         }
     }
 }

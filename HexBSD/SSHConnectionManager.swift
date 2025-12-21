@@ -5351,8 +5351,10 @@ extension SSHConnectionManager {
         let destroyOutput = try await executeCommand("vm switch destroy \(name) 2>&1 || true")
         print("DEBUG: vm switch destroy \(name) output: \(destroyOutput)")
 
-        // Check if the switch still exists (vm switch destroy fails if bridge interface is already gone)
+        // Check if the switch still exists (vm switch destroy fails for manual switches or if bridge interface is already gone)
         let checkOutput = try await executeCommand("vm switch list 2>/dev/null | grep -q '^\(name) ' && echo 'EXISTS' || echo 'GONE'")
+        let switchType = switchInfo.contains("manual") ? "manual" : "standard"
+
         if checkOutput.trimmingCharacters(in: .whitespacesAndNewlines) == "EXISTS" {
             print("DEBUG: Switch still exists, manually cleaning up config")
             // Get the datastore path to find system.conf
@@ -5360,27 +5362,19 @@ extension SSHConnectionManager {
             let datastorePath = datastoreOutput.trimmingCharacters(in: .whitespacesAndNewlines)
             if !datastorePath.isEmpty {
                 let configPath = "\(datastorePath)/.config/system.conf"
-                // Remove switch-related entries from system.conf
-                // Entries are: switch_list, type_NAME, ports_NAME, addr_NAME, mtu_NAME, vlan_NAME, private_NAME
-                let sedCommands = [
-                    "sed -i '' 's/\(name)//g; s/\"  */\"/g; s/  *\"/\"/g' \(configPath)",  // Remove from switch_list
-                    "sed -i '' '/^type_\(name)=/d' \(configPath)",
-                    "sed -i '' '/^ports_\(name)=/d' \(configPath)",
-                    "sed -i '' '/^addr_\(name)=/d' \(configPath)",
-                    "sed -i '' '/^mtu_\(name)=/d' \(configPath)",
-                    "sed -i '' '/^vlan_\(name)=/d' \(configPath)",
-                    "sed -i '' '/^private_\(name)=/d' \(configPath)",
-                    "sed -i '' '/^switch_list=\"\"$/d' \(configPath)"  // Remove empty switch_list
-                ]
-                for cmd in sedCommands {
-                    _ = try await executeCommand("\(cmd) 2>&1 || true")
-                }
+                // Remove switch-related entries from system.conf using sed
+                // Remove lines like: type_NAME=, bridge_NAME=, ports_NAME=, etc.
+                _ = try await executeCommand("sed -i '' '/_\(name)=/d' \(configPath) 2>/dev/null || true")
+                // Remove the switch name from switch_list
+                _ = try await executeCommand("sed -i '' 's/\(name)//g; s/\"  */\"/g; s/  *\"/\"/g' \(configPath) 2>/dev/null || true")
+                // Remove empty switch_list line if it exists
+                _ = try await executeCommand("sed -i '' '/^switch_list=\"\"$/d' \(configPath) 2>/dev/null || true")
                 print("DEBUG: Manually removed switch \(name) from config")
             }
         }
 
-        // Also destroy the bridge interface if it exists
-        if let iface = bridgeInterface {
+        // Only destroy the bridge interface for standard switches (not manual switches which use existing bridges)
+        if switchType != "manual", let iface = bridgeInterface {
             _ = try await executeCommand("ifconfig \(iface) down 2>&1 || true")
             _ = try await executeCommand("ifconfig \(iface) destroy 2>&1 || true")
             print("DEBUG: Destroyed bridge interface \(iface)")
@@ -7063,6 +7057,14 @@ EOFPKG
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
+        // Check if this bridge is used by a VM switch (manual switches reference existing bridges)
+        let switchList = try await executeCommand("vm switch list 2>/dev/null | grep -w '\(name)' | awk '{print $1}' || echo ''")
+        let switchName = switchList.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !switchName.isEmpty {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Cannot delete bridge '\(name)' because it is used by VM switch '\(switchName)'. Please delete the switch first."])
+        }
+
         // Check if this is a vm-bhyve switch (vm-* bridges)
         if name.hasPrefix("vm-") {
             // Extract switch name (vm-public -> public)
@@ -7262,7 +7264,7 @@ EOFPKG
     /// Setup bhyve/vm-bhyve with streaming output for progress display
     func setupVMBhyveStreaming(
         zfsDataset: String = "zroot/vms",
-        networkInterface: String? = nil,
+        bridgeName: String? = nil,
         onOutput: @escaping (String) -> Void
     ) async throws {
         guard client != nil else {
@@ -7354,25 +7356,28 @@ EOFPKG
             onOutput("vm service started\n")
         }
 
-        // Step 8: Create public network switch
-        if let iface = networkInterface, !iface.isEmpty {
-            onOutput("\nStep 8: Creating 'public' network switch...\n")
+        // Step 8: Create public network switch using existing bridge
+        if let bridge = bridgeName, !bridge.isEmpty {
+            onOutput("\nStep 8: Creating 'public' network switch using bridge \(bridge)...\n")
             // Check if switch already exists
             let switchCheck = try await runCommand("vm switch list 2>/dev/null | grep -q '^public ' && echo 'EXISTS' || echo 'NOT_FOUND'", step: "check switch")
             if switchCheck.contains("NOT_FOUND") {
-                _ = try await runCommand("vm switch create public 2>&1 || true", step: "create switch")
-                // vm switch add may return non-zero even on success, capture output
-                let addResult = try await runCommand("vm switch add public \(iface) 2>&1 || true; vm switch list | grep '^public ' && echo 'SUCCESS' || echo 'FAILED'", step: "add interface to switch")
-                if addResult.contains("SUCCESS") {
-                    onOutput("Created 'public' switch with interface \(iface)\n")
+                // Create a manual switch that uses the existing bridge
+                let createResult = try await runCommand("vm switch create -t manual -b \(bridge) public 2>&1", step: "create manual switch")
+                if createResult.contains("ERROR") || createResult.contains("error") {
+                    onOutput("Warning: Failed to create switch: \(createResult)\n")
                 } else {
-                    onOutput("Warning: Switch created but may not be fully configured. Check 'vm switch list'\n")
+                    onOutput("Created 'public' switch using existing bridge \(bridge)\n")
                 }
             } else {
                 onOutput("'public' switch already exists\n")
             }
+
+            // Show final switch status
+            let switchStatus = try await runCommand("vm switch list | grep '^public '", step: "show switch status")
+            onOutput("Switch status: \(switchStatus)\n")
         } else {
-            onOutput("\nStep 8: Skipping network switch (no interface selected)...\n")
+            onOutput("\nStep 8: Skipping network switch (no bridge selected)...\n")
         }
 
         onOutput("\n✓ Setup complete!\n")

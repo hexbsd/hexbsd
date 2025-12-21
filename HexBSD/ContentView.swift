@@ -786,6 +786,20 @@ struct ContentView: View {
                 print("DEBUG: Not connected, cannot switch to terminal")
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .navigateToNetworkBridges)) { _ in
+            // Switch to network section when bridge creation is requested
+            if sshManager.isConnected {
+                let wasNotOnNetwork = selectedSection != .network
+                selectedSection = .network
+
+                // Re-post notification after NetworkContentView loads so it can switch to Bridges tab
+                if wasNotOnNetwork {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        NotificationCenter.default.post(name: .navigateToNetworkBridges, object: nil)
+                    }
+                }
+            }
+        }
     }
 
     func loadSavedServers() {

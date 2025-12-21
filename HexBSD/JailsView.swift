@@ -130,8 +130,9 @@ struct JailsContentView: View {
     @State private var showCreateJail = false
     @State private var selectedTab: JailsTab = .jails
 
-    /// Check if jail infrastructure is ready (directories exist and jails enabled - templates are optional)
+    /// Check if jail infrastructure is ready (bridge exists, directories exist and jails enabled - templates are optional)
     private var isSetupComplete: Bool {
+        viewModel.hasBridges &&
         viewModel.jailSetupStatus.directoriesExist &&
         viewModel.jailSetupStatus.jailEnabled
     }
@@ -1773,46 +1774,84 @@ struct JailSetupWizardView: View {
 
     var body: some View {
         VStack(spacing: 24) {
-            // Header
-            VStack(spacing: 8) {
-                Image(systemName: "building.2.fill")
-                    .font(.system(size: 48))
-                    .foregroundColor(.blue)
-                Text("Jail Setup Required")
-                    .font(.title)
-                    .fontWeight(.semibold)
-                Text("Configure your jail infrastructure before creating jails")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-            }
-            .padding(.top, 20)
+            // Check for bridges first - this is required before any other setup
+            if !viewModel.hasBridges {
+                // No bridges exist - show message and navigation button
+                VStack(spacing: 20) {
+                    Image(systemName: "network.slash")
+                        .font(.system(size: 64))
+                        .foregroundColor(.orange)
 
-            Divider()
+                    Text("Network Bridge Required")
+                        .font(.title)
+                        .fontWeight(.semibold)
 
-            // Status indicators
-            VStack(alignment: .leading, spacing: 12) {
-                StatusRow(
-                    title: "ZFS Datasets",
-                    isComplete: viewModel.jailSetupStatus.directoriesExist,
-                    detail: viewModel.jailSetupStatus.directoriesExist ? "Created" : "Not created"
-                )
-                StatusRow(
-                    title: "Jail Configuration",
-                    isComplete: viewModel.jailSetupStatus.jailConfExists,
-                    detail: viewModel.jailSetupStatus.jailConfExists ? "/etc/jail.conf exists" : "/etc/jail.conf missing"
-                )
-                StatusRow(
-                    title: "Jail Service",
-                    isComplete: viewModel.jailSetupStatus.jailEnabled,
-                    detail: viewModel.jailSetupStatus.jailEnabled ? "Enabled in rc.conf" : "Not enabled"
-                )
-            }
-            .padding()
-            .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(8)
+                    Text("Jails require a network bridge for connectivity.\nPlease create a bridge in the Network section first.")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
 
-            // Setup form
-            Form {
+                    Button(action: {
+                        NotificationCenter.default.post(name: .navigateToNetworkBridges, object: nil)
+                    }) {
+                        HStack {
+                            Image(systemName: "network")
+                            Text("Setup Network Bridge")
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.top, 10)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                // Bridges exist - show normal setup wizard
+                // Header
+                VStack(spacing: 8) {
+                    Image(systemName: "building.2.fill")
+                        .font(.system(size: 48))
+                        .foregroundColor(.blue)
+                    Text("Jail Setup Required")
+                        .font(.title)
+                        .fontWeight(.semibold)
+                    Text("Configure your jail infrastructure before creating jails")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.top, 20)
+
+                Divider()
+
+                // Status indicators
+                VStack(alignment: .leading, spacing: 12) {
+                    StatusRow(
+                        title: "Network Bridge",
+                        isComplete: viewModel.hasBridges,
+                        detail: viewModel.hasBridges ? "\(viewModel.bridges.count) bridge(s) available" : "No bridges configured"
+                    )
+                    StatusRow(
+                        title: "ZFS Datasets",
+                        isComplete: viewModel.jailSetupStatus.directoriesExist,
+                        detail: viewModel.jailSetupStatus.directoriesExist ? "Created" : "Not created"
+                    )
+                    StatusRow(
+                        title: "Jail Configuration",
+                        isComplete: viewModel.jailSetupStatus.jailConfExists,
+                        detail: viewModel.jailSetupStatus.jailConfExists ? "/etc/jail.conf exists" : "/etc/jail.conf missing"
+                    )
+                    StatusRow(
+                        title: "Jail Service",
+                        isComplete: viewModel.jailSetupStatus.jailEnabled,
+                        detail: viewModel.jailSetupStatus.jailEnabled ? "Enabled in rc.conf" : "Not enabled"
+                    )
+                }
+                .padding()
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(8)
+
+                // Setup form
+                Form {
                 Section("ZFS Configuration") {
                     if isLoadingPools {
                         HStack {
@@ -1924,6 +1963,7 @@ struct JailSetupWizardView: View {
             }
 
             Spacer()
+            } // end else (bridges exist)
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2046,6 +2086,7 @@ class JailsViewModel: ObservableObject {
     @Published var jails: [Jail] = []
     @Published var templates: [JailTemplate] = []
     @Published var availableInterfaces: [String] = []
+    @Published var bridges: [BridgeInterface] = []
     @Published var isLoading = false
     @Published var error: String?
     @Published var autoRefresh: Bool = false
@@ -2054,11 +2095,19 @@ class JailsViewModel: ObservableObject {
 
     private let sshManager = SSHConnectionManager.shared
 
+    /// Check if any bridges exist (required before jail setup)
+    var hasBridges: Bool {
+        !bridges.isEmpty
+    }
+
     func loadJails() async {
         isLoading = true
         error = nil
 
         do {
+            // First check if bridges exist (required for jail networking)
+            bridges = try await sshManager.listBridges()
+
             hasElevatedPrivileges = try await sshManager.hasElevatedPrivileges()
             jails = try await sshManager.listJails()
             // Also check jail setup status for the wizard
