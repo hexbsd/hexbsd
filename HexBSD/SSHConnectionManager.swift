@@ -762,34 +762,40 @@ class SSHConnectionManager {
         let user = connectedUsername ?? "root"
         let portNum = connectedPort ?? 22
 
-        print("DEBUG: Starting SCP upload to \(user)@\(host):\(remotePath)")
+        print("DEBUG: Starting SSH upload to \(user)@\(host):\(remotePath)")
 
-        let scpCommand = [
-            "/usr/bin/scp",
+        // Use SSH with cat to stream data - we can track bytes written to stdin
+        let sshArgs = [
             "-i", keyPath,
-            "-P", "\(portNum)",
+            "-p", "\(portNum)",
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
-            localURL.path,
-            "\(user)@\(host):\(remotePath)"
+            "\(user)@\(host)",
+            "cat > '\(remotePath)'"
         ]
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: scpCommand[0])
-        process.arguments = Array(scpCommand.dropFirst())
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.arguments = sshArgs
 
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
+        let stdinPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardInput = stdinPipe
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = stderrPipe
 
         let startTime = Date()
         try process.run()
 
-        // Monitor progress by checking remote file size
-        var lastReportedBytes: Int64 = 0
+        // Read file and write to stdin in chunks, tracking progress
+        let fileHandle = try FileHandle(forReadingFrom: localURL)
+        defer { try? fileHandle.close() }
+
+        let chunkSize = 64 * 1024 // 64KB chunks
+        var totalBytesWritten: Int64 = 0
         var lastReportTime = startTime
 
-        while process.isRunning {
+        while true {
             // Check for cancellation
             if cancelCheck?() == true {
                 process.terminate()
@@ -797,41 +803,39 @@ class SSHConnectionManager {
                              userInfo: [NSLocalizedDescriptionKey: "Transfer cancelled"])
             }
 
-            // Check remote file size for actual progress
-            do {
-                let sizeOutput = try await executeCommand("stat -f %z '\(remotePath)' 2>/dev/null || echo 0")
-                let currentSize = Int64(sizeOutput.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
-
-                if currentSize > lastReportedBytes {
-                    let now = Date()
-                    let elapsed = now.timeIntervalSince(startTime)
-                    let recentElapsed = now.timeIntervalSince(lastReportTime)
-                    let recentBytes = currentSize - lastReportedBytes
-
-                    // Calculate rate based on recent transfer
-                    let rate = recentElapsed > 0 ? Double(recentBytes) / recentElapsed : 0
-                    let rateStr = formatTransferRate(rate)
-
-                    progressCallback?(currentSize, fileSize, rateStr)
-                    lastReportedBytes = currentSize
-                    lastReportTime = now
-
-                    print("DEBUG: Upload progress: \(currentSize)/\(fileSize) bytes (\(rateStr))")
-                }
-            } catch {
-                // Ignore errors checking file size - file might not exist yet
+            guard let chunk = try fileHandle.read(upToCount: chunkSize), !chunk.isEmpty else {
+                break
             }
 
-            try await Task.sleep(nanoseconds: 500_000_000) // 500ms between checks
+            stdinPipe.fileHandleForWriting.write(chunk)
+            totalBytesWritten += Int64(chunk.count)
+
+            // Report progress
+            let now = Date()
+            let elapsed = now.timeIntervalSince(startTime)
+            let rate = elapsed > 0 ? Double(totalBytesWritten) / elapsed : 0
+            let rateStr = formatTransferRate(rate)
+
+            progressCallback?(totalBytesWritten, fileSize, rateStr)
+
+            // Throttle progress updates to avoid flooding
+            if now.timeIntervalSince(lastReportTime) > 0.1 {
+                print("DEBUG: Upload progress: \(totalBytesWritten)/\(fileSize) bytes (\(rateStr))")
+                lastReportTime = now
+            }
         }
 
+        // Close stdin to signal end of data
+        try stdinPipe.fileHandleForWriting.close()
+
+        // Wait for process to complete
         process.waitUntilExit()
 
         if process.terminationStatus != 0 {
-            let errorData = pipe.fileHandleForReading.readDataToEndOfFile()
+            let errorData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
             let errorStr = String(data: errorData, encoding: .utf8) ?? "Unknown error"
             throw NSError(domain: "SSHConnectionManager", code: Int(process.terminationStatus),
-                         userInfo: [NSLocalizedDescriptionKey: "SCP failed: \(errorStr)"])
+                         userInfo: [NSLocalizedDescriptionKey: "SSH upload failed: \(errorStr)"])
         }
 
         // Final progress update
