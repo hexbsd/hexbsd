@@ -164,6 +164,11 @@ class SSHConnectionManager {
 
         // Connect
         do {
+            // Test raw socket connectivity first
+            print("DEBUG: Testing raw socket connectivity to \(host):\(port)...")
+            let socketTestResult = await testSocketConnectivity(host: host, port: port)
+            print("DEBUG: Socket test result: \(socketTestResult)")
+
             print("DEBUG: Connecting to SSH server...")
             self.client = try await SSHClient.connect(to: settings)
             print("DEBUG: Connection successful!")
@@ -254,6 +259,111 @@ class SSHConnectionManager {
         self.client = nil
         self.isConnected = false
         self.serverAddress = ""
+    }
+
+    /// Test raw socket connectivity to diagnose connection issues
+    private func testSocketConnectivity(host: String, port: Int) async -> String {
+        return await Task.detached {
+            var result = ""
+
+            // Get address info
+            var hints = addrinfo()
+            hints.ai_family = AF_UNSPEC  // Allow both IPv4 and IPv6
+            hints.ai_socktype = SOCK_STREAM
+            hints.ai_protocol = IPPROTO_TCP
+
+            var addrInfoPtr: UnsafeMutablePointer<addrinfo>?
+            let portStr = String(port)
+
+            let gaiResult = getaddrinfo(host, portStr, &hints, &addrInfoPtr)
+            if gaiResult != 0 {
+                if let errorStr = gai_strerror(gaiResult) {
+                    result += "getaddrinfo failed: \(String(cString: errorStr))"
+                } else {
+                    result += "getaddrinfo failed with code \(gaiResult)"
+                }
+                return result
+            }
+
+            guard let addrInfo = addrInfoPtr else {
+                return "No address info returned"
+            }
+            defer { freeaddrinfo(addrInfo) }
+
+            // Try each address
+            var current: UnsafeMutablePointer<addrinfo>? = addrInfo
+            var addressIndex = 0
+
+            while let addr = current {
+                addressIndex += 1
+                let family = addr.pointee.ai_family == AF_INET ? "IPv4" : "IPv6"
+
+                // Get the IP string
+                var ipStr = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+                if addr.pointee.ai_family == AF_INET {
+                    var addr4 = addr.pointee.ai_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+                    inet_ntop(AF_INET, &addr4.sin_addr, &ipStr, socklen_t(INET_ADDRSTRLEN))
+                } else {
+                    var addr6 = addr.pointee.ai_addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
+                    inet_ntop(AF_INET6, &addr6.sin6_addr, &ipStr, socklen_t(INET6_ADDRSTRLEN))
+                }
+                let ipString = String(cString: ipStr)
+
+                result += "[\(addressIndex)] \(family) \(ipString):\(port) - "
+
+                // Create socket
+                let sock = Darwin.socket(addr.pointee.ai_family, addr.pointee.ai_socktype, addr.pointee.ai_protocol)
+                if sock < 0 {
+                    result += "socket() failed: errno \(errno)\n"
+                    current = addr.pointee.ai_next
+                    continue
+                }
+
+                // Set non-blocking for timeout
+                let flags = fcntl(sock, F_GETFL, 0)
+                _ = fcntl(sock, F_SETFL, flags | O_NONBLOCK)
+
+                // Try to connect
+                let connectResult = Darwin.connect(sock, addr.pointee.ai_addr, addr.pointee.ai_addrlen)
+
+                if connectResult == 0 {
+                    result += "SUCCESS (immediate)\n"
+                    Darwin.close(sock)
+                    current = addr.pointee.ai_next
+                    continue
+                }
+
+                if errno == EINPROGRESS {
+                    // Connection in progress, wait with poll instead of select (simpler in Swift)
+                    var pfd = pollfd(fd: sock, events: Int16(POLLOUT), revents: 0)
+                    let pollResult = poll(&pfd, 1, 5000)  // 5 second timeout
+
+                    if pollResult > 0 {
+                        // Check if connection succeeded
+                        var optval: Int32 = 0
+                        var optlen = socklen_t(MemoryLayout<Int32>.size)
+                        getsockopt(sock, SOL_SOCKET, SO_ERROR, &optval, &optlen)
+
+                        if optval == 0 {
+                            result += "SUCCESS\n"
+                        } else {
+                            result += "connect failed: errno \(optval) (\(String(cString: strerror(optval))))\n"
+                        }
+                    } else if pollResult == 0 {
+                        result += "TIMEOUT\n"
+                    } else {
+                        result += "poll failed: errno \(errno)\n"
+                    }
+                } else {
+                    result += "connect failed: errno \(errno) (\(String(cString: strerror(errno))))\n"
+                }
+
+                Darwin.close(sock)
+                current = addr.pointee.ai_next
+            }
+
+            return result.isEmpty ? "No addresses to test" : result
+        }.value
     }
 
     /// Execute a command on the remote server
