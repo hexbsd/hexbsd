@@ -1754,11 +1754,22 @@ struct TemplatesTabView: View {
 
 struct JailSetupWizardView: View {
     @ObservedObject var viewModel: JailsViewModel
-    @State private var zfsDataset = "zroot/jails"
-    @State private var basePath = "/jails"
+    @State private var selectedPool: ZFSPool?
+    @State private var datasetName = "jails"
+    @State private var pools: [ZFSPool] = []
+    @State private var isLoadingPools = false
     @State private var isSettingUp = false
     @State private var setupOutput = ""
     @State private var setupError: String?
+
+    private var zfsDataset: String {
+        guard let pool = selectedPool else { return "" }
+        return "\(pool.name)/\(datasetName)"
+    }
+
+    private var basePath: String {
+        "/\(datasetName)"
+    }
 
     var body: some View {
         VStack(spacing: 24) {
@@ -1803,13 +1814,56 @@ struct JailSetupWizardView: View {
             // Setup form
             Form {
                 Section("ZFS Configuration") {
-                    TextField("ZFS Dataset", text: $zfsDataset)
-                        .textFieldStyle(.roundedBorder)
-                    TextField("Mount Path", text: $basePath)
-                        .textFieldStyle(.roundedBorder)
-                    Text("Will create: \(zfsDataset)/templates, \(zfsDataset)/media, \(zfsDataset)/containers")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    if isLoadingPools {
+                        HStack {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                            Text("Loading ZFS pools...")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    } else if pools.isEmpty {
+                        HStack {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(.orange)
+                            Text("No ZFS pools found")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button("Retry") {
+                                Task { await loadPools() }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    } else {
+                        Picker("ZFS Pool:", selection: $selectedPool) {
+                            Text("Select a pool...").tag(nil as ZFSPool?)
+                            ForEach(pools) { pool in
+                                HStack {
+                                    Text(pool.name)
+                                    Spacer()
+                                    Text("\(pool.free) free of \(pool.size)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                .tag(pool as ZFSPool?)
+                            }
+                        }
+                        .pickerStyle(.menu)
+
+                        TextField("Dataset Name:", text: $datasetName)
+                            .textFieldStyle(.roundedBorder)
+
+                        if !zfsDataset.isEmpty {
+                            Text("Will create: \(zfsDataset)/templates, \(zfsDataset)/media, \(zfsDataset)/containers")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text("Mount path: \(basePath)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -1823,7 +1877,7 @@ struct JailSetupWizardView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(isSettingUp || zfsDataset.isEmpty)
+                .disabled(isSettingUp || zfsDataset.isEmpty || selectedPool == nil)
             }
 
             // Error display
@@ -1873,6 +1927,23 @@ struct JailSetupWizardView: View {
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear {
+            Task { await loadPools() }
+        }
+    }
+
+    private func loadPools() async {
+        isLoadingPools = true
+        setupError = nil
+
+        pools = await viewModel.listZFSPools()
+
+        // Auto-select if only one pool
+        if pools.count == 1 {
+            selectedPool = pools.first
+        }
+
+        isLoadingPools = false
     }
 
     private func performSetup() async {
@@ -1883,7 +1954,7 @@ struct JailSetupWizardView: View {
         do {
             // Step 1: Create ZFS datasets if needed
             if !viewModel.jailSetupStatus.directoriesExist {
-                setupOutput += "Creating ZFS datasets...\n"
+                setupOutput += "Creating ZFS datasets at \(zfsDataset) (mount: \(basePath))...\n"
                 let output = try await viewModel.setupJailDirectories(basePath: basePath, zfsDataset: zfsDataset)
                 setupOutput += output + "\n"
             }
@@ -2020,6 +2091,16 @@ class JailsViewModel: ObservableObject {
             templates = try await sshManager.listJailTemplates()
         } catch {
             print("Failed to load templates: \(error.localizedDescription)")
+        }
+    }
+
+    /// List available ZFS pools
+    func listZFSPools() async -> [ZFSPool] {
+        do {
+            return try await sshManager.listZFSPoolsForVMSetup()
+        } catch {
+            self.error = "Failed to list ZFS pools: \(error.localizedDescription)"
+            return []
         }
     }
 

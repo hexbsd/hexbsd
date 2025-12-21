@@ -792,13 +792,17 @@ class VMsViewModel: ObservableObject {
             templatesInstalled = info.templatesInstalled
             firmwareInstalled = info.firmwareInstalled
 
-            if isInstalled && serviceEnabled {
+            // Only try to list VMs if setup is complete
+            if setupComplete {
                 vms = try await sshManager.listVirtualMachines()
             } else {
                 vms = []
             }
         } catch {
-            self.error = "Failed to load virtual machines: \(error.localizedDescription)"
+            // Don't show errors about loading VMs if setup isn't complete yet
+            if setupComplete {
+                self.error = "Failed to load virtual machines: \(error.localizedDescription)"
+            }
             vms = []
         }
 
