@@ -109,9 +109,13 @@ struct VirtualMachine: Identifiable, Hashable {
         hasher.combine(name)
     }
 
-    // Custom Equatable implementation based on name
+    // Custom Equatable implementation - includes state for proper UI updates
     static func == (lhs: VirtualMachine, rhs: VirtualMachine) -> Bool {
-        lhs.name == rhs.name
+        lhs.name == rhs.name &&
+        lhs.state == rhs.state &&
+        lhs.vnc == rhs.vnc &&
+        lhs.console == rhs.console &&
+        lhs.autostart == rhs.autostart
     }
 
     var statusIcon: String {
@@ -161,6 +165,9 @@ struct VMsContentView: View {
                     HStack {
                         Button(action: {
                             embeddedVNCVM = nil
+                            Task {
+                                await viewModel.loadVMs()
+                            }
                         }) {
                             Label("Back to VMs", systemImage: "chevron.left")
                         }
@@ -325,19 +332,6 @@ struct VMsContentView: View {
                                 .tint(.red)
                             }
                         }
-
-                        Divider()
-                            .frame(height: 20)
-                            .padding(.horizontal, 8)
-
-                        Button(action: {
-                            Task {
-                                await viewModel.refresh()
-                            }
-                        }) {
-                            Label("Refresh", systemImage: "arrow.clockwise")
-                        }
-                        .buttonStyle(.bordered)
                     }
                     .padding()
 
@@ -412,6 +406,14 @@ struct VMsContentView: View {
         }
         .sheet(isPresented: $showISOManagement) {
             ISOManagementSheet(viewModel: viewModel)
+        }
+        .onChange(of: viewModel.vms) { _, newVMs in
+            // Update selectedVM to the matching VM from the refreshed list
+            // This ensures the toolbar reflects the current VM state
+            if let selected = selectedVM,
+               let updated = newVMs.first(where: { $0.name == selected.name }) {
+                selectedVM = updated
+            }
         }
         .onAppear {
             Task {
@@ -818,10 +820,6 @@ class VMsViewModel: ObservableObject {
         isLoading = false
     }
 
-    func refresh() async {
-        await loadVMs()
-    }
-
     func startVM(name: String) async {
         // Confirm start
         let alert = NSAlert()
@@ -1212,7 +1210,7 @@ struct VMCreateSheet: View {
     @State private var datastore: String = "default"
     @State private var diskSize: String = "20G"
     @State private var cpuCount: String = "2"
-    @State private var memory: String = "2G"
+    @State private var memory: String = "4G"
     @State private var isCreating = false
     @State private var selectedISO: ISOImage?
     @State private var availableISOs: [ISOImage] = []
@@ -1253,7 +1251,7 @@ struct VMCreateSheet: View {
                     TextField("CPU Cores:", text: $cpuCount)
                         .textFieldStyle(.roundedBorder)
 
-                    TextField("Memory (e.g., 2G, 512M):", text: $memory)
+                    TextField("Memory (e.g., 4G, 512M):", text: $memory)
                         .textFieldStyle(.roundedBorder)
 
                     TextField("Disk Size (e.g., 20G, 50G):", text: $diskSize)
