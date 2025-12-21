@@ -1085,14 +1085,12 @@ class VMsViewModel: ObservableObject {
 
         do {
             let fileName = localURL.lastPathComponent
-            let tempPath = "/tmp/\(fileName)"
 
             // Get file size
             let fileAttributes = try FileManager.default.attributesOfItem(atPath: localURL.path)
             let fileSize = fileAttributes[.size] as? Int64 ?? 0
 
             print("DEBUG: Starting ISO upload: \(fileName)")
-            print("DEBUG: Temp path: \(tempPath)")
             print("DEBUG: File size: \(fileSize) bytes")
 
             // Check for cancellation
@@ -1101,15 +1099,39 @@ class VMsViewModel: ObservableObject {
                 return
             }
 
-            // ========== STEP 1: Upload to /tmp ==========
-            print("DEBUG: Step 1/2: Uploading to temp location...")
-            detailedProgress(0, fileSize, "", "Step 1/2: Uploading to server...")
+            // Get the VM directory path (same logic as deleteISO)
+            let vmDirOutput = try await sshManager.executeCommand("sysrc -n vm_dir 2>/dev/null || echo '/zroot/vms'")
+            var vmDirPath = vmDirOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Handle zfs: prefix - need to get the actual mountpoint
+            if vmDirPath.hasPrefix("zfs:") {
+                let dataset = String(vmDirPath.dropFirst(4))
+                // Get the ZFS mountpoint
+                let mountOutput = try await sshManager.executeCommand("zfs get -H -o value mountpoint \(dataset) 2>/dev/null || echo '/\(dataset)'")
+                vmDirPath = mountOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+
+            // Ensure .iso directory exists
+            let isoDir = "\(vmDirPath)/.iso"
+            _ = try await sshManager.executeCommand("mkdir -p '\(isoDir)'")
+
+            let remotePath = "\(isoDir)/\(fileName)"
+            print("DEBUG: Uploading directly to: \(remotePath)")
+
+            // Check for cancellation
+            if cancelCheck() {
+                print("DEBUG: Upload cancelled before transfer")
+                return
+            }
+
+            // Upload directly to the datastore's .iso directory
+            detailedProgress(0, fileSize, "", "Uploading ISO...")
 
             try await sshManager.uploadFile(
                 localURL: localURL,
-                remotePath: tempPath,
+                remotePath: remotePath,
                 detailedProgressCallback: { transferred, total, rate in
-                    detailedProgress(transferred, total, rate, "Step 1/2: Uploading to server...")
+                    detailedProgress(transferred, total, rate, "Uploading ISO...")
                 },
                 cancelCheck: cancelCheck
             )
@@ -1117,42 +1139,12 @@ class VMsViewModel: ObservableObject {
             // Check for cancellation
             if cancelCheck() {
                 print("DEBUG: Upload cancelled after transfer")
-                _ = try? await sshManager.executeCommand("rm -f \(tempPath)")
+                _ = try? await sshManager.executeCommand("rm -f '\(remotePath)'")
                 return
             }
 
-            // ========== STEP 2: Import with vm iso ==========
-            print("DEBUG: Step 2/2: Importing with vm iso...")
-
-            // Show animated progress during import (5 seconds)
-            let importTask = Task {
-                do {
-                    _ = try await sshManager.executeCommand("vm iso \(tempPath)")
-                    print("DEBUG: vm iso command completed")
-                } catch {
-                    print("DEBUG: vm iso returned error (may be normal): \(error)")
-                }
-                // Clean up temp file
-                _ = try? await sshManager.executeCommand("rm -f \(tempPath)")
-                print("DEBUG: Temp file cleaned up")
-            }
-
-            // Animate progress for 5 seconds while import runs
-            for i in 0..<5 {
-                if cancelCheck() {
-                    importTask.cancel()
-                    return
-                }
-                let progress = Int64((Double(i + 1) / 5.0) * Double(fileSize))
-                detailedProgress(progress, fileSize, "", "Step 2/2: Importing ISO...")
-                try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
-            }
-
-            // Wait for import to finish if it hasn't already
-            await importTask.value
-
             // Mark as complete
-            print("DEBUG: Upload and import complete!")
+            print("DEBUG: Upload complete!")
             detailedProgress(fileSize, fileSize, "", "Complete!")
 
             // Give UI a moment to show completion before dismissing
@@ -1898,7 +1890,7 @@ struct UploadISOSheet: View {
         transferredBytes = 0
         totalBytes = 0
         transferRate = ""
-        uploadPhase = "Uploading to server..."
+        uploadPhase = "Uploading ISO..."
 
         await viewModel.uploadISO(
             localURL: url,
@@ -1908,14 +1900,7 @@ struct UploadISOSheet: View {
                     self.totalBytes = total
                     self.transferRate = rate
                     self.uploadPhase = phase
-                    // Step 1 uses 0-90%, Step 2 uses 90-100%
-                    if phase.contains("Step 1") {
-                        self.uploadProgress = total > 0 ? Double(transferred) / Double(total) * 0.9 : 0
-                    } else if phase.contains("Step 2") {
-                        self.uploadProgress = total > 0 ? 0.9 + (Double(transferred) / Double(total) * 0.1) : 0.9
-                    } else {
-                        self.uploadProgress = total > 0 ? Double(transferred) / Double(total) : 0
-                    }
+                    self.uploadProgress = total > 0 ? Double(transferred) / Double(total) : 0
                 }
             },
             cancelCheck: { self.uploadCancelled }
