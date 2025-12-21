@@ -1821,6 +1821,9 @@ struct CreateBridgeSheet: View {
             .padding()
         }
         .frame(width: 500, height: 550)
+        .onAppear {
+            bridgeName = viewModel.suggestedBridgeName
+        }
     }
 
     private func createBridge() async {
@@ -2529,6 +2532,18 @@ class BridgesViewModel: ObservableObject {
     @Published var error: String?
 
     private let sshManager = SSHConnectionManager.shared
+
+    /// Suggests the next available bridge name (bridge0, bridge1, etc.)
+    var suggestedBridgeName: String {
+        let existingNames = Set(bridges.map { $0.name })
+        for i in 0...99 {
+            let name = "bridge\(i)"
+            if !existingNames.contains(name) {
+                return name
+            }
+        }
+        return "bridge0"
+    }
 
     func loadBridges() async {
         isLoading = true
