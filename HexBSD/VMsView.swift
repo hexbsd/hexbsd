@@ -195,36 +195,12 @@ struct VMsContentView: View {
                 VStack(spacing: 0) {
                     // Toolbar
                     HStack {
-                        // Only show status indicators if there are issues
-                        if !viewModel.isInstalled {
+                        // Only show status indicator if setup is incomplete
+                        if !viewModel.setupComplete {
                             HStack(spacing: 4) {
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundColor(.red)
-                                Text("vm-bhyve not found")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        } else if !viewModel.serviceEnabled {
-                            HStack(spacing: 4) {
-                                Image(systemName: "xmark.circle.fill")
+                                Image(systemName: "exclamationmark.circle.fill")
                                     .foregroundColor(.orange)
-                                Text("Service not enabled")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        } else if !viewModel.templatesInstalled {
-                            HStack(spacing: 4) {
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundColor(.orange)
-                                Text("Templates missing")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        } else if !viewModel.firmwareInstalled {
-                            HStack(spacing: 4) {
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundColor(.orange)
-                                Text("UEFI firmware missing")
+                                Text("Setup required")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -239,7 +215,7 @@ struct VMsContentView: View {
                             Label("New VM", systemImage: "plus.circle.fill")
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(!viewModel.isInstalled || !viewModel.serviceEnabled || !viewModel.templatesInstalled || !viewModel.firmwareInstalled)
+                        .disabled(!viewModel.setupComplete)
 
                         // Network switches button
                         Button(action: {
@@ -248,7 +224,7 @@ struct VMsContentView: View {
                             Label("Network Switches", systemImage: "network")
                         }
                         .buttonStyle(.bordered)
-                        .disabled(!viewModel.isInstalled || !viewModel.serviceEnabled)
+                        .disabled(!viewModel.setupComplete)
 
                         // ISO management button
                         Button(action: {
@@ -257,7 +233,7 @@ struct VMsContentView: View {
                             Label("ISOs", systemImage: "opticaldiscdrive")
                         }
                         .buttonStyle(.bordered)
-                        .disabled(!viewModel.isInstalled || !viewModel.serviceEnabled)
+                        .disabled(!viewModel.setupComplete)
 
                         if let vm = selectedVM {
                             Divider()
@@ -386,347 +362,9 @@ struct VMsContentView: View {
                                 .foregroundColor(.secondary)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if !viewModel.isInstalled {
-                        VStack(spacing: 20) {
-                            Image(systemName: "shippingbox")
-                                .font(.system(size: 72))
-                                .foregroundColor(.secondary)
-                            Text("vm-bhyve Not Installed")
-                                .font(.title)
-                                .foregroundColor(.secondary)
-                            Text("Install vm-bhyve and bhyve-firmware to manage virtual machines")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            HStack {
-                                Text("pkg install vm-bhyve bhyve-firmware")
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundColor(.blue)
-                                    .textSelection(.enabled)
-                                    .padding(8)
-                                    .background(Color(nsColor: .controlBackgroundColor))
-                                    .cornerRadius(6)
-                                Button(action: {
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString("pkg install vm-bhyve bhyve-firmware", forType: .string)
-                                }) {
-                                    Image(systemName: "doc.on.doc")
-                                }
-                                .buttonStyle(.borderless)
-                                .help("Copy to clipboard")
-                            }
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if !viewModel.serviceEnabled {
-                        VStack(spacing: 20) {
-                            Image(systemName: "exclamationmark.triangle")
-                                .font(.system(size: 72))
-                                .foregroundColor(.orange)
-                            Text("vm-bhyve Service Not Enabled")
-                                .font(.title)
-                                .foregroundColor(.secondary)
-                            Text("Setup and enable the vm-bhyve service to manage virtual machines")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.center)
-
-                            VStack(alignment: .leading, spacing: 12) {
-                                Text("Setup Steps:")
-                                    .font(.headline)
-                                    .foregroundColor(.primary)
-
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text("1. Create ZFS dataset and set VM directory:")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    HStack {
-                                        Text("zfs create zroot/vm")
-                                            .font(.system(.caption, design: .monospaced))
-                                            .foregroundColor(.blue)
-                                            .textSelection(.enabled)
-                                            .padding(8)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .background(Color(nsColor: .controlBackgroundColor))
-                                            .cornerRadius(6)
-                                        Button(action: {
-                                            NSPasteboard.general.clearContents()
-                                            NSPasteboard.general.setString("zfs create zroot/vm", forType: .string)
-                                        }) {
-                                            Image(systemName: "doc.on.doc")
-                                        }
-                                        .buttonStyle(.borderless)
-                                        .help("Copy to clipboard")
-                                    }
-                                    HStack {
-                                        Text("sysrc vm_dir=\"zfs:zroot/vm\"")
-                                            .font(.system(.caption, design: .monospaced))
-                                            .foregroundColor(.blue)
-                                            .textSelection(.enabled)
-                                            .padding(8)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .background(Color(nsColor: .controlBackgroundColor))
-                                            .cornerRadius(6)
-                                        Button(action: {
-                                            NSPasteboard.general.clearContents()
-                                            NSPasteboard.general.setString("sysrc vm_dir=\"zfs:zroot/vm\"", forType: .string)
-                                        }) {
-                                            Image(systemName: "doc.on.doc")
-                                        }
-                                        .buttonStyle(.borderless)
-                                        .help("Copy to clipboard")
-                                    }
-                                    Text("Or for a regular directory:")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .padding(.leading, 8)
-                                    HStack {
-                                        Text("mkdir -p /vm && sysrc vm_dir=\"/vm\"")
-                                            .font(.system(.caption, design: .monospaced))
-                                            .foregroundColor(.blue)
-                                            .textSelection(.enabled)
-                                            .padding(8)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .background(Color(nsColor: .controlBackgroundColor))
-                                            .cornerRadius(6)
-                                        Button(action: {
-                                            NSPasteboard.general.clearContents()
-                                            NSPasteboard.general.setString("mkdir -p /vm && sysrc vm_dir=\"/vm\"", forType: .string)
-                                        }) {
-                                            Image(systemName: "doc.on.doc")
-                                        }
-                                        .buttonStyle(.borderless)
-                                        .help("Copy to clipboard")
-                                    }
-
-                                    Text("2. Enable the service:")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .padding(.top, 4)
-                                    HStack {
-                                        Text("sysrc vm_enable=\"YES\"")
-                                            .font(.system(.caption, design: .monospaced))
-                                            .foregroundColor(.blue)
-                                            .textSelection(.enabled)
-                                            .padding(8)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .background(Color(nsColor: .controlBackgroundColor))
-                                            .cornerRadius(6)
-                                        Button(action: {
-                                            NSPasteboard.general.clearContents()
-                                            NSPasteboard.general.setString("sysrc vm_enable=\"YES\"", forType: .string)
-                                        }) {
-                                            Image(systemName: "doc.on.doc")
-                                        }
-                                        .buttonStyle(.borderless)
-                                        .help("Copy to clipboard")
-                                    }
-
-                                    Text("3. Initialize vm-bhyve:")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .padding(.top, 4)
-                                    HStack {
-                                        Text("vm init")
-                                            .font(.system(.caption, design: .monospaced))
-                                            .foregroundColor(.blue)
-                                            .textSelection(.enabled)
-                                            .padding(8)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .background(Color(nsColor: .controlBackgroundColor))
-                                            .cornerRadius(6)
-                                        Button(action: {
-                                            NSPasteboard.general.clearContents()
-                                            NSPasteboard.general.setString("vm init", forType: .string)
-                                        }) {
-                                            Image(systemName: "doc.on.doc")
-                                        }
-                                        .buttonStyle(.borderless)
-                                        .help("Copy to clipboard")
-                                    }
-
-                                    Text("4. Copy example templates:")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .padding(.top, 4)
-
-                                    let templateCmd = !viewModel.vmDir.isEmpty ? "cp /usr/local/share/examples/vm-bhyve/* \(viewModel.vmDir)/.templates/" : "cp /usr/local/share/examples/vm-bhyve/* /zroot/vm/.templates/"
-
-                                    HStack {
-                                        Text(templateCmd)
-                                            .font(.system(.caption, design: .monospaced))
-                                            .foregroundColor(.blue)
-                                            .textSelection(.enabled)
-                                            .padding(8)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .background(Color(nsColor: .controlBackgroundColor))
-                                            .cornerRadius(6)
-                                        Button(action: {
-                                            NSPasteboard.general.clearContents()
-                                            NSPasteboard.general.setString(templateCmd, forType: .string)
-                                        }) {
-                                            Image(systemName: "doc.on.doc")
-                                        }
-                                        .buttonStyle(.borderless)
-                                        .help("Copy to clipboard")
-                                    }
-
-                                    Text("5. Start the service:")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .padding(.top, 4)
-                                    HStack {
-                                        Text("service vm start")
-                                            .font(.system(.caption, design: .monospaced))
-                                            .foregroundColor(.blue)
-                                            .textSelection(.enabled)
-                                            .padding(8)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .background(Color(nsColor: .controlBackgroundColor))
-                                            .cornerRadius(6)
-                                        Button(action: {
-                                            NSPasteboard.general.clearContents()
-                                            NSPasteboard.general.setString("service vm start", forType: .string)
-                                        }) {
-                                            Image(systemName: "doc.on.doc")
-                                        }
-                                        .buttonStyle(.borderless)
-                                        .help("Copy to clipboard")
-                                    }
-
-                                    Text("6. Install UEFI firmware (required for modern VMs):")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .padding(.top, 4)
-                                    HStack {
-                                        Text("pkg install bhyve-firmware")
-                                            .font(.system(.caption, design: .monospaced))
-                                            .foregroundColor(.blue)
-                                            .textSelection(.enabled)
-                                            .padding(8)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .background(Color(nsColor: .controlBackgroundColor))
-                                            .cornerRadius(6)
-                                        Button(action: {
-                                            NSPasteboard.general.clearContents()
-                                            NSPasteboard.general.setString("pkg install bhyve-firmware", forType: .string)
-                                        }) {
-                                            Image(systemName: "doc.on.doc")
-                                        }
-                                        .buttonStyle(.borderless)
-                                        .help("Copy to clipboard")
-                                    }
-                                }
-                            }
-                            .padding(.horizontal, 40)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if !viewModel.templatesInstalled {
-                        VStack(spacing: 20) {
-                            Image(systemName: "doc.on.doc")
-                                .font(.system(size: 72))
-                                .foregroundColor(.orange)
-                            Text("VM Templates Not Installed")
-                                .font(.title)
-                                .foregroundColor(.secondary)
-                            Text("Copy the example templates to create virtual machines")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.center)
-
-                            VStack(alignment: .leading, spacing: 12) {
-                                Text("Installation:")
-                                    .font(.headline)
-                                    .foregroundColor(.primary)
-
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text("Copy example templates from vm-bhyve installation:")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-
-                                    let templateCmd = "cp /usr/local/share/examples/vm-bhyve/* \(viewModel.vmDir)/.templates/"
-
-                                    HStack {
-                                        Text(templateCmd)
-                                            .font(.system(.caption, design: .monospaced))
-                                            .foregroundColor(.blue)
-                                            .textSelection(.enabled)
-                                            .padding(8)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .background(Color(nsColor: .controlBackgroundColor))
-                                            .cornerRadius(6)
-                                        Button(action: {
-                                            NSPasteboard.general.clearContents()
-                                            NSPasteboard.general.setString(templateCmd, forType: .string)
-                                        }) {
-                                            Image(systemName: "doc.on.doc")
-                                        }
-                                        .buttonStyle(.borderless)
-                                        .help("Copy to clipboard")
-                                    }
-
-                                    Text("Then refresh this page to continue.")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .padding(.top, 4)
-                                }
-                            }
-                            .padding(.horizontal, 40)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if !viewModel.firmwareInstalled {
-                        VStack(spacing: 20) {
-                            Image(systemName: "cpu")
-                                .font(.system(size: 72))
-                                .foregroundColor(.orange)
-                            Text("UEFI Firmware Not Installed")
-                                .font(.title)
-                                .foregroundColor(.secondary)
-                            Text("Install bhyve-firmware package for UEFI support")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.center)
-
-                            VStack(alignment: .leading, spacing: 12) {
-                                Text("Installation:")
-                                    .font(.headline)
-                                    .foregroundColor(.primary)
-
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text("Install the bhyve-firmware package:")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-
-                                    HStack {
-                                        Text("pkg install bhyve-firmware")
-                                            .font(.system(.caption, design: .monospaced))
-                                            .foregroundColor(.blue)
-                                            .textSelection(.enabled)
-                                            .padding(8)
-                                            .background(Color(nsColor: .controlBackgroundColor))
-                                            .cornerRadius(6)
-                                        Button(action: {
-                                            NSPasteboard.general.clearContents()
-                                            NSPasteboard.general.setString("pkg install bhyve-firmware", forType: .string)
-                                        }) {
-                                            Image(systemName: "doc.on.doc")
-                                        }
-                                        .buttonStyle(.borderless)
-                                        .help("Copy to clipboard")
-                                    }
-
-                                    Text("This package provides UEFI firmware required for modern operating systems.")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .padding(.top, 4)
-
-                                    Text("Then refresh this page to continue.")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .padding(.top, 4)
-                                }
-                            }
-                            .padding(.horizontal, 40)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if !viewModel.setupComplete {
+                        // Show setup wizard when any requirement is missing
+                        BhyveSetupWizardView(viewModel: viewModel)
                     } else if viewModel.vms.isEmpty {
                         VStack(spacing: 20) {
                             Image(systemName: "desktopcomputer")
@@ -1118,6 +756,28 @@ class VMsViewModel: ObservableObject {
     @Published var firmwareInstalled = false
 
     private let sshManager = SSHConnectionManager.shared
+
+    /// Check if setup is complete (all requirements met)
+    var setupComplete: Bool {
+        isInstalled && serviceEnabled && templatesInstalled && firmwareInstalled
+    }
+
+    /// Setup vm-bhyve with streaming output
+    func setupVMBhyve(zfsDataset: String, onOutput: @escaping (String) -> Void) async throws {
+        try await sshManager.setupVMBhyveStreaming(zfsDataset: zfsDataset, onOutput: onOutput)
+        // Reload status after setup
+        await loadVMs()
+    }
+
+    /// List available ZFS pools
+    func listZFSPools() async -> [ZFSPool] {
+        do {
+            return try await sshManager.listZFSPoolsForVMSetup()
+        } catch {
+            self.error = "Failed to list ZFS pools: \(error.localizedDescription)"
+            return []
+        }
+    }
 
     func loadVMs() async {
         isLoading = true
@@ -2427,6 +2087,241 @@ struct UploadISOSheet: View {
         if viewModel.error == nil {
             onUploaded()
             dismiss()
+        }
+    }
+}
+
+// MARK: - Bhyve Setup Wizard View
+
+struct BhyveSetupWizardView: View {
+    @ObservedObject var viewModel: VMsViewModel
+    @State private var selectedPool: ZFSPool?
+    @State private var datasetName = "vms"
+    @State private var pools: [ZFSPool] = []
+    @State private var isLoadingPools = false
+    @State private var isSettingUp = false
+    @State private var setupOutput = ""
+    @State private var setupError: String?
+
+    private var zfsDataset: String {
+        guard let pool = selectedPool else { return "" }
+        return "\(pool.name)/\(datasetName)"
+    }
+
+    var body: some View {
+        VStack(spacing: 24) {
+            // Header
+            VStack(spacing: 8) {
+                Image(systemName: "desktopcomputer")
+                    .font(.system(size: 48))
+                    .foregroundColor(.blue)
+                Text("Virtual Machine Setup Required")
+                    .font(.title)
+                    .fontWeight(.semibold)
+                Text("Configure bhyve infrastructure before creating virtual machines")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.top, 20)
+
+            Divider()
+
+            // Status indicators
+            VStack(alignment: .leading, spacing: 12) {
+                VMStatusRow(
+                    title: "vm-bhyve",
+                    isComplete: viewModel.isInstalled,
+                    detail: viewModel.isInstalled ? "Installed" : "Not installed"
+                )
+                VMStatusRow(
+                    title: "bhyve-firmware",
+                    isComplete: viewModel.firmwareInstalled,
+                    detail: viewModel.firmwareInstalled ? "Installed" : "Not installed"
+                )
+                VMStatusRow(
+                    title: "VM Service",
+                    isComplete: viewModel.serviceEnabled,
+                    detail: viewModel.serviceEnabled ? "Enabled in rc.conf" : "Not enabled"
+                )
+                VMStatusRow(
+                    title: "VM Templates",
+                    isComplete: viewModel.templatesInstalled,
+                    detail: viewModel.templatesInstalled ? "Installed" : "Not installed"
+                )
+            }
+            .padding()
+            .background(Color(nsColor: .controlBackgroundColor))
+            .cornerRadius(8)
+
+            // Setup form
+            Form {
+                Section("ZFS Configuration") {
+                    if isLoadingPools {
+                        HStack {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                            Text("Loading ZFS pools...")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    } else if pools.isEmpty {
+                        HStack {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(.orange)
+                            Text("No ZFS pools found")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button("Retry") {
+                                Task { await loadPools() }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    } else {
+                        Picker("ZFS Pool:", selection: $selectedPool) {
+                            Text("Select a pool...").tag(nil as ZFSPool?)
+                            ForEach(pools) { pool in
+                                HStack {
+                                    Text(pool.name)
+                                    Spacer()
+                                    Text("\(pool.free) free of \(pool.size)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                .tag(pool as ZFSPool?)
+                            }
+                        }
+                        .pickerStyle(.menu)
+
+                        TextField("Dataset Name:", text: $datasetName)
+                            .textFieldStyle(.roundedBorder)
+
+                        if !zfsDataset.isEmpty {
+                            Text("Virtual machines will be stored in zfs:\(zfsDataset)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+            }
+            .formStyle(.grouped)
+
+            // Action button
+            HStack {
+                Spacer()
+                Button(isSettingUp ? "Setting up..." : "Complete Setup") {
+                    Task {
+                        await performSetup()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isSettingUp || zfsDataset.isEmpty || selectedPool == nil)
+            }
+
+            // Error display
+            if let error = setupError {
+                HStack {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                    Text(error)
+                        .font(.caption)
+                    Spacer()
+                }
+                .padding()
+                .background(Color.orange.opacity(0.1))
+                .cornerRadius(8)
+            }
+
+            // Output display - terminal-like view during operations
+            if !setupOutput.isEmpty || isSettingUp {
+                GroupBox {
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            Text(setupOutput.isEmpty ? "Starting..." : setupOutput)
+                                .font(.system(.caption, design: .monospaced))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                                .id("bottom")
+                        }
+                        .onChange(of: setupOutput) { _, _ in
+                            withAnimation {
+                                proxy.scrollTo("bottom", anchor: .bottom)
+                            }
+                        }
+                    }
+                    .frame(height: 200)
+                } label: {
+                    HStack {
+                        if isSettingUp {
+                            ProgressView()
+                                .scaleEffect(0.6)
+                        }
+                        Text("Terminal Output")
+                    }
+                }
+                .background(Color(nsColor: .textBackgroundColor))
+            }
+
+            Spacer()
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear {
+            Task { await loadPools() }
+        }
+    }
+
+    private func loadPools() async {
+        isLoadingPools = true
+        setupError = nil
+
+        pools = await viewModel.listZFSPools()
+
+        // Auto-select if only one pool
+        if pools.count == 1 {
+            selectedPool = pools.first
+        }
+
+        isLoadingPools = false
+    }
+
+    private func performSetup() async {
+        isSettingUp = true
+        setupError = nil
+        setupOutput = ""
+
+        do {
+            try await viewModel.setupVMBhyve(zfsDataset: zfsDataset) { output in
+                Task { @MainActor in
+                    setupOutput += output
+                }
+            }
+        } catch {
+            setupError = error.localizedDescription
+        }
+
+        isSettingUp = false
+    }
+}
+
+// MARK: - VM Status Row Helper
+
+private struct VMStatusRow: View {
+    let title: String
+    let isComplete: Bool
+    let detail: String
+
+    var body: some View {
+        HStack {
+            Image(systemName: isComplete ? "checkmark.circle.fill" : "xmark.circle")
+                .foregroundColor(isComplete ? .green : .orange)
+            Text(title)
+                .fontWeight(.medium)
+            Spacer()
+            Text(detail)
+                .foregroundColor(.secondary)
+                .font(.caption)
         }
     }
 }

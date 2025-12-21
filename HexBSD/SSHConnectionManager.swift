@@ -4903,24 +4903,41 @@ extension SSHConnectionManager {
         let serviceEnabled = serviceOutput.trimmingCharacters(in: .whitespacesAndNewlines) == "enabled"
 
         // Get VM directory from vm-bhyve config
-        // Handle both ZFS format (zfs:zroot/vm) and regular paths (/vm)
-        let vmDirCommand = "sysrc -n vm_dir 2>/dev/null | sed 's/^zfs:\\(.*\\)/\\/\\1/' || echo '/vm'"
-        let vmDir = try await executeCommand(vmDirCommand)
+        let vmDirRawCommand = "sysrc -n vm_dir 2>/dev/null || echo ''"
+        let vmDirRaw = try await executeCommand(vmDirRawCommand)
+        let vmDirRawTrimmed = vmDirRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        print("DEBUG: vm_dir raw value: '\(vmDirRawTrimmed)'")
+
+        // Get actual mountpoint - if ZFS dataset, query ZFS for mountpoint
+        var vmDir = vmDirRawTrimmed
+        if vmDirRawTrimmed.hasPrefix("zfs:") {
+            let dataset = String(vmDirRawTrimmed.dropFirst(4))
+            let mpCommand = "zfs get -H -o value mountpoint \(dataset) 2>/dev/null || echo ''"
+            let mountpoint = try await executeCommand(mpCommand)
+            vmDir = mountpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+            print("DEBUG: ZFS dataset '\(dataset)' mountpoint: '\(vmDir)'")
+        }
 
         // Check if example templates are installed (more than just default.conf)
-        let templatesCheckCommand = "ls \(vmDir.trimmingCharacters(in: .whitespacesAndNewlines))/.templates/*.conf 2>/dev/null | wc -l"
+        let templatesPath = "\(vmDir)/.templates"
+        let templatesCheckCommand = "ls \(templatesPath)/*.conf 2>/dev/null | wc -l"
+        print("DEBUG: Checking templates at: \(templatesPath)")
         let templatesCount = try await executeCommand(templatesCheckCommand)
-        let templatesInstalled = (Int(templatesCount.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) > 1
+        let templateCountInt = Int(templatesCount.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        print("DEBUG: Templates count: \(templateCountInt)")
+        let templatesInstalled = templateCountInt > 1
 
         // Check if bhyve-firmware is installed (required for UEFI support)
         let firmwareCheckCommand = "test -f /usr/local/share/uefi-firmware/BHYVE_UEFI.fd && echo 'installed' || echo 'not-installed'"
         let firmwareOutput = try await executeCommand(firmwareCheckCommand)
         let firmwareInstalled = firmwareOutput.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
 
+        print("DEBUG: checkVMBhyve - serviceEnabled: \(serviceEnabled), vmDir: \(vmDir), templatesInstalled: \(templatesInstalled), firmwareInstalled: \(firmwareInstalled)")
+
         return VMBhyveInfo(
             isInstalled: true,
             serviceEnabled: serviceEnabled,
-            vmDir: vmDir.trimmingCharacters(in: .whitespacesAndNewlines),
+            vmDir: vmDirRawTrimmed,  // Return the raw vm_dir (with zfs: prefix if applicable)
             templatesInstalled: templatesInstalled,
             firmwareInstalled: firmwareInstalled
         )
@@ -7040,5 +7057,203 @@ EOFPKG
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Route not found"])
         }
+    }
+
+    // MARK: - Bhyve Setup
+
+    /// List available ZFS pools on the server (for VM setup)
+    func listZFSPoolsForVMSetup() async throws -> [ZFSPool] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let output = try await executeCommand("zpool list -H -o name,size,alloc,free,frag,cap,health,altroot 2>&1")
+        var pools: [ZFSPool] = []
+
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
+            if parts.count >= 8 {
+                let name = String(parts[0])
+                let size = String(parts[1])
+                let allocated = String(parts[2])
+                let free = String(parts[3])
+                let fragmentation = String(parts[4])
+                let capacity = String(parts[5])
+                let health = String(parts[6])
+                let altroot = String(parts[7])
+                // Skip if it looks like an error message
+                if !name.contains("no pools") && !name.contains("error") {
+                    pools.append(ZFSPool(
+                        name: name,
+                        size: size,
+                        allocated: allocated,
+                        free: free,
+                        fragmentation: fragmentation,
+                        capacity: capacity,
+                        health: health,
+                        altroot: altroot
+                    ))
+                }
+            }
+        }
+
+        return pools
+    }
+
+    /// Setup bhyve/vm-bhyve with streaming output for progress display
+    func setupVMBhyveStreaming(
+        zfsDataset: String = "zroot/vms",
+        onOutput: @escaping (String) -> Void
+    ) async throws {
+        guard client != nil else {
+            let error = "Not connected to server"
+            onOutput("ERROR: \(error)\n")
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: error])
+        }
+
+        // Helper function to execute command with debug output
+        func runCommand(_ command: String, step: String) async throws -> String {
+            onOutput("DEBUG: Executing: \(command)\n")
+            do {
+                let result = try await executeCommand(command)
+                if !result.isEmpty {
+                    onOutput(result + "\n")
+                }
+                return result
+            } catch {
+                onOutput("ERROR in \(step): \(error.localizedDescription)\n")
+                throw error
+            }
+        }
+
+        // Extract pool name from dataset (e.g., "zroot/vms" -> "zroot")
+        let poolName = zfsDataset.split(separator: "/").first.map(String.init) ?? zfsDataset
+
+        // Always use /vms as the mountpoint for VMs
+        let mountpoint = "/vms"
+
+        onOutput("Pool: \(poolName), Dataset: \(zfsDataset), Mountpoint: \(mountpoint)\n\n")
+
+        // Step 1: Install packages
+        onOutput("Step 1: Installing vm-bhyve and bhyve-firmware packages...\n")
+        _ = try await runCommand("pkg install -y vm-bhyve bhyve-firmware 2>&1", step: "package install")
+
+        // Step 2: Create ZFS dataset
+        onOutput("\nStep 2: Creating ZFS dataset \(zfsDataset)...\n")
+        // Use a command that won't fail - check if dataset exists and output result
+        let zfsCheckOutput = try await runCommand("zfs list \(zfsDataset) >/dev/null 2>&1 && echo 'EXISTS' || echo 'NOT_FOUND'", step: "check dataset")
+        if zfsCheckOutput.contains("NOT_FOUND") {
+            onOutput("Creating dataset with mountpoint: \(mountpoint)\n")
+            _ = try await runCommand("zfs create -o mountpoint=\(mountpoint) \(zfsDataset) 2>&1", step: "create dataset")
+            onOutput("Created ZFS dataset: \(zfsDataset)\n")
+        } else {
+            onOutput("ZFS dataset \(zfsDataset) already exists\n")
+            // Ensure mountpoint is set correctly
+            let currentMp = try await runCommand("zfs get -H -o value mountpoint \(zfsDataset)", step: "check mountpoint")
+            if currentMp.trimmingCharacters(in: .whitespacesAndNewlines) != mountpoint {
+                onOutput("Updating mountpoint to \(mountpoint)...\n")
+                _ = try await runCommand("zfs set mountpoint=\(mountpoint) \(zfsDataset) 2>&1", step: "set mountpoint")
+            }
+        }
+
+        // Step 3: Configure vm_dir
+        onOutput("\nStep 3: Configuring vm_dir...\n")
+        _ = try await runCommand("sysrc vm_dir=\"zfs:\(zfsDataset)\" 2>&1", step: "configure vm_dir")
+
+        // Step 4: Enable vm service
+        onOutput("\nStep 4: Enabling vm service...\n")
+        _ = try await runCommand("sysrc vm_enable=\"YES\" 2>&1", step: "enable service")
+
+        // Step 5: Initialize vm-bhyve
+        onOutput("\nStep 5: Initializing vm-bhyve...\n")
+        let initOutput = try await runCommand("vm init 2>&1", step: "vm init")
+        if initOutput.isEmpty {
+            onOutput("vm-bhyve initialized\n")
+        }
+
+        // Step 6: Copy templates
+        onOutput("\nStep 6: Copying example templates...\n")
+        let templatesDir = "\(mountpoint)/.templates"
+        onOutput("Templates directory: \(templatesDir)\n")
+
+        // Ensure templates directory exists
+        _ = try await runCommand("mkdir -p \(templatesDir)", step: "create templates dir")
+
+        let copyOutput = try await runCommand("cp /usr/local/share/examples/vm-bhyve/* \(templatesDir)/ 2>&1", step: "copy templates")
+        if copyOutput.isEmpty {
+            let templatesList = try await runCommand("ls \(templatesDir)/*.conf 2>/dev/null | wc -l", step: "count templates")
+            let count = templatesList.trimmingCharacters(in: .whitespacesAndNewlines)
+            onOutput("Copied \(count) template(s) to \(templatesDir)/\n")
+        }
+
+        // Step 7: Start the service
+        onOutput("\nStep 7: Starting vm service...\n")
+        let startOutput = try await runCommand("service vm start 2>&1", step: "start service")
+        if startOutput.isEmpty {
+            onOutput("vm service started\n")
+        }
+
+        onOutput("\n✓ Setup complete!\n")
+    }
+
+    /// Check if specific bhyve setup step is complete
+    func checkVMBhyveSetupStatus() async throws -> (
+        packagesInstalled: Bool,
+        zfsExists: Bool,
+        vmDirConfigured: Bool,
+        serviceEnabled: Bool,
+        templatesInstalled: Bool,
+        firmwareInstalled: Bool
+    ) {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Check packages
+        let pkgCheck = try await executeCommand("pkg info vm-bhyve 2>/dev/null && echo 'installed' || echo 'not-installed'")
+        let packagesInstalled = pkgCheck.contains("installed") && !pkgCheck.contains("not-installed")
+
+        // Check ZFS dataset
+        let vmDirOutput = try await executeCommand("sysrc -n vm_dir 2>/dev/null || echo ''")
+        let vmDir = vmDirOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        var zfsExists = false
+        if vmDir.hasPrefix("zfs:") {
+            let dataset = String(vmDir.dropFirst(4))
+            let zfsCheck = try await executeCommand("zfs list \(dataset) 2>&1")
+            zfsExists = !zfsCheck.contains("dataset does not exist")
+        } else if !vmDir.isEmpty {
+            let dirCheck = try await executeCommand("test -d \(vmDir) && echo 'exists' || echo 'missing'")
+            zfsExists = dirCheck.contains("exists")
+        }
+
+        // Check vm_dir configured
+        let vmDirConfigured = !vmDir.isEmpty
+
+        // Check service enabled
+        let serviceCheck = try await executeCommand("grep -q '^vm_enable=\"YES\"' /etc/rc.conf && echo 'enabled' || echo 'disabled'")
+        let serviceEnabled = serviceCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "enabled"
+
+        // Check templates
+        let mountPoint: String
+        if vmDir.hasPrefix("zfs:") {
+            let dataset = String(vmDir.dropFirst(4))
+            let mpOutput = try await executeCommand("zfs get -H -o value mountpoint \(dataset) 2>/dev/null || echo ''")
+            mountPoint = mpOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            mountPoint = vmDir
+        }
+
+        let templatesCheck = try await executeCommand("ls \(mountPoint)/.templates/*.conf 2>/dev/null | wc -l")
+        let templatesCount = Int(templatesCheck.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        let templatesInstalled = templatesCount > 1
+
+        // Check firmware
+        let firmwareCheck = try await executeCommand("test -f /usr/local/share/uefi-firmware/BHYVE_UEFI.fd && echo 'installed' || echo 'not-installed'")
+        let firmwareInstalled = firmwareCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
+
+        return (packagesInstalled, zfsExists, vmDirConfigured, serviceEnabled, templatesInstalled, firmwareInstalled)
     }
 }
