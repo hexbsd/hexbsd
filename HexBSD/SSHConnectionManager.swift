@@ -6249,6 +6249,10 @@ EOFPKG
                 type = .wireless
             } else if name.hasPrefix("bridge") {
                 type = .bridge
+            } else if name.hasPrefix("tap") {
+                type = .tap
+            } else if name.hasPrefix("epair") {
+                type = .epair
             } else if name.hasPrefix("vlan") || name.contains(".") {
                 type = .vlan
             } else if name.hasPrefix("lagg") {
@@ -6930,6 +6934,36 @@ EOFPKG
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
         }
+    }
+
+    /// Destroy a cloned interface (bridge, tap, epair, vlan, lagg)
+    func destroyClonedInterface(_ name: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Bring down and destroy the interface
+        _ = try await executeCommand("ifconfig \(name) down 2>&1")
+        let output = try await executeCommand("ifconfig \(name) destroy 2>&1")
+
+        if output.contains("Permission denied") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
+        }
+
+        if output.contains("does not exist") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Interface \(name) does not exist"])
+        }
+
+        if output.contains("Invalid argument") || output.contains("Operation not supported") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Interface \(name) cannot be destroyed (not a cloned interface)"])
+        }
+
+        // Remove any rc.conf entries for this interface
+        _ = try await executeCommand("sysrc -x ifconfig_\(name) 2>/dev/null || true")
     }
 
     // MARK: - Routing Management

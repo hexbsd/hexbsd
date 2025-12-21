@@ -14,6 +14,8 @@ enum InterfaceType: String, CaseIterable {
     case ethernet = "Ethernet"
     case wireless = "Wireless"
     case bridge = "Bridge"
+    case tap = "TAP"
+    case epair = "Epair"
     case loopback = "Loopback"
     case vlan = "VLAN"
     case lagg = "LAGG"
@@ -24,6 +26,8 @@ enum InterfaceType: String, CaseIterable {
         case .ethernet: return "cable.connector"
         case .wireless: return "wifi"
         case .bridge: return "point.3.connected.trianglepath.dotted"
+        case .tap: return "arrow.up.arrow.down.circle"
+        case .epair: return "arrow.left.arrow.right.circle"
         case .loopback: return "arrow.triangle.2.circlepath"
         case .vlan: return "tag"
         case .lagg: return "link"
@@ -36,10 +40,22 @@ enum InterfaceType: String, CaseIterable {
         case .ethernet: return .blue
         case .wireless: return .green
         case .bridge: return .purple
+        case .tap: return .pink
+        case .epair: return .indigo
         case .loopback: return .gray
         case .vlan: return .orange
         case .lagg: return .cyan
         case .other: return .secondary
+        }
+    }
+
+    /// Returns true if this interface type can be destroyed with ifconfig destroy
+    var isDestroyable: Bool {
+        switch self {
+        case .bridge, .tap, .epair, .vlan, .lagg:
+            return true
+        default:
+            return false
         }
     }
 }
@@ -492,6 +508,9 @@ struct InterfacesTabView: View {
                             viewModel: viewModel,
                             onConfigure: {
                                 showConfigureSheet = true
+                            },
+                            onDestroy: {
+                                selectedInterface = nil
                             }
                         )
                     } else {
@@ -615,6 +634,16 @@ struct InterfaceDetailView: View {
     let interface: NetworkInterfaceInfo
     @ObservedObject var viewModel: InterfacesViewModel
     let onConfigure: () -> Void
+    let onDestroy: (() -> Void)?
+
+    @State private var showDestroyConfirmation = false
+
+    init(interface: NetworkInterfaceInfo, viewModel: InterfacesViewModel, onConfigure: @escaping () -> Void, onDestroy: (() -> Void)? = nil) {
+        self.interface = interface
+        self.viewModel = viewModel
+        self.onConfigure = onConfigure
+        self.onDestroy = onDestroy
+    }
 
     var body: some View {
         ScrollView {
@@ -689,6 +718,16 @@ struct InterfaceDetailView: View {
                             Label("Renew DHCP", systemImage: "arrow.clockwise")
                         }
                         .buttonStyle(.bordered)
+                    }
+
+                    if interface.type.isDestroyable {
+                        Button(action: {
+                            showDestroyConfirmation = true
+                        }) {
+                            Label("Destroy", systemImage: "trash")
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.red)
                     }
 
                     Spacer()
@@ -774,6 +813,17 @@ struct InterfaceDetailView: View {
                 }
             }
             .padding()
+        }
+        .alert("Destroy Interface", isPresented: $showDestroyConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Destroy", role: .destructive) {
+                Task {
+                    await viewModel.destroyInterface(interface.name)
+                    onDestroy?()
+                }
+            }
+        } message: {
+            Text("Are you sure you want to destroy \(interface.name)? This will remove the interface from the system.")
         }
     }
 }
@@ -2075,6 +2125,16 @@ class InterfacesViewModel: ObservableObject {
 
     func setDescription(_ name: String, description: String) async throws {
         try await sshManager.setInterfaceDescription(name, description: description)
+    }
+
+    func destroyInterface(_ name: String) async {
+        error = nil
+        do {
+            try await sshManager.destroyClonedInterface(name)
+            await refresh()
+        } catch {
+            self.error = "Failed to destroy \(name): \(error.localizedDescription)"
+        }
     }
 }
 
