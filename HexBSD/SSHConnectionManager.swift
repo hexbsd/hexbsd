@@ -4894,7 +4894,7 @@ extension SSHConnectionManager {
         let checkOutput = try await executeCommand(checkCommand)
 
         if checkOutput.trimmingCharacters(in: .whitespacesAndNewlines) != "installed" {
-            return VMBhyveInfo(isInstalled: false, serviceEnabled: false, vmDir: "", templatesInstalled: false, firmwareInstalled: false)
+            return VMBhyveInfo(isInstalled: false, serviceEnabled: false, vmDir: "", templatesInstalled: false, firmwareInstalled: false, publicSwitchConfigured: false)
         }
 
         // Check if service is enabled in rc.conf
@@ -4932,14 +4932,21 @@ extension SSHConnectionManager {
         let firmwareOutput = try await executeCommand(firmwareCheckCommand)
         let firmwareInstalled = firmwareOutput.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
 
-        print("DEBUG: checkVMBhyve - serviceEnabled: \(serviceEnabled), vmDir: \(vmDir), templatesInstalled: \(templatesInstalled), firmwareInstalled: \(firmwareInstalled)")
+        // Check if "public" network switch exists
+        let switchCheckCommand = "vm switch list 2>/dev/null | grep -q '^public ' && echo 'exists' || echo 'missing'"
+        let switchOutput = try await executeCommand(switchCheckCommand)
+        let publicSwitchConfigured = switchOutput.trimmingCharacters(in: .whitespacesAndNewlines) == "exists"
+        print("DEBUG: Public switch configured: \(publicSwitchConfigured)")
+
+        print("DEBUG: checkVMBhyve - serviceEnabled: \(serviceEnabled), vmDir: \(vmDir), templatesInstalled: \(templatesInstalled), firmwareInstalled: \(firmwareInstalled), publicSwitch: \(publicSwitchConfigured)")
 
         return VMBhyveInfo(
             isInstalled: true,
             serviceEnabled: serviceEnabled,
             vmDir: vmDirRawTrimmed,  // Return the raw vm_dir (with zfs: prefix if applicable)
             templatesInstalled: templatesInstalled,
-            firmwareInstalled: firmwareInstalled
+            firmwareInstalled: firmwareInstalled,
+            publicSwitchConfigured: publicSwitchConfigured
         )
     }
 
@@ -5251,7 +5258,7 @@ extension SSHConnectionManager {
 
     // MARK: - Virtual Switches
 
-    /// List all virtual switches
+    /// List all virtual switches (raw output)
     func listVirtualSwitches() async throws -> String {
         guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
@@ -5259,6 +5266,125 @@ extension SSHConnectionManager {
         }
 
         return try await executeCommand("vm switch list")
+    }
+
+    /// List all vm-bhyve virtual switches with parsed output
+    /// Returns an array of VMSwitch structs
+    func listVMSwitches() async throws -> [VMSwitch] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let output = try await executeCommand("vm switch list 2>/dev/null || echo ''")
+        return parseVMSwitchList(output)
+    }
+
+    /// Parse vm switch list output into VMSwitch objects
+    /// Format: NAME        TYPE        IFACE           ADDRESS         PRIVATE     MTU     VLAN     PORTS
+    private func parseVMSwitchList(_ output: String) -> [VMSwitch] {
+        var switches: [VMSwitch] = []
+        let lines = output.components(separatedBy: "\n")
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // Skip header line and empty lines
+            if trimmed.isEmpty || trimmed.hasPrefix("NAME") {
+                continue
+            }
+
+            // Split by whitespace, handling multiple spaces
+            let components = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+
+            // We need at least 7 components: NAME TYPE IFACE ADDRESS PRIVATE MTU VLAN
+            // PORTS can be empty or have multiple values
+            guard components.count >= 7 else { continue }
+
+            let name = components[0]
+            let type = components[1]
+            let iface = components[2]
+            let address = components[3]
+            let isPrivate = components[4].lowercased() == "yes"
+            let mtu = components[5]
+            let vlan = components[6]
+
+            // Ports are the remaining components after VLAN
+            var ports: [String] = []
+            if components.count > 7 {
+                ports = Array(components[7...])
+            }
+
+            let vmSwitch = VMSwitch(
+                name: name,
+                type: type,
+                iface: iface,
+                address: address,
+                isPrivate: isPrivate,
+                mtu: mtu,
+                vlan: vlan,
+                ports: ports
+            )
+            switches.append(vmSwitch)
+        }
+
+        return switches
+    }
+
+    /// Delete a vm-bhyve switch and its bridge interface
+    func deleteVMSwitch(_ name: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // First get the interface name before destroying the switch
+        let switchInfo = try await executeCommand("vm switch list 2>/dev/null | grep '^\(name) ' || echo ''")
+        var bridgeInterface: String? = nil
+        if !switchInfo.isEmpty {
+            let components = switchInfo.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            if components.count >= 3 && components[2] != "-" {
+                bridgeInterface = components[2]
+            }
+        }
+
+        // Try to destroy the vm-bhyve switch using the standard command
+        let destroyOutput = try await executeCommand("vm switch destroy \(name) 2>&1 || true")
+        print("DEBUG: vm switch destroy \(name) output: \(destroyOutput)")
+
+        // Check if the switch still exists (vm switch destroy fails if bridge interface is already gone)
+        let checkOutput = try await executeCommand("vm switch list 2>/dev/null | grep -q '^\(name) ' && echo 'EXISTS' || echo 'GONE'")
+        if checkOutput.trimmingCharacters(in: .whitespacesAndNewlines) == "EXISTS" {
+            print("DEBUG: Switch still exists, manually cleaning up config")
+            // Get the datastore path to find system.conf
+            let datastoreOutput = try await executeCommand("vm datastore list 2>/dev/null | tail -1 | awk '{print $2}' || echo ''")
+            let datastorePath = datastoreOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !datastorePath.isEmpty {
+                let configPath = "\(datastorePath)/.config/system.conf"
+                // Remove switch-related entries from system.conf
+                // Entries are: switch_list, type_NAME, ports_NAME, addr_NAME, mtu_NAME, vlan_NAME, private_NAME
+                let sedCommands = [
+                    "sed -i '' 's/\(name)//g; s/\"  */\"/g; s/  *\"/\"/g' \(configPath)",  // Remove from switch_list
+                    "sed -i '' '/^type_\(name)=/d' \(configPath)",
+                    "sed -i '' '/^ports_\(name)=/d' \(configPath)",
+                    "sed -i '' '/^addr_\(name)=/d' \(configPath)",
+                    "sed -i '' '/^mtu_\(name)=/d' \(configPath)",
+                    "sed -i '' '/^vlan_\(name)=/d' \(configPath)",
+                    "sed -i '' '/^private_\(name)=/d' \(configPath)",
+                    "sed -i '' '/^switch_list=\"\"$/d' \(configPath)"  // Remove empty switch_list
+                ]
+                for cmd in sedCommands {
+                    _ = try await executeCommand("\(cmd) 2>&1 || true")
+                }
+                print("DEBUG: Manually removed switch \(name) from config")
+            }
+        }
+
+        // Also destroy the bridge interface if it exists
+        if let iface = bridgeInterface {
+            _ = try await executeCommand("ifconfig \(iface) down 2>&1 || true")
+            _ = try await executeCommand("ifconfig \(iface) destroy 2>&1 || true")
+            print("DEBUG: Destroyed bridge interface \(iface)")
+        }
     }
 
     /// Get detailed information about virtual switches
@@ -6264,7 +6390,8 @@ EOFPKG
                 type = .loopback
             } else if name.hasPrefix("wlan") || name.hasPrefix("ath") || name.hasPrefix("iwn") || name.hasPrefix("iwm") || name.hasPrefix("bwn") || name.hasPrefix("rum") || name.hasPrefix("run") || name.hasPrefix("ural") || name.hasPrefix("zyd") || name.hasPrefix("upgt") || name.hasPrefix("urtw") || name.hasPrefix("urtwn") {
                 type = .wireless
-            } else if name.hasPrefix("bridge") {
+            } else if name.hasPrefix("bridge") || name.hasPrefix("vm-") {
+                // vm- prefix is used by vm-bhyve for virtual switches (e.g., vm-public)
                 type = .bridge
             } else if name.hasPrefix("tap") {
                 type = .tap
@@ -6858,7 +6985,8 @@ EOFPKG
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
-        let output = try await executeCommand("ifconfig -l 2>/dev/null | tr ' ' '\\n' | grep -vE '^(lo|bridge|pflog|pfsync|enc|gif|stf)' || true")
+        // Filter out virtual/internal interfaces: lo, bridge, epair, pflog, pfsync, enc, gif, stf, tap, vm-
+        let output = try await executeCommand("ifconfig -l 2>/dev/null | tr ' ' '\\n' | grep -vE '^(lo|bridge|epair|pflog|pfsync|enc|gif|stf|tap|vm-)' || true")
 
         return output.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -6925,13 +7053,25 @@ EOFPKG
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
-        // Bring down and destroy the bridge
-        _ = try await executeCommand("ifconfig \(name) down 2>&1")
-        let output = try await executeCommand("ifconfig \(name) destroy 2>&1")
+        // Check if this is a vm-bhyve switch (vm-* bridges)
+        if name.hasPrefix("vm-") {
+            // Extract switch name (vm-public -> public)
+            let switchName = String(name.dropFirst(3))
+            // Use vm switch destroy to properly remove it
+            let vmOutput = try await executeCommand("vm switch destroy \(switchName) 2>&1 || true")
+            print("DEBUG: vm switch destroy output: \(vmOutput)")
+            // Also try to destroy the interface directly in case vm switch doesn't exist
+            _ = try await executeCommand("ifconfig \(name) down 2>&1 || true")
+            _ = try await executeCommand("ifconfig \(name) destroy 2>&1 || true")
+        } else {
+            // Regular bridge - bring down and destroy
+            _ = try await executeCommand("ifconfig \(name) down 2>&1")
+            let output = try await executeCommand("ifconfig \(name) destroy 2>&1")
 
-        if output.contains("Permission denied") {
-            throw NSError(domain: "SSHConnectionManager", code: 1,
-                         userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
+            if output.contains("Permission denied") {
+                throw NSError(domain: "SSHConnectionManager", code: 1,
+                             userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
+            }
         }
 
         // Remove from rc.conf
@@ -6958,6 +7098,14 @@ EOFPKG
         guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // If this is a vm-bhyve switch interface (vm-*), also clean up the switch config
+        if name.hasPrefix("vm-") {
+            let switchName = String(name.dropFirst(3))
+            // Try to use deleteVMSwitch which handles both the switch config and interface
+            try await deleteVMSwitch(switchName)
+            return
         }
 
         // Bring down and destroy the interface
@@ -7104,6 +7252,7 @@ EOFPKG
     /// Setup bhyve/vm-bhyve with streaming output for progress display
     func setupVMBhyveStreaming(
         zfsDataset: String = "zroot/vms",
+        networkInterface: String? = nil,
         onOutput: @escaping (String) -> Void
     ) async throws {
         guard client != nil else {
@@ -7193,6 +7342,27 @@ EOFPKG
         let startOutput = try await runCommand("service vm start 2>&1", step: "start service")
         if startOutput.isEmpty {
             onOutput("vm service started\n")
+        }
+
+        // Step 8: Create public network switch
+        if let iface = networkInterface, !iface.isEmpty {
+            onOutput("\nStep 8: Creating 'public' network switch...\n")
+            // Check if switch already exists
+            let switchCheck = try await runCommand("vm switch list 2>/dev/null | grep -q '^public ' && echo 'EXISTS' || echo 'NOT_FOUND'", step: "check switch")
+            if switchCheck.contains("NOT_FOUND") {
+                _ = try await runCommand("vm switch create public 2>&1 || true", step: "create switch")
+                // vm switch add may return non-zero even on success, capture output
+                let addResult = try await runCommand("vm switch add public \(iface) 2>&1 || true; vm switch list | grep '^public ' && echo 'SUCCESS' || echo 'FAILED'", step: "add interface to switch")
+                if addResult.contains("SUCCESS") {
+                    onOutput("Created 'public' switch with interface \(iface)\n")
+                } else {
+                    onOutput("Warning: Switch created but may not be fully configured. Check 'vm switch list'\n")
+                }
+            } else {
+                onOutput("'public' switch already exists\n")
+            }
+        } else {
+            onOutput("\nStep 8: Skipping network switch (no interface selected)...\n")
         }
 
         onOutput("\n✓ Setup complete!\n")

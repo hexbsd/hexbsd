@@ -22,6 +22,7 @@ struct VMBhyveInfo: Equatable {
     let vmDir: String
     let templatesInstalled: Bool
     let firmwareInstalled: Bool
+    let publicSwitchConfigured: Bool
 }
 
 struct VirtualSwitch: Identifiable, Hashable {
@@ -754,19 +755,30 @@ class VMsViewModel: ObservableObject {
     @Published var vmDir = ""
     @Published var templatesInstalled = false
     @Published var firmwareInstalled = false
+    @Published var publicSwitchConfigured = false
 
     private let sshManager = SSHConnectionManager.shared
 
     /// Check if setup is complete (all requirements met)
     var setupComplete: Bool {
-        isInstalled && serviceEnabled && templatesInstalled && firmwareInstalled
+        isInstalled && serviceEnabled && templatesInstalled && firmwareInstalled && publicSwitchConfigured
     }
 
     /// Setup vm-bhyve with streaming output
-    func setupVMBhyve(zfsDataset: String, onOutput: @escaping (String) -> Void) async throws {
-        try await sshManager.setupVMBhyveStreaming(zfsDataset: zfsDataset, onOutput: onOutput)
+    func setupVMBhyve(zfsDataset: String, networkInterface: String?, onOutput: @escaping (String) -> Void) async throws {
+        try await sshManager.setupVMBhyveStreaming(zfsDataset: zfsDataset, networkInterface: networkInterface, onOutput: onOutput)
         // Reload status after setup
         await loadVMs()
+    }
+
+    /// List network interfaces suitable for bridging (excludes bridge interfaces)
+    func listBridgeableInterfaces() async -> [String] {
+        do {
+            return try await sshManager.listBridgeableInterfaces()
+        } catch {
+            print("Failed to list bridgeable interfaces: \(error.localizedDescription)")
+            return []
+        }
     }
 
     /// List available ZFS pools
@@ -791,6 +803,7 @@ class VMsViewModel: ObservableObject {
             vmDir = info.vmDir
             templatesInstalled = info.templatesInstalled
             firmwareInstalled = info.firmwareInstalled
+            publicSwitchConfigured = info.publicSwitchConfigured
 
             // Only try to list VMs if setup is complete
             if setupComplete {
@@ -2102,6 +2115,8 @@ struct BhyveSetupWizardView: View {
     @State private var selectedPool: ZFSPool?
     @State private var datasetName = "vms"
     @State private var pools: [ZFSPool] = []
+    @State private var interfaces: [String] = []
+    @State private var selectedInterface: String?
     @State private var isLoadingPools = false
     @State private var isSettingUp = false
     @State private var setupOutput = ""
@@ -2110,6 +2125,16 @@ struct BhyveSetupWizardView: View {
     private var zfsDataset: String {
         guard let pool = selectedPool else { return "" }
         return "\(pool.name)/\(datasetName)"
+    }
+
+    private var canStartSetup: Bool {
+        // Need pool selected
+        guard selectedPool != nil, !zfsDataset.isEmpty else { return false }
+        // Need interface selected unless switch already exists
+        if !viewModel.publicSwitchConfigured && selectedInterface == nil {
+            return false
+        }
+        return true
     }
 
     var body: some View {
@@ -2152,6 +2177,11 @@ struct BhyveSetupWizardView: View {
                     isComplete: viewModel.templatesInstalled,
                     detail: viewModel.templatesInstalled ? "Installed" : "Not installed"
                 )
+                VMStatusRow(
+                    title: "Network Switch",
+                    isComplete: viewModel.publicSwitchConfigured,
+                    detail: viewModel.publicSwitchConfigured ? "'public' switch configured" : "Not configured"
+                )
             }
             .padding()
             .background(Color(nsColor: .controlBackgroundColor))
@@ -2177,7 +2207,7 @@ struct BhyveSetupWizardView: View {
                                 .foregroundColor(.secondary)
                             Spacer()
                             Button("Retry") {
-                                Task { await loadPools() }
+                                Task { await loadData() }
                             }
                             .buttonStyle(.bordered)
                             .controlSize(.small)
@@ -2208,6 +2238,37 @@ struct BhyveSetupWizardView: View {
                         }
                     }
                 }
+
+                Section("Network Configuration") {
+                    if viewModel.publicSwitchConfigured {
+                        HStack {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                            Text("'public' switch already configured")
+                                .foregroundColor(.secondary)
+                        }
+                    } else if interfaces.isEmpty {
+                        HStack {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(.orange)
+                            Text("No network interfaces found")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    } else {
+                        Picker("Network Interface:", selection: $selectedInterface) {
+                            Text("Select an interface...").tag(nil as String?)
+                            ForEach(interfaces, id: \.self) { iface in
+                                Text(iface).tag(iface as String?)
+                            }
+                        }
+                        .pickerStyle(.menu)
+
+                        Text("A 'public' switch will be created using this interface for VM networking")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
             }
             .formStyle(.grouped)
 
@@ -2220,7 +2281,7 @@ struct BhyveSetupWizardView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(isSettingUp || zfsDataset.isEmpty || selectedPool == nil)
+                .disabled(isSettingUp || !canStartSetup)
             }
 
             // Error display
@@ -2272,19 +2333,29 @@ struct BhyveSetupWizardView: View {
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
-            Task { await loadPools() }
+            Task { await loadData() }
         }
     }
 
-    private func loadPools() async {
+    private func loadData() async {
         isLoadingPools = true
         setupError = nil
 
-        pools = await viewModel.listZFSPools()
+        // Load pools and interfaces in parallel
+        async let poolsTask = viewModel.listZFSPools()
+        async let interfacesTask = viewModel.listBridgeableInterfaces()
+
+        pools = await poolsTask
+        interfaces = await interfacesTask
 
         // Auto-select if only one pool
         if pools.count == 1 {
             selectedPool = pools.first
+        }
+
+        // Auto-select first interface if only one
+        if interfaces.count == 1 {
+            selectedInterface = interfaces.first
         }
 
         isLoadingPools = false
@@ -2296,7 +2367,7 @@ struct BhyveSetupWizardView: View {
         setupOutput = ""
 
         do {
-            try await viewModel.setupVMBhyve(zfsDataset: zfsDataset) { output in
+            try await viewModel.setupVMBhyve(zfsDataset: zfsDataset, networkInterface: selectedInterface) { output in
                 Task { @MainActor in
                     setupOutput += output
                 }
