@@ -112,19 +112,63 @@ struct FilesContentView: View {
     @State private var errorMessage = ""
     @State private var isTransferring = false
 
+    // Transfer progress state
+    @State private var transferProgress: Double = 0.0
+    @State private var transferFileName: String = ""
+    @State private var transferRate: String = ""
+    @State private var transferredBytes: Int64 = 0
+    @State private var totalTransferBytes: Int64 = 0
+    @State private var transferCancelled = false
+    @State private var transferTask: Task<Void, Never>?
+
     var body: some View {
         VStack(spacing: 0) {
             // Transfer status bar
             if isTransferring {
-                HStack {
-                    ProgressView()
-                        .scaleEffect(0.8)
-                    Text("Transferring...")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                VStack(spacing: 6) {
+                    HStack {
+                        Text(transferFileName)
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        Spacer()
+
+                        if !transferRate.isEmpty {
+                            Text(transferRate)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        Button(action: {
+                            transferCancelled = true
+                            transferTask?.cancel()
+                        }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Cancel transfer")
+                    }
+
+                    ProgressView(value: transferProgress, total: 1.0)
+                        .progressViewStyle(.linear)
+
+                    HStack {
+                        Text(formatBytes(transferredBytes))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+
+                        Spacer()
+
+                        Text(formatBytes(totalTransferBytes))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
                 }
-                .padding(.vertical, 4)
-                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
                 .background(Color.accentColor.opacity(0.1))
             }
 
@@ -183,15 +227,58 @@ struct FilesContentView: View {
         }
     }
 
+    private func formatBytes(_ bytes: Int64) -> String {
+        let kb = Double(bytes) / 1024
+        let mb = kb / 1024
+        let gb = mb / 1024
+
+        if gb >= 1 {
+            return String(format: "%.2f GB", gb)
+        } else if mb >= 1 {
+            return String(format: "%.2f MB", mb)
+        } else if kb >= 1 {
+            return String(format: "%.1f KB", kb)
+        } else {
+            return "\(bytes) B"
+        }
+    }
+
+    private func resetTransferState() async {
+        await MainActor.run {
+            isTransferring = false
+            transferProgress = 0.0
+            transferFileName = ""
+            transferRate = ""
+            transferredBytes = 0
+            totalTransferBytes = 0
+            transferCancelled = false
+            transferTask = nil
+        }
+    }
+
     private func transferToRemote() async {
         guard !localVM.selectedFiles.isEmpty else { return }
-        isTransferring = true
+
+        await MainActor.run {
+            isTransferring = true
+            transferCancelled = false
+            transferProgress = 0.0
+        }
 
         let sshManager = SSHConnectionManager.shared
 
         for fileId in localVM.selectedFiles {
+            // Check for cancellation before each file
+            if transferCancelled { break }
+
             guard let file = localVM.files.first(where: { $0.id == fileId }) else { continue }
             guard !file.isDirectory else { continue } // Skip directories for now
+
+            await MainActor.run {
+                transferFileName = "Uploading: \(file.name)"
+                transferredBytes = 0
+                totalTransferBytes = file.size
+            }
 
             let remotePath: String
             if remoteVM.currentPath.hasSuffix("/") {
@@ -202,27 +289,57 @@ struct FilesContentView: View {
 
             do {
                 let localURL = URL(fileURLWithPath: file.path)
-                try await sshManager.uploadFile(localURL: localURL, remotePath: remotePath)
+                try await sshManager.uploadFile(
+                    localURL: localURL,
+                    remotePath: remotePath,
+                    detailedProgressCallback: { transferred, total, rate in
+                        Task { @MainActor in
+                            self.transferredBytes = transferred
+                            self.totalTransferBytes = total
+                            self.transferProgress = total > 0 ? Double(transferred) / Double(total) : 0
+                            self.transferRate = rate
+                        }
+                    },
+                    cancelCheck: { self.transferCancelled }
+                )
             } catch {
-                errorMessage = "Failed to upload \(file.name): \(error.localizedDescription)"
-                showError = true
+                if !transferCancelled {
+                    await MainActor.run {
+                        errorMessage = "Failed to upload \(file.name): \(error.localizedDescription)"
+                        showError = true
+                    }
+                }
             }
         }
 
-        localVM.selectedFiles.removeAll()
+        await MainActor.run { localVM.selectedFiles.removeAll() }
         await remoteVM.refresh()
-        isTransferring = false
+        await resetTransferState()
     }
 
     private func transferToLocal() async {
         guard !remoteVM.selectedFiles.isEmpty else { return }
-        isTransferring = true
+
+        await MainActor.run {
+            isTransferring = true
+            transferCancelled = false
+            transferProgress = 0.0
+        }
 
         let sshManager = SSHConnectionManager.shared
 
         for fileId in remoteVM.selectedFiles {
+            // Check for cancellation before each file
+            if transferCancelled { break }
+
             guard let file = remoteVM.files.first(where: { $0.id == fileId }) else { continue }
             guard !file.isDirectory else { continue } // Skip directories for now
+
+            await MainActor.run {
+                transferFileName = "Downloading: \(file.name)"
+                transferredBytes = 0
+                totalTransferBytes = file.size
+            }
 
             let localPath: String
             if localVM.currentPath.hasSuffix("/") {
@@ -233,16 +350,32 @@ struct FilesContentView: View {
 
             do {
                 let localURL = URL(fileURLWithPath: localPath)
-                try await sshManager.downloadFile(remotePath: file.path, localURL: localURL)
+                try await sshManager.downloadFile(
+                    remotePath: file.path,
+                    localURL: localURL,
+                    progressCallback: { transferred, total, rate in
+                        Task { @MainActor in
+                            self.transferredBytes = transferred
+                            self.totalTransferBytes = total
+                            self.transferProgress = total > 0 ? Double(transferred) / Double(total) : 0
+                            self.transferRate = rate
+                        }
+                    },
+                    cancelCheck: { self.transferCancelled }
+                )
             } catch {
-                errorMessage = "Failed to download \(file.name): \(error.localizedDescription)"
-                showError = true
+                if !transferCancelled {
+                    await MainActor.run {
+                        errorMessage = "Failed to download \(file.name): \(error.localizedDescription)"
+                        showError = true
+                    }
+                }
             }
         }
 
-        remoteVM.selectedFiles.removeAll()
+        await MainActor.run { remoteVM.selectedFiles.removeAll() }
         await localVM.refresh()
-        isTransferring = false
+        await resetTransferState()
     }
 
     private func handleDropToRemote(localPath: String) async {
@@ -250,10 +383,29 @@ struct FilesContentView: View {
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: localPath) else { return }
 
-        isTransferring = true
+        let fileName = (localPath as NSString).lastPathComponent
+        let localURL = URL(fileURLWithPath: localPath)
+
+        // Get file size
+        let fileSize: Int64
+        if let attrs = try? fileManager.attributesOfItem(atPath: localPath),
+           let size = attrs[.size] as? Int64 {
+            fileSize = size
+        } else {
+            fileSize = 0
+        }
+
+        await MainActor.run {
+            isTransferring = true
+            transferCancelled = false
+            transferFileName = "Uploading: \(fileName)"
+            transferredBytes = 0
+            totalTransferBytes = fileSize
+            transferProgress = 0.0
+        }
+
         let sshManager = SSHConnectionManager.shared
 
-        let fileName = (localPath as NSString).lastPathComponent
         let remotePath: String
         if remoteVM.currentPath.hasSuffix("/") {
             remotePath = remoteVM.currentPath + fileName
@@ -262,15 +414,30 @@ struct FilesContentView: View {
         }
 
         do {
-            let localURL = URL(fileURLWithPath: localPath)
-            try await sshManager.uploadFile(localURL: localURL, remotePath: remotePath)
+            try await sshManager.uploadFile(
+                localURL: localURL,
+                remotePath: remotePath,
+                detailedProgressCallback: { transferred, total, rate in
+                    Task { @MainActor in
+                        self.transferredBytes = transferred
+                        self.totalTransferBytes = total
+                        self.transferProgress = total > 0 ? Double(transferred) / Double(total) : 0
+                        self.transferRate = rate
+                    }
+                },
+                cancelCheck: { self.transferCancelled }
+            )
             await remoteVM.refresh()
         } catch {
-            errorMessage = "Failed to upload \(fileName): \(error.localizedDescription)"
-            showError = true
+            if !transferCancelled {
+                await MainActor.run {
+                    errorMessage = "Failed to upload \(fileName): \(error.localizedDescription)"
+                    showError = true
+                }
+            }
         }
 
-        isTransferring = false
+        await resetTransferState()
     }
 
     private func handleDropToLocal(remotePath: String) async {
@@ -278,10 +445,19 @@ struct FilesContentView: View {
         let fileManager = FileManager.default
         if fileManager.fileExists(atPath: remotePath) { return }
 
-        isTransferring = true
+        let fileName = (remotePath as NSString).lastPathComponent
+
+        await MainActor.run {
+            isTransferring = true
+            transferCancelled = false
+            transferFileName = "Downloading: \(fileName)"
+            transferredBytes = 0
+            totalTransferBytes = 0  // Will be updated by progress callback
+            transferProgress = 0.0
+        }
+
         let sshManager = SSHConnectionManager.shared
 
-        let fileName = (remotePath as NSString).lastPathComponent
         let localPath: String
         if localVM.currentPath.hasSuffix("/") {
             localPath = localVM.currentPath + fileName
@@ -291,14 +467,30 @@ struct FilesContentView: View {
 
         do {
             let localURL = URL(fileURLWithPath: localPath)
-            try await sshManager.downloadFile(remotePath: remotePath, localURL: localURL)
+            try await sshManager.downloadFile(
+                remotePath: remotePath,
+                localURL: localURL,
+                progressCallback: { transferred, total, rate in
+                    Task { @MainActor in
+                        self.transferredBytes = transferred
+                        self.totalTransferBytes = total
+                        self.transferProgress = total > 0 ? Double(transferred) / Double(total) : 0
+                        self.transferRate = rate
+                    }
+                },
+                cancelCheck: { self.transferCancelled }
+            )
             await localVM.refresh()
         } catch {
-            errorMessage = "Failed to download \(fileName): \(error.localizedDescription)"
-            showError = true
+            if !transferCancelled {
+                await MainActor.run {
+                    errorMessage = "Failed to download \(fileName): \(error.localizedDescription)"
+                    showError = true
+                }
+            }
         }
 
-        isTransferring = false
+        await resetTransferState()
     }
 }
 
