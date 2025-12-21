@@ -5308,10 +5308,10 @@ extension SSHConnectionManager {
             let mtu = components[5]
             let vlan = components[6]
 
-            // Ports are the remaining components after VLAN
+            // Ports are the remaining components after VLAN (filter out "-" which means empty)
             var ports: [String] = []
             if components.count > 7 {
-                ports = Array(components[7...])
+                ports = Array(components[7...]).filter { $0 != "-" }
             }
 
             let vmSwitch = VMSwitch(
@@ -6922,7 +6922,7 @@ EOFPKG
 
         var bridges: [BridgeInterface] = []
 
-        // Get list of bridge interfaces (use || true to handle case where no bridges exist)
+        // Get list of bridge interfaces (excluding vm-* which are managed through Switches tab)
         let listOutput = try await executeCommand("ifconfig -l 2>/dev/null | tr ' ' '\\n' | grep -E '^bridge' || true")
 
         for line in listOutput.components(separatedBy: .newlines) {
@@ -6931,6 +6931,7 @@ EOFPKG
 
             // Get bridge details
             let ifconfigOutput = try await executeCommand("ifconfig \(name) 2>/dev/null")
+            print("DEBUG listBridges: ifconfig \(name) output has \(ifconfigOutput.components(separatedBy: .newlines).count) lines")
 
             var members: [String] = []
             var ipv4Address = ""
@@ -6939,18 +6940,26 @@ EOFPKG
             var stp = false
 
             for ifLine in ifconfigOutput.components(separatedBy: .newlines) {
-                let trimmed = ifLine.trimmingCharacters(in: .whitespaces)
+                let trimmed = ifLine.trimmingCharacters(in: .whitespacesAndNewlines)
 
-                if trimmed.contains("flags=") {
+                // Check for member line first (before flags check, since member lines also contain "flags=")
+                if trimmed.hasPrefix("member:") {
+                    // Parse member line like "member: re0 flags=143<LEARNING,DISCOVER,AUTOEDGE,AUTOPTP>"
+                    print("DEBUG listBridges: Found member line: '\(trimmed)'")
+                    if let memberRange = trimmed.range(of: "member:") {
+                        let afterMember = String(trimmed[memberRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                        let parts = afterMember.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+                        if let memberName = parts.first, !memberName.isEmpty {
+                            print("DEBUG listBridges: Parsed member: '\(memberName)'")
+                            members.append(memberName)
+                        }
+                    }
+                } else if trimmed.contains("flags=") && trimmed.contains(":") && !trimmed.hasPrefix("member:") {
+                    // Interface status line like "bridge0: flags=1008843<UP,BROADCAST,RUNNING..."
                     if trimmed.contains("UP") && trimmed.contains("RUNNING") {
                         status = .up
                     } else if trimmed.contains("UP") {
                         status = .noCarrier
-                    }
-                } else if trimmed.hasPrefix("member:") {
-                    let parts = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
-                    if parts.count >= 2 {
-                        members.append(parts[1])
                     }
                 } else if trimmed.hasPrefix("inet ") {
                     let parts = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
@@ -6965,6 +6974,7 @@ EOFPKG
                 }
             }
 
+            print("DEBUG listBridges: Bridge \(name) has \(members.count) members: \(members)")
             bridges.append(BridgeInterface(
                 name: name,
                 members: members,

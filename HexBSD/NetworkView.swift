@@ -526,31 +526,34 @@ struct InterfacesTabView: View {
                         InterfaceRowView(interface: iface)
                             .tag(iface)
                     }
-                    .frame(minWidth: 350, idealWidth: 400)
+                    .frame(minWidth: 300, maxWidth: 400)
 
                     // Detail view
-                    if let iface = selectedInterface {
-                        InterfaceDetailView(
-                            interface: iface,
-                            viewModel: viewModel,
-                            onConfigure: {
-                                showConfigureSheet = true
-                            },
-                            onDestroy: {
-                                selectedInterface = nil
+                    Group {
+                        if let iface = selectedInterface {
+                            InterfaceDetailView(
+                                interface: iface,
+                                viewModel: viewModel,
+                                onConfigure: {
+                                    showConfigureSheet = true
+                                },
+                                onDestroy: {
+                                    selectedInterface = nil
+                                }
+                            )
+                        } else {
+                            VStack(spacing: 20) {
+                                Image(systemName: "network")
+                                    .font(.system(size: 48))
+                                    .foregroundColor(.secondary)
+                                Text("Select an interface to view details")
+                                    .font(.title2)
+                                    .foregroundColor(.secondary)
                             }
-                        )
-                    } else {
-                        VStack(spacing: 20) {
-                            Image(systemName: "network")
-                                .font(.system(size: 48))
-                                .foregroundColor(.secondary)
-                            Text("Select an interface to view details")
-                                .font(.title2)
-                                .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
+                    .frame(minWidth: 400, maxWidth: .infinity)
                 }
             }
         }
@@ -1515,22 +1518,25 @@ struct BridgesTabView: View {
                                 }
                             }
                     }
-                    .frame(minWidth: 250, idealWidth: 300)
+                    .frame(minWidth: 250, maxWidth: 350)
 
                     // Detail view
-                    if let bridge = selectedBridge {
-                        BridgeDetailView(bridge: bridge, viewModel: viewModel)
-                    } else {
-                        VStack(spacing: 20) {
-                            Image(systemName: "point.3.connected.trianglepath.dotted")
-                                .font(.system(size: 48))
-                                .foregroundColor(.secondary)
-                            Text("Select a bridge to view details")
-                                .font(.title2)
-                                .foregroundColor(.secondary)
+                    Group {
+                        if let bridge = selectedBridge {
+                            BridgeDetailView(bridge: bridge, viewModel: viewModel)
+                        } else {
+                            VStack(spacing: 20) {
+                                Image(systemName: "point.3.connected.trianglepath.dotted")
+                                    .font(.system(size: 48))
+                                    .foregroundColor(.secondary)
+                                Text("Select a bridge to view details")
+                                    .font(.title2)
+                                    .foregroundColor(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
+                    .frame(minWidth: 400, maxWidth: .infinity)
                 }
             }
         }
@@ -2169,22 +2175,25 @@ struct SwitchesTabView: View {
                                 }
                             }
                     }
-                    .frame(minWidth: 250, idealWidth: 300)
+                    .frame(minWidth: 250, maxWidth: 350)
 
                     // Detail view
-                    if let vmSwitch = selectedSwitch {
-                        SwitchDetailView(vmSwitch: vmSwitch, viewModel: viewModel)
-                    } else {
-                        VStack(spacing: 20) {
-                            Image(systemName: "arrow.left.arrow.right.square")
-                                .font(.system(size: 48))
-                                .foregroundColor(.secondary)
-                            Text("Select a switch to view details")
-                                .font(.title2)
-                                .foregroundColor(.secondary)
+                    Group {
+                        if let vmSwitch = selectedSwitch {
+                            SwitchDetailView(vmSwitch: vmSwitch, viewModel: viewModel)
+                        } else {
+                            VStack(spacing: 20) {
+                                Image(systemName: "arrow.left.arrow.right.square")
+                                    .font(.system(size: 48))
+                                    .foregroundColor(.secondary)
+                                Text("Select a switch to view details")
+                                    .font(.title2)
+                                    .foregroundColor(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
+                    .frame(minWidth: 400, maxWidth: .infinity)
                 }
             }
         }
