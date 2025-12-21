@@ -785,8 +785,10 @@ class SSHConnectionManager {
         let startTime = Date()
         try process.run()
 
-        // Monitor progress - for uploads we simulate based on time elapsed
-        var lastReportedProgress: Int64 = 0
+        // Monitor progress by checking remote file size
+        var lastReportedBytes: Int64 = 0
+        var lastReportTime = startTime
+
         while process.isRunning {
             // Check for cancellation
             if cancelCheck?() == true {
@@ -795,19 +797,32 @@ class SSHConnectionManager {
                              userInfo: [NSLocalizedDescriptionKey: "Transfer cancelled"])
             }
 
-            // Estimate progress based on elapsed time (rough estimate)
-            let elapsed = Date().timeIntervalSince(startTime)
-            let estimatedBytesPerSecond: Double = 10_000_000 // Assume ~10MB/s
-            let estimatedProgress = min(Int64(elapsed * estimatedBytesPerSecond), fileSize - 1)
+            // Check remote file size for actual progress
+            do {
+                let sizeOutput = try await executeCommand("stat -f %z '\(remotePath)' 2>/dev/null || echo 0")
+                let currentSize = Int64(sizeOutput.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
 
-            if estimatedProgress > lastReportedProgress {
-                let rate = elapsed > 0 ? Double(estimatedProgress) / elapsed : 0
-                let rateStr = formatTransferRate(rate)
-                progressCallback?(estimatedProgress, fileSize, rateStr)
-                lastReportedProgress = estimatedProgress
+                if currentSize > lastReportedBytes {
+                    let now = Date()
+                    let elapsed = now.timeIntervalSince(startTime)
+                    let recentElapsed = now.timeIntervalSince(lastReportTime)
+                    let recentBytes = currentSize - lastReportedBytes
+
+                    // Calculate rate based on recent transfer
+                    let rate = recentElapsed > 0 ? Double(recentBytes) / recentElapsed : 0
+                    let rateStr = formatTransferRate(rate)
+
+                    progressCallback?(currentSize, fileSize, rateStr)
+                    lastReportedBytes = currentSize
+                    lastReportTime = now
+
+                    print("DEBUG: Upload progress: \(currentSize)/\(fileSize) bytes (\(rateStr))")
+                }
+            } catch {
+                // Ignore errors checking file size - file might not exist yet
             }
 
-            try await Task.sleep(nanoseconds: 100_000_000) // 100ms
+            try await Task.sleep(nanoseconds: 500_000_000) // 500ms between checks
         }
 
         process.waitUntilExit()

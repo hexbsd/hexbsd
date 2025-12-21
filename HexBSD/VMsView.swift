@@ -1073,51 +1073,108 @@ class VMsViewModel: ObservableObject {
     }
 
     func uploadISO(localURL: URL, progress: @escaping (Double) -> Void) async {
+        await uploadISO(localURL: localURL, detailedProgress: { _, _, _, _ in }, cancelCheck: { false })
+    }
+
+    func uploadISO(
+        localURL: URL,
+        detailedProgress: @escaping (Int64, Int64, String, String) -> Void,
+        cancelCheck: @escaping () -> Bool
+    ) async {
         error = nil
 
         do {
             let fileName = localURL.lastPathComponent
             let tempPath = "/tmp/\(fileName)"
 
+            // Get file size
+            let fileAttributes = try FileManager.default.attributesOfItem(atPath: localURL.path)
+            let fileSize = fileAttributes[.size] as? Int64 ?? 0
+
             print("DEBUG: Starting ISO upload: \(fileName)")
             print("DEBUG: Temp path: \(tempPath)")
+            print("DEBUG: File size: \(fileSize) bytes")
 
-            // Step 1: Upload to /tmp with progress tracking (90% of progress)
-            print("DEBUG: Uploading to temp location...")
-            try await sshManager.uploadFile(localURL: localURL, remotePath: tempPath, progressCallback: { uploadProgress in
-                // Upload is 90% of the total
-                let totalProgress = uploadProgress * 0.9
-                print("DEBUG: Upload progress: \(totalProgress)")
-                progress(totalProgress)
-            })
-
-            print("DEBUG: Upload complete, importing with vm iso...")
-            // Step 2: Import using vm iso command (10% of progress)
-            // Note: vm iso writes to stderr even on success, so we ignore errors here
-            do {
-                let importOutput = try await sshManager.executeCommand("vm iso \(tempPath)")
-                print("DEBUG: vm iso output: '\(importOutput)'")
-            } catch {
-                // vm iso often returns output via stderr which appears as an error
-                // Check if the ISO was actually imported by listing ISOs
-                print("DEBUG: vm iso command completed (may have written to stderr)")
+            // Check for cancellation
+            if cancelCheck() {
+                print("DEBUG: Upload cancelled before start")
+                return
             }
 
-            progress(0.95)
+            // ========== STEP 1: Upload to /tmp ==========
+            print("DEBUG: Step 1/2: Uploading to temp location...")
+            detailedProgress(0, fileSize, "", "Step 1/2: Uploading to server...")
 
-            // Step 3: Clean up temp file
-            print("DEBUG: Cleaning up temp file...")
-            _ = try await sshManager.executeCommand("rm -f \(tempPath)")
+            try await sshManager.uploadFile(
+                localURL: localURL,
+                remotePath: tempPath,
+                detailedProgressCallback: { transferred, total, rate in
+                    detailedProgress(transferred, total, rate, "Step 1/2: Uploading to server...")
+                },
+                cancelCheck: cancelCheck
+            )
+
+            // Check for cancellation
+            if cancelCheck() {
+                print("DEBUG: Upload cancelled after transfer")
+                _ = try? await sshManager.executeCommand("rm -f \(tempPath)")
+                return
+            }
+
+            // ========== STEP 2: Import with vm iso ==========
+            print("DEBUG: Step 2/2: Importing with vm iso...")
+
+            // Show animated progress during import (5 seconds)
+            let importTask = Task {
+                do {
+                    _ = try await sshManager.executeCommand("vm iso \(tempPath)")
+                    print("DEBUG: vm iso command completed")
+                } catch {
+                    print("DEBUG: vm iso returned error (may be normal): \(error)")
+                }
+                // Clean up temp file
+                _ = try? await sshManager.executeCommand("rm -f \(tempPath)")
+                print("DEBUG: Temp file cleaned up")
+            }
+
+            // Animate progress for 5 seconds while import runs
+            for i in 0..<5 {
+                if cancelCheck() {
+                    importTask.cancel()
+                    return
+                }
+                let progress = Int64((Double(i + 1) / 5.0) * Double(fileSize))
+                detailedProgress(progress, fileSize, "", "Step 2/2: Importing ISO...")
+                try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
+            }
+
+            // Wait for import to finish if it hasn't already
+            await importTask.value
 
             // Mark as complete
             print("DEBUG: Upload and import complete!")
-            progress(1.0)
+            detailedProgress(fileSize, fileSize, "", "Complete!")
 
-            // Give UI a moment to show 100% before dismissing
+            // Give UI a moment to show completion before dismissing
             try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
         } catch {
-            print("DEBUG: Upload error: \(error)")
-            self.error = "Failed to upload ISO: \(error.localizedDescription)"
+            if !cancelCheck() {
+                print("DEBUG: Upload error: \(error)")
+                self.error = "Failed to upload ISO: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func formatTransferRate(_ bytesPerSecond: Double) -> String {
+        let kb = bytesPerSecond / 1024
+        let mb = kb / 1024
+
+        if mb >= 1 {
+            return String(format: "%.1f MB/s", mb)
+        } else if kb >= 1 {
+            return String(format: "%.0f KB/s", kb)
+        } else {
+            return String(format: "%.0f B/s", bytesPerSecond)
         }
     }
 
@@ -1125,19 +1182,42 @@ class VMsViewModel: ObservableObject {
         error = nil
 
         do {
-            // Get the datastore (stored in size field for now)
-            let datastore = iso.size ?? "default"
+            // Get the VM directory path
+            let vmDirOutput = try await sshManager.executeCommand("sysrc -n vm_dir 2>/dev/null || echo '/zroot/vms'")
+            var vmDirPath = vmDirOutput.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            // Get VM directory and construct path to ISO
-            let vmDirPath = vmDir.hasPrefix("zfs:") ? String(vmDir.dropFirst(4)) : vmDir
+            // Handle zfs: prefix - need to get the actual mountpoint
+            if vmDirPath.hasPrefix("zfs:") {
+                let dataset = String(vmDirPath.dropFirst(4))
+                // Get the ZFS mountpoint
+                let mountOutput = try await sshManager.executeCommand("zfs get -H -o value mountpoint \(dataset) 2>/dev/null || echo '/\(dataset)'")
+                vmDirPath = mountOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+
             let isoPath = "\(vmDirPath)/.iso/\(iso.name)"
 
-            print("DEBUG: Deleting ISO: \(iso.name) from datastore: \(datastore)")
+            print("DEBUG: Deleting ISO: \(iso.name)")
             print("DEBUG: ISO path: \(isoPath)")
+
+            // Check if file exists first
+            let existsCheck = try await sshManager.executeCommand("test -f '\(isoPath)' && echo 'exists' || echo 'notfound'")
+            if existsCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "notfound" {
+                print("DEBUG: ISO file not found at \(isoPath)")
+                self.error = "ISO file not found: \(iso.name)"
+                return
+            }
 
             // Delete the ISO file directly (vm-bhyve doesn't have a delete command for ISOs)
             let output = try await sshManager.executeCommand("rm -f '\(isoPath)'")
             print("DEBUG: Delete output: '\(output)'")
+
+            // Verify deletion
+            let verifyCheck = try await sshManager.executeCommand("test -f '\(isoPath)' && echo 'exists' || echo 'deleted'")
+            if verifyCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "exists" {
+                self.error = "Failed to delete ISO - file still exists"
+            } else {
+                print("DEBUG: ISO deleted successfully")
+            }
         } catch {
             print("DEBUG: Delete error: \(error)")
             self.error = "Failed to delete ISO: \(error.localizedDescription)"
@@ -1657,6 +1737,13 @@ struct UploadISOSheet: View {
     @State private var uploadProgress: Double = 0
     @State private var selectedFileURL: URL?
 
+    // Detailed progress state
+    @State private var transferredBytes: Int64 = 0
+    @State private var totalBytes: Int64 = 0
+    @State private var transferRate: String = ""
+    @State private var uploadCancelled = false
+    @State private var uploadPhase: String = "Uploading"
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -1672,11 +1759,20 @@ struct UploadISOSheet: View {
 
                 Spacer()
 
-                Button("Cancel") {
-                    dismiss()
+                if isUploading {
+                    Button(action: {
+                        uploadCancelled = true
+                    }) {
+                        Label("Cancel Upload", systemImage: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                } else {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                    .keyboardShortcut(.cancelAction)
                 }
-                .keyboardShortcut(.cancelAction)
-                .disabled(isUploading)
             }
             .padding()
 
@@ -1686,18 +1782,52 @@ struct UploadISOSheet: View {
             VStack(spacing: 16) {
                 if isUploading {
                     VStack(spacing: 12) {
-                        ProgressView(value: uploadProgress, total: 1.0)
-                            .progressViewStyle(.linear)
-                        Text("Uploading ISO... \(Int(uploadProgress * 100))%")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                        // File name
                         if let url = selectedFileURL {
                             Text(url.lastPathComponent)
-                                .font(.caption2)
+                                .font(.headline)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+
+                        // Phase indicator
+                        Text(uploadPhase)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        // Progress bar
+                        ProgressView(value: uploadProgress, total: 1.0)
+                            .progressViewStyle(.linear)
+
+                        // Progress details
+                        HStack {
+                            Text(formatBytes(transferredBytes))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            Spacer()
+
+                            if !transferRate.isEmpty {
+                                Text(transferRate)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+
+                            Spacer()
+
+                            Text(formatBytes(totalBytes))
+                                .font(.caption)
                                 .foregroundColor(.secondary)
                         }
+
+                        // Percentage
+                        Text("\(Int(uploadProgress * 100))%")
+                            .font(.title2)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.accentColor)
                     }
                     .padding()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     VStack(spacing: 20) {
                         Image(systemName: "arrow.up.doc.fill")
@@ -1718,7 +1848,23 @@ struct UploadISOSheet: View {
             }
             .padding()
         }
-        .frame(width: 500, height: 300)
+        .frame(width: 500, height: 350)
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        let kb = Double(bytes) / 1024
+        let mb = kb / 1024
+        let gb = mb / 1024
+
+        if gb >= 1 {
+            return String(format: "%.2f GB", gb)
+        } else if mb >= 1 {
+            return String(format: "%.2f MB", mb)
+        } else if kb >= 1 {
+            return String(format: "%.1f KB", kb)
+        } else {
+            return "\(bytes) B"
+        }
     }
 
     private func selectFile() {
@@ -1732,6 +1878,13 @@ struct UploadISOSheet: View {
 
         if panel.runModal() == .OK, let url = panel.url {
             selectedFileURL = url
+
+            // Get file size
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+               let size = attrs[.size] as? Int64 {
+                totalBytes = size
+            }
+
             Task { @MainActor in
                 await uploadISO(url: url)
             }
@@ -1741,18 +1894,35 @@ struct UploadISOSheet: View {
     private func uploadISO(url: URL) async {
         isUploading = true
         uploadProgress = 0
+        uploadCancelled = false
+        transferredBytes = 0
+        transferRate = ""
+        uploadPhase = "Uploading to server..."
 
-        await viewModel.uploadISO(localURL: url, progress: { progress in
-            Task { @MainActor in
-                self.uploadProgress = progress
-            }
-        })
+        await viewModel.uploadISO(
+            localURL: url,
+            detailedProgress: { transferred, total, rate, phase in
+                Task { @MainActor in
+                    self.transferredBytes = transferred
+                    self.totalBytes = total
+                    self.transferRate = rate
+                    self.uploadPhase = phase
+                    self.uploadProgress = total > 0 ? Double(transferred) / Double(total) * 0.9 : 0
+                }
+            },
+            cancelCheck: { self.uploadCancelled }
+        )
 
         isUploading = false
 
-        if viewModel.error == nil {
+        if viewModel.error == nil && !uploadCancelled {
             onUploaded()
             dismiss()
+        } else if uploadCancelled {
+            // Reset state on cancel
+            uploadProgress = 0
+            transferredBytes = 0
+            transferRate = ""
         }
     }
 }
