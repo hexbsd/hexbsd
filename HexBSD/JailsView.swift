@@ -10,17 +10,17 @@ import SwiftUI
 // MARK: - Jail Models
 
 enum JailType: String, CaseIterable, Identifiable {
-    case thick = "Thick (ZFS Dataset)"
     case thin = "Thin (ZFS Clone)"
+    case thick = "Thick (ZFS Dataset)"
 
     var id: String { rawValue }
 
     var description: String {
         switch self {
-        case .thick:
-            return "Dedicated ZFS dataset with full base system. Maximum isolation, independent updates."
         case .thin:
             return "ZFS clone from template snapshot. Fast deployment, space-efficient."
+        case .thick:
+            return "Dedicated ZFS dataset with full base system. Maximum isolation, independent updates."
         }
     }
 
@@ -674,7 +674,7 @@ struct JailCreateSheet: View {
     // Basic settings
     @State private var jailName = ""
     @State private var hostname = ""
-    @State private var jailType: JailType = .thick
+    @State private var jailType: JailType = .thin
 
     // Network settings (vNET only, simplified)
     @State private var ipMode: JailIPMode = .dhcp
