@@ -1900,8 +1900,8 @@ SAVEHIST=10000
             _ = try await sshManager.executeCommand("chown \(uidNum):\(uidNum) \(homePrefix)/\(username)")
             _ = try await sshManager.executeCommand("chmod 755 \(homePrefix)/\(username)")
 
-            // Copy skeleton files
-            _ = try await sshManager.executeCommand("cp -R /usr/share/skel/ \(homePrefix)/\(username)/ 2>/dev/null || true")
+            // Copy skeleton files (rename dot.foo to .foo per FreeBSD convention)
+            _ = try await sshManager.executeCommand("for f in /usr/share/skel/dot.*; do cp \"$f\" \"\(homePrefix)/\(username)/.${f##*/dot.}\"; done 2>/dev/null || true")
             _ = try await sshManager.executeCommand("chown -R \(uidNum):\(uidNum) \(homePrefix)/\(username)")
 
             // Rebuild NIS maps
