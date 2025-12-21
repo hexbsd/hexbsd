@@ -639,6 +639,7 @@ struct ContentView: View {
     @State private var showAbout = false
     @State private var savedServers: [SavedServer] = []
     @State private var selectedServer: SavedServer?
+    @State private var isNavigationLocked = false  // Locks sidebar during long-running operations
 
     // Use shared SSH connection manager across all windows
     var sshManager = SSHConnectionManager.shared
@@ -652,7 +653,7 @@ struct ContentView: View {
                 NavigationLink(value: section) {
                     Label(section.rawValue, systemImage: section.icon)
                 }
-                .disabled(!sshManager.isConnected)
+                .disabled(!sshManager.isConnected || isNavigationLocked)
             }
             .navigationTitle("\(sshManager.isConnected ? sshManager.serverAddress : "HexBSD")")
 
@@ -798,6 +799,12 @@ struct ContentView: View {
                         NotificationCenter.default.post(name: .navigateToNetworkBridges, object: nil)
                     }
                 }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .sidebarNavigationLock)) { notification in
+            // Lock/unlock sidebar navigation during long-running operations
+            if let locked = notification.userInfo?["locked"] as? Bool {
+                isNavigationLocked = locked
             }
         }
     }

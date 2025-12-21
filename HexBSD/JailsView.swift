@@ -148,6 +148,7 @@ struct JailsContentView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                .disabled(viewModel.isLongRunningOperation)
                 .frame(width: 200)
 
                 Spacer()
@@ -1720,6 +1721,8 @@ struct TemplatesTabView: View {
 
     private func createTemplate() async {
         isCreating = true
+        viewModel.isLongRunningOperation = true
+        NotificationCenter.default.post(name: .sidebarNavigationLock, object: nil, userInfo: ["locked": true])
         createError = nil
         createOutput = ""
 
@@ -1739,6 +1742,8 @@ struct TemplatesTabView: View {
         }
 
         isCreating = false
+        viewModel.isLongRunningOperation = false
+        NotificationCenter.default.post(name: .sidebarNavigationLock, object: nil, userInfo: ["locked": false])
     }
 
     private func deleteTemplate(_ template: JailTemplate) async {
@@ -2092,6 +2097,7 @@ class JailsViewModel: ObservableObject {
     @Published var autoRefresh: Bool = false
     @Published var hasElevatedPrivileges: Bool = false
     @Published var jailSetupStatus = JailSetupStatus()
+    @Published var isLongRunningOperation = false  // Locks navigation during template creation, etc.
 
     private let sshManager = SSHConnectionManager.shared
 

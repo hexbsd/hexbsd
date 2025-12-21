@@ -14,4 +14,8 @@ extension Notification.Name {
 
     /// Posted when navigation to Network > Bridges tab is requested
     static let navigateToNetworkBridges = Notification.Name("navigateToNetworkBridges")
+
+    /// Posted when sidebar navigation should be locked/unlocked (during long-running operations)
+    /// UserInfo contains: "locked" (Bool)
+    static let sidebarNavigationLock = Notification.Name("sidebarNavigationLock")
 }
