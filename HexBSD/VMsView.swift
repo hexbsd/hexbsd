@@ -1896,6 +1896,7 @@ struct UploadISOSheet: View {
         uploadProgress = 0
         uploadCancelled = false
         transferredBytes = 0
+        totalBytes = 0
         transferRate = ""
         uploadPhase = "Uploading to server..."
 
@@ -1907,7 +1908,14 @@ struct UploadISOSheet: View {
                     self.totalBytes = total
                     self.transferRate = rate
                     self.uploadPhase = phase
-                    self.uploadProgress = total > 0 ? Double(transferred) / Double(total) * 0.9 : 0
+                    // Step 1 uses 0-90%, Step 2 uses 90-100%
+                    if phase.contains("Step 1") {
+                        self.uploadProgress = total > 0 ? Double(transferred) / Double(total) * 0.9 : 0
+                    } else if phase.contains("Step 2") {
+                        self.uploadProgress = total > 0 ? 0.9 + (Double(transferred) / Double(total) * 0.1) : 0.9
+                    } else {
+                        self.uploadProgress = total > 0 ? Double(transferred) / Double(total) : 0
+                    }
                 }
             },
             cancelCheck: { self.uploadCancelled }
