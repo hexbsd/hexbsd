@@ -3166,7 +3166,7 @@ extension SSHConnectionManager {
         type: JailType,
         ipMode: JailIPMode,
         ipAddress: String,
-        networkInterface: String,
+        bridgeName: String,
         template: JailTemplate?,
         freebsdVersion: String
     ) async throws {
@@ -3193,7 +3193,7 @@ extension SSHConnectionManager {
             type: type,
             ipMode: ipMode,
             ipAddress: ipAddress,
-            networkInterface: networkInterface,
+            bridgeName: bridgeName,
             jailId: jailId
         )
 
@@ -3239,11 +3239,11 @@ extension SSHConnectionManager {
         type: JailType,
         ipMode: JailIPMode,
         ipAddress: String,
-        networkInterface: String,
+        bridgeName: String,
         jailId: Int = 1
     ) -> String {
-        // networkInterface is the physical interface (e.g., vtnet0, em0)
-        let physIface = networkInterface.isEmpty ? "vtnet0" : networkInterface
+        // bridgeName is an existing bridge (e.g., bridge0, bridge1)
+        let bridge = bridgeName.isEmpty ? "bridge0" : bridgeName
 
         // Simple vNET config following FreeBSD Handbook pattern
         var config = """
@@ -3258,11 +3258,9 @@ extension SSHConnectionManager {
             $id = "\(jailId)";
             $epair = "epair${id}";
 
-            # Create bridge if needed, add physical interface and epair
+            # Create epair and add to existing bridge
             exec.prestart  = "/sbin/ifconfig ${epair} create up";
-            exec.prestart += "/sbin/ifconfig bridge0 create 2>/dev/null || true";
-            exec.prestart += "/sbin/ifconfig bridge0 addm \(physIface) 2>/dev/null || true";
-            exec.prestart += "/sbin/ifconfig bridge0 addm ${epair}a up";
+            exec.prestart += "/sbin/ifconfig \(bridge) addm ${epair}a up";
 
         """
 
@@ -7033,12 +7031,11 @@ EOFPKG
         // Bring up the bridge
         _ = try await executeCommand("ifconfig \(name) up 2>&1")
 
-        // Make persistent in rc.conf
-        var rcConfig = "cloned_interfaces=\"\(name)\""
-        _ = try await executeCommand("sysrc \(rcConfig) 2>&1")
+        // Make persistent in rc.conf - append to cloned_interfaces
+        _ = try await executeCommand("sysrc cloned_interfaces+=\"\(name)\" 2>&1")
 
         if !members.isEmpty {
-            rcConfig = "ifconfig_\(name)=\""
+            var rcConfig = "ifconfig_\(name)=\""
             for member in members {
                 rcConfig += "addm \(member) "
             }
@@ -7086,8 +7083,8 @@ EOFPKG
             }
         }
 
-        // Remove from rc.conf
-        _ = try await executeCommand("sysrc -x cloned_interfaces 2>/dev/null || true")
+        // Remove from rc.conf - remove only this bridge from cloned_interfaces
+        _ = try await executeCommand("sysrc cloned_interfaces-=\"\(name)\" 2>/dev/null || true")
         _ = try await executeCommand("sysrc -x ifconfig_\(name) 2>/dev/null || true")
     }
 

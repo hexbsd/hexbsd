@@ -679,7 +679,7 @@ struct JailCreateSheet: View {
     // Network settings (vNET only, simplified)
     @State private var ipMode: JailIPMode = .dhcp
     @State private var ipAddress = ""
-    @State private var networkInterface = "em0"
+    @State private var selectedBridge: BridgeInterface?
 
     // Template settings
     @State private var selectedTemplate: JailTemplate?
@@ -790,9 +790,9 @@ struct JailCreateSheet: View {
                 await loadAvailableReleases()
             }
         }
-        .onChange(of: viewModel.availableInterfaces) { _, interfaces in
-            if !interfaces.isEmpty && !interfaces.contains(networkInterface) {
-                networkInterface = interfaces.first ?? "em0"
+        .onChange(of: viewModel.bridges) { _, bridges in
+            if selectedBridge == nil, let first = bridges.first {
+                selectedBridge = first
             }
         }
     }
@@ -893,13 +893,21 @@ struct JailCreateSheet: View {
                 }
             }
 
-            Section("Bridge Interface") {
-                Picker("Interface", selection: $networkInterface) {
-                    ForEach(viewModel.availableInterfaces, id: \.self) { iface in
-                        Text(iface).tag(iface)
+            Section("Network Bridge") {
+                Picker("Bridge", selection: $selectedBridge) {
+                    Text("Select a bridge...").tag(nil as BridgeInterface?)
+                    ForEach(viewModel.bridges) { bridge in
+                        HStack {
+                            Text(bridge.name)
+                            if !bridge.members.isEmpty {
+                                Text("(\(bridge.members.joined(separator: ", ")))")
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .tag(bridge as BridgeInterface?)
                     }
                 }
-                Text("The jail's virtual interface will be bridged to this interface.")
+                Text("The jail's virtual interface (epair) will be added to this bridge.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -983,8 +991,8 @@ struct JailCreateSheet: View {
     }
 
     private func generateConfigPreview() -> String {
-        // networkInterface is the physical interface (e.g., vtnet0, em0)
-        let physIface = networkInterface.isEmpty ? "vtnet0" : networkInterface
+        // Use the selected bridge name
+        let bridgeName = selectedBridge?.name ?? "bridge0"
 
         // Simple vNET config following FreeBSD Handbook pattern
         var config = """
@@ -999,11 +1007,9 @@ struct JailCreateSheet: View {
             $id = "1";  # Auto-assigned on creation
             $epair = "epair${id}";
 
-            # Create bridge if needed, add physical interface and epair
+            # Create epair and add to existing bridge
             exec.prestart  = "/sbin/ifconfig ${epair} create up";
-            exec.prestart += "/sbin/ifconfig bridge0 create 2>/dev/null || true";
-            exec.prestart += "/sbin/ifconfig bridge0 addm \(physIface) 2>/dev/null || true";
-            exec.prestart += "/sbin/ifconfig bridge0 addm ${epair}a up";
+            exec.prestart += "/sbin/ifconfig \(bridgeName) addm ${epair}a up";
 
         """
 
@@ -1070,7 +1076,7 @@ struct JailCreateSheet: View {
                 type: jailType,
                 ipMode: ipMode,
                 ipAddress: ipAddress,
-                networkInterface: networkInterface,
+                bridgeName: selectedBridge?.name ?? "bridge0",
                 template: selectedTemplate,
                 freebsdVersion: freebsdVersion
             )
@@ -2221,7 +2227,7 @@ class JailsViewModel: ObservableObject {
         type: JailType,
         ipMode: JailIPMode,
         ipAddress: String,
-        networkInterface: String,
+        bridgeName: String,
         template: JailTemplate?,
         freebsdVersion: String
     ) async throws {
@@ -2231,7 +2237,7 @@ class JailsViewModel: ObservableObject {
             type: type,
             ipMode: ipMode,
             ipAddress: ipAddress,
-            networkInterface: networkInterface,
+            bridgeName: bridgeName,
             template: template,
             freebsdVersion: freebsdVersion
         )
