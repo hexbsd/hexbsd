@@ -1438,6 +1438,11 @@ struct BridgesTabView: View {
     @State private var selectedBridge: BridgeInterface?
     @State private var showCreateSheet = false
     @State private var showError = false
+    @State private var showRestartDialog = false
+    @State private var restartMessage = ""
+    @State private var isRestarting = false
+    @State private var showDeleteConfirmation = false
+    @State private var bridgeToDelete: BridgeInterface?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1511,12 +1516,8 @@ struct BridgesTabView: View {
                             .tag(bridge)
                             .contextMenu {
                                 Button(role: .destructive) {
-                                    Task {
-                                        await viewModel.deleteBridge(bridge.name)
-                                        if selectedBridge?.name == bridge.name {
-                                            selectedBridge = nil
-                                        }
-                                    }
+                                    bridgeToDelete = bridge
+                                    showDeleteConfirmation = true
                                 } label: {
                                     Label("Delete Bridge", systemImage: "trash")
                                 }
@@ -1527,7 +1528,13 @@ struct BridgesTabView: View {
                     // Detail view
                     Group {
                         if let bridge = selectedBridge {
-                            BridgeDetailView(bridge: bridge, viewModel: viewModel)
+                            BridgeDetailView(bridge: bridge, viewModel: viewModel, onDeleteRequested: { bridgeToRemove in
+                                bridgeToDelete = bridgeToRemove
+                                showDeleteConfirmation = true
+                            }, onRestartNeeded: { message in
+                                restartMessage = message
+                                showRestartDialog = true
+                            })
                         } else {
                             VStack(spacing: 20) {
                                 Image(systemName: "point.3.connected.trianglepath.dotted")
@@ -1545,7 +1552,10 @@ struct BridgesTabView: View {
             }
         }
         .sheet(isPresented: $showCreateSheet) {
-            CreateBridgeSheet(viewModel: viewModel)
+            CreateBridgeSheet(viewModel: viewModel, onRestartNeeded: { message in
+                restartMessage = message
+                showRestartDialog = true
+            })
         }
         .alert("Error", isPresented: $showError) {
             Button("OK") {
@@ -1553,6 +1563,71 @@ struct BridgesTabView: View {
             }
         } message: {
             Text(viewModel.error ?? "Unknown error")
+        }
+        .alert("Delete Bridge", isPresented: $showDeleteConfirmation) {
+            Button("Cancel", role: .cancel) {
+                bridgeToDelete = nil
+            }
+            Button("Delete and Restart", role: .destructive) {
+                if let bridge = bridgeToDelete {
+                    Task {
+                        let restartNeeded = await viewModel.deleteBridge(bridge.name)
+                        if selectedBridge?.name == bridge.name {
+                            selectedBridge = nil
+                        }
+                        bridgeToDelete = nil
+                        if restartNeeded {
+                            restartMessage = "Bridge configuration removed. Network settings have been configured for the member interface(s) in rc.conf.\n\nThe server will now restart to apply the changes. The IP address may change after restart."
+                            showRestartDialog = true
+                        }
+                    }
+                }
+            }
+        } message: {
+            if let bridge = bridgeToDelete {
+                if bridge.members.isEmpty {
+                    Text("Are you sure you want to delete bridge '\(bridge.name)'?")
+                } else {
+                    Text("Deleting bridge '\(bridge.name)' will transfer its network settings to the member interface (\(bridge.members.first ?? "")).\n\nThis requires a server restart. The IP address may change.")
+                }
+            } else {
+                Text("Are you sure you want to delete this bridge?")
+            }
+        }
+        .alert("Restart Required", isPresented: $showRestartDialog) {
+            Button("Restart Later", role: .cancel) {
+                showRestartDialog = false
+            }
+            Button("Restart Now") {
+                Task {
+                    isRestarting = true
+                    await viewModel.restartServer()
+                    // The connection will be lost, so we don't need to do anything else
+                }
+            }
+        } message: {
+            Text(restartMessage)
+        }
+        .overlay {
+            if isRestarting {
+                ZStack {
+                    Color.black.opacity(0.5)
+                    VStack(spacing: 16) {
+                        ProgressView()
+                            .scaleEffect(1.5)
+                        Text("Restarting server...")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                        Text("The connection will be lost. Please reconnect after the server restarts.")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.8))
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding(32)
+                    .background(Color(nsColor: .windowBackgroundColor))
+                    .cornerRadius(16)
+                }
+            }
         }
         .onChange(of: viewModel.error) { oldValue, newValue in
             if newValue != nil {
@@ -1613,6 +1688,8 @@ struct BridgeRowView: View {
 struct BridgeDetailView: View {
     let bridge: BridgeInterface
     @ObservedObject var viewModel: BridgesViewModel
+    var onDeleteRequested: ((BridgeInterface) -> Void)?
+    var onRestartNeeded: ((String) -> Void)?
 
     var body: some View {
         ScrollView {
@@ -1651,9 +1728,7 @@ struct BridgeDetailView: View {
                 // Action buttons
                 HStack(spacing: 12) {
                     Button(action: {
-                        Task {
-                            await viewModel.deleteBridge(bridge.name)
-                        }
+                        onDeleteRequested?(bridge)
                     }) {
                         Label("Delete Bridge", systemImage: "trash")
                     }
@@ -1716,6 +1791,7 @@ struct BridgeDetailView: View {
 struct CreateBridgeSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var viewModel: BridgesViewModel
+    var onRestartNeeded: ((String) -> Void)?
 
     @State private var bridgeName = ""
     @State private var selectedMembers: Set<String> = []
@@ -1775,6 +1851,10 @@ struct CreateBridgeSheet: View {
                             .textFieldStyle(.roundedBorder)
                         TextField("Netmask", text: $netmask)
                             .textFieldStyle(.roundedBorder)
+                    } else if !selectedMembers.isEmpty {
+                        Text("The bridge will inherit network settings from the first selected member interface.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
                 }
 
@@ -1831,7 +1911,7 @@ struct CreateBridgeSheet: View {
         createError = nil
 
         do {
-            try await viewModel.createBridge(
+            let restartNeeded = try await viewModel.createBridge(
                 name: bridgeName,
                 members: Array(selectedMembers),
                 ipAddress: useStaticIP ? ipAddress : nil,
@@ -1839,6 +1919,11 @@ struct CreateBridgeSheet: View {
                 stp: enableSTP
             )
             dismiss()
+
+            if restartNeeded && !selectedMembers.isEmpty {
+                // Notify parent that restart is needed
+                onRestartNeeded?("Bridge created successfully. Network settings have been migrated from the member interface(s) to the bridge.\n\nA restart is required for the changes to take effect at boot time. The server's IP address may change after restart if DHCP is used.")
+            }
         } catch {
             createError = error.localizedDescription
         }
@@ -2530,6 +2615,7 @@ class BridgesViewModel: ObservableObject {
     @Published var availableInterfaces: [String] = []
     @Published var isLoading = false
     @Published var error: String?
+    @Published var pendingRestartRequired = false
 
     private let sshManager = SSHConnectionManager.shared
 
@@ -2564,18 +2650,23 @@ class BridgesViewModel: ObservableObject {
         await loadBridges()
     }
 
-    func createBridge(name: String, members: [String], ipAddress: String?, netmask: String?, stp: Bool) async throws {
-        try await sshManager.createBridge(name: name, members: members, ipAddress: ipAddress, netmask: netmask, stp: stp)
+    /// Creates a bridge and returns true if a restart is required
+    func createBridge(name: String, members: [String], ipAddress: String?, netmask: String?, stp: Bool) async throws -> Bool {
+        let restartRequired = try await sshManager.createBridge(name: name, members: members, ipAddress: ipAddress, netmask: netmask, stp: stp)
         await refresh()
+        return restartRequired
     }
 
-    func deleteBridge(_ name: String) async {
+    /// Deletes a bridge and returns true if a restart is required
+    func deleteBridge(_ name: String) async -> Bool {
         error = nil
         do {
-            try await sshManager.deleteBridge(name)
+            let restartRequired = try await sshManager.deleteBridge(name)
             await refresh()
+            return restartRequired
         } catch {
             self.error = "Failed to delete bridge: \(error.localizedDescription)"
+            return false
         }
     }
 
@@ -2586,6 +2677,17 @@ class BridgesViewModel: ObservableObject {
             await refresh()
         } catch {
             self.error = "Failed to remove member: \(error.localizedDescription)"
+        }
+    }
+
+    /// Restart the server to apply network changes
+    func restartServer() async {
+        do {
+            // Use shutdown -r now for a clean restart
+            _ = try await sshManager.executeCommand("shutdown -r now 2>&1 &")
+            pendingRestartRequired = false
+        } catch {
+            self.error = "Failed to initiate restart: \(error.localizedDescription)"
         }
     }
 }

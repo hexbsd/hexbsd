@@ -7362,14 +7362,80 @@ EOFPKG
             .filter { !$0.isEmpty }
     }
 
-    /// Create a new bridge interface
-    func createBridge(name: String, members: [String], ipAddress: String?, netmask: String?, stp: Bool) async throws {
+    /// Read interface/bridge configuration from rc.conf
+    private func readInterfaceRcConfig(_ interfaceName: String) async throws -> (ipv4: String?, ipv6: String?, isDHCP: Bool) {
+        // Read IPv4 configuration
+        let ipv4Output = try await executeCommand("sysrc -n ifconfig_\(interfaceName) 2>/dev/null || echo ''")
+        let ipv4Config = ipv4Output.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Read IPv6 configuration
+        let ipv6Output = try await executeCommand("sysrc -n ifconfig_\(interfaceName)_ipv6 2>/dev/null || echo ''")
+        let ipv6Config = ipv6Output.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Check if DHCP is used (case insensitive check for DHCP, SYNCDHCP, dhclient)
+        let isDHCP = ipv4Config.uppercased().contains("DHCP") || ipv4Config.contains("dhclient")
+
+        return (
+            ipv4Config.isEmpty ? nil : ipv4Config,
+            ipv6Config.isEmpty ? nil : ipv6Config,
+            isDHCP
+        )
+    }
+
+    /// Convert bridge settings to interface settings (e.g., SYNCDHCP -> DHCP)
+    private func convertBridgeSettingsToInterface(_ bridgeConfig: String) -> String {
+        var config = bridgeConfig
+
+        // Convert SYNCDHCP to DHCP (SYNCDHCP is bridge-specific for boot timing)
+        config = config.replacingOccurrences(of: "SYNCDHCP", with: "DHCP")
+
+        // Remove bridge-specific options that don't apply to regular interfaces
+        // Remove "up" if it's the only thing or at the start (interfaces get "up" implicitly with DHCP)
+        config = config.replacingOccurrences(of: "up DHCP", with: "DHCP")
+        config = config.replacingOccurrences(of: "DHCP up", with: "DHCP")
+
+        return config.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Create a new bridge interface with proper handling of member interface settings
+    /// - Parameters:
+    ///   - name: Bridge interface name (e.g., "bridge0")
+    ///   - members: Member interfaces to add to the bridge
+    ///   - ipAddress: Optional static IP address (if nil and member has DHCP, bridge will use DHCP)
+    ///   - netmask: Optional netmask for static IP
+    ///   - stp: Enable Spanning Tree Protocol
+    /// - Returns: True if a restart is required for changes to take effect
+    func createBridge(name: String, members: [String], ipAddress: String?, netmask: String?, stp: Bool) async throws -> Bool {
         guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
-        // Create the bridge interface
+        // Read existing configurations for member interfaces to determine bridge settings
+        var primaryMemberUsesDHCP = false
+        var primaryMemberIPv6Config: String?
+
+        for (index, member) in members.enumerated() {
+            let config = try await readInterfaceRcConfig(member)
+
+            // Use the first member's settings as the basis for bridge configuration
+            if index == 0 {
+                primaryMemberUsesDHCP = config.isDHCP
+                primaryMemberIPv6Config = config.ipv6
+            }
+        }
+
+        // Reconfigure member interfaces for bridging
+        for member in members {
+            // Configure member interface for bridging - strip IP config, just bring it up
+            // Using -tso -vlanhwtso for better bridge compatibility
+            _ = try await executeCommand("sysrc ifconfig_\(member)=\"up -tso -vlanhwtso\" 2>&1")
+
+            // Remove IPv6 config from member (it will be on the bridge now)
+            _ = try await executeCommand("sysrc -x ifconfig_\(member)_ipv6 2>/dev/null || true")
+        }
+
+        // Create the bridge interface for immediate use
         var output = try await executeCommand("ifconfig \(name) create 2>&1")
         if output.contains("Permission denied") {
             throw NSError(domain: "SSHConnectionManager", code: 1,
@@ -7390,7 +7456,7 @@ EOFPKG
             _ = try await executeCommand("ifconfig \(name) stp \(members.first ?? "") 2>&1")
         }
 
-        // Set IP address if provided
+        // Set IP address if provided, otherwise inherit from member
         if let ip = ipAddress, let mask = netmask {
             _ = try await executeCommand("ifconfig \(name) inet \(ip) netmask \(mask) 2>&1")
         }
@@ -7398,24 +7464,52 @@ EOFPKG
         // Bring up the bridge
         _ = try await executeCommand("ifconfig \(name) up 2>&1")
 
-        // Make persistent in rc.conf - append to cloned_interfaces
+        // Make persistent in rc.conf
         _ = try await executeCommand("sysrc cloned_interfaces+=\"\(name)\" 2>&1")
 
-        if !members.isEmpty {
-            var rcConfig = "ifconfig_\(name)=\""
-            for member in members {
-                rcConfig += "addm \(member) "
-            }
-            if stp {
-                rcConfig += "stp \(members.first ?? "") "
-            }
-            rcConfig += "up\""
-            _ = try await executeCommand("sysrc \(rcConfig) 2>&1")
+        // Build create_args for the bridge (used at boot time)
+        // This adds members during interface creation before ifconfig runs
+        var createArgs = "inet6 auto_linklocal -ifdisabled"
+        for member in members {
+            createArgs += " addm \(member)"
         }
+        _ = try await executeCommand("sysrc create_args_\(name)=\"\(createArgs)\" 2>&1")
+
+        // Build ifconfig for the bridge
+        var bridgeConfig = "up"
+        if stp {
+            bridgeConfig += " stp \(members.first ?? "")"
+        }
+
+        // Determine IP configuration for bridge
+        if let ip = ipAddress, let mask = netmask {
+            // Static IP was explicitly provided
+            bridgeConfig = "inet \(ip) netmask \(mask) \(bridgeConfig)"
+            _ = try await executeCommand("sysrc ifconfig_\(name)=\"\(bridgeConfig)\" 2>&1")
+        } else if primaryMemberUsesDHCP {
+            // Primary member used DHCP, configure bridge for DHCP
+            // Use SYNCDHCP to ensure DHCP completes before continuing boot
+            _ = try await executeCommand("sysrc ifconfig_\(name)=\"up SYNCDHCP\" 2>&1")
+        } else {
+            // No IP config specified and member didn't have DHCP
+            _ = try await executeCommand("sysrc ifconfig_\(name)=\"\(bridgeConfig)\" 2>&1")
+        }
+
+        // Configure IPv6 on bridge if primary member had it
+        if let ipv6Config = primaryMemberIPv6Config {
+            _ = try await executeCommand("sysrc ifconfig_\(name)_ipv6=\"\(ipv6Config)\" 2>&1")
+        }
+
+        // Return true to indicate restart is required for proper boot configuration
+        return true
     }
 
-    /// Delete a bridge interface
-    func deleteBridge(_ name: String) async throws {
+    /// Delete a bridge interface and transfer its settings to member interfaces
+    /// This updates rc.conf but does NOT destroy the bridge immediately if it has members,
+    /// because doing so would break the network connection. A restart is required.
+    /// - Parameter name: Bridge interface name to delete
+    /// - Returns: True if a restart is required for changes to take effect
+    func deleteBridge(_ name: String) async throws -> Bool {
         guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
@@ -7423,13 +7517,89 @@ EOFPKG
 
         // Check if this bridge is used by a VM switch (manual switches reference existing bridges)
         let switchList = try await executeCommand("vm switch list 2>/dev/null | grep -w '\(name)' | awk '{print $1}' || echo ''")
-        let switchName = switchList.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !switchName.isEmpty {
+        let vmSwitchName = switchList.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !vmSwitchName.isEmpty {
             throw NSError(domain: "SSHConnectionManager", code: 1,
-                         userInfo: [NSLocalizedDescriptionKey: "Cannot delete bridge '\(name)' because it is used by VM switch '\(switchName)'. Please delete the switch first."])
+                         userInfo: [NSLocalizedDescriptionKey: "Cannot delete bridge '\(name)' because it is used by VM switch '\(vmSwitchName)'. Please delete the switch first."])
         }
 
-        // Check if this is a vm-bhyve switch (vm-* bridges)
+        // Get the list of member interfaces from the running bridge
+        var memberInterfaces: [String] = []
+        let bridgeInfoOutput = try await executeCommand("ifconfig \(name) 2>/dev/null || echo ''")
+        // Parse member interfaces from bridge info (look for "member: <interface>" lines)
+        for line in bridgeInfoOutput.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("member:") {
+                let parts = trimmed.components(separatedBy: .whitespaces)
+                if parts.count >= 2 {
+                    memberInterfaces.append(parts[1])
+                }
+            }
+        }
+
+        // IMPORTANT: Update rc.conf FIRST before any destructive operations
+        // This ensures the configuration is correct even if the connection is lost
+
+        // Read the bridge's current settings from rc.conf
+        let bridgeConfig = try await readInterfaceRcConfig(name)
+
+        // Transfer bridge settings to member interfaces
+        // The bridge's IP settings should go to the first member (primary interface)
+        for (index, member) in memberInterfaces.enumerated() {
+            if index == 0 {
+                // Primary member gets the bridge's IP settings
+                if let ipv4 = bridgeConfig.ipv4 {
+                    // Convert bridge settings to interface settings (SYNCDHCP -> DHCP, etc.)
+                    let interfaceConfig = convertBridgeSettingsToInterface(ipv4)
+                    _ = try await executeCommand("sysrc ifconfig_\(member)=\"\(interfaceConfig)\" 2>&1")
+                } else {
+                    // No IPv4 config on bridge, set DHCP as default
+                    _ = try await executeCommand("sysrc ifconfig_\(member)=\"DHCP\" 2>&1")
+                }
+
+                if let ipv6 = bridgeConfig.ipv6 {
+                    _ = try await executeCommand("sysrc ifconfig_\(member)_ipv6=\"\(ipv6)\" 2>&1")
+                } else {
+                    // Set default IPv6 config
+                    _ = try await executeCommand("sysrc ifconfig_\(member)_ipv6=\"inet6 accept_rtadv\" 2>&1")
+                }
+            } else {
+                // Additional members just need to be brought up (no IP)
+                _ = try await executeCommand("sysrc ifconfig_\(member)=\"up\" 2>&1")
+                _ = try await executeCommand("sysrc -x ifconfig_\(member)_ipv6 2>/dev/null || true")
+            }
+        }
+
+        // Clean up any old backup entries that may exist from previous versions
+        for member in memberInterfaces {
+            _ = try await executeCommand("sysrc -x hexbsd_backup_ifconfig_\(member) 2>/dev/null || true")
+            _ = try await executeCommand("sysrc -x hexbsd_backup_ifconfig_\(member)_ipv6 2>/dev/null || true")
+        }
+
+        // Remove bridge configuration from rc.conf
+        _ = try await executeCommand("sysrc cloned_interfaces-=\"\(name)\" 2>/dev/null || true")
+
+        // If cloned_interfaces is now empty, remove it entirely
+        let clonedIfacesOutput = try await executeCommand("sysrc -n cloned_interfaces 2>/dev/null || echo ''")
+        let clonedIfaces = clonedIfacesOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if clonedIfaces.isEmpty {
+            _ = try await executeCommand("sysrc -x cloned_interfaces 2>/dev/null || true")
+        }
+
+        _ = try await executeCommand("sysrc -x ifconfig_\(name) 2>/dev/null || true")
+        _ = try await executeCommand("sysrc -x ifconfig_\(name)_ipv6 2>/dev/null || true")
+        _ = try await executeCommand("sysrc -x create_args_\(name) 2>/dev/null || true")
+
+        // If this bridge has member interfaces, we need a restart
+        // Do NOT destroy the bridge now - it would break the network connection
+        if !memberInterfaces.isEmpty {
+            // The bridge will be removed on restart since it's no longer in cloned_interfaces
+            // and the interface settings will be applied
+            return true
+        }
+
+        // Check if this is a vm-bhyve switch (vm-* bridges) - these can be destroyed safely
+        // as they don't typically carry the management connection
         if name.hasPrefix("vm-") {
             // Extract switch name (vm-public -> public)
             let switchName = String(name.dropFirst(3))
@@ -7439,20 +7609,18 @@ EOFPKG
             // Also try to destroy the interface directly in case vm switch doesn't exist
             _ = try await executeCommand("ifconfig \(name) down 2>&1 || true")
             _ = try await executeCommand("ifconfig \(name) destroy 2>&1 || true")
-        } else {
-            // Regular bridge - bring down and destroy
-            _ = try await executeCommand("ifconfig \(name) down 2>&1")
-            let output = try await executeCommand("ifconfig \(name) destroy 2>&1")
-
-            if output.contains("Permission denied") {
-                throw NSError(domain: "SSHConnectionManager", code: 1,
-                             userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
-            }
+            return false
         }
 
-        // Remove from rc.conf - remove only this bridge from cloned_interfaces
-        _ = try await executeCommand("sysrc cloned_interfaces-=\"\(name)\" 2>/dev/null || true")
-        _ = try await executeCommand("sysrc -x ifconfig_\(name) 2>/dev/null || true")
+        // For bridges without members, we can safely destroy immediately
+        _ = try await executeCommand("ifconfig \(name) down 2>&1 || true")
+        let output = try await executeCommand("ifconfig \(name) destroy 2>&1")
+
+        if output.contains("Permission denied") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
+        }
+        return false
     }
 
     /// Remove a member from a bridge
