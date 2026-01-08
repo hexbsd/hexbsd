@@ -406,7 +406,7 @@ struct PortsContentView: View {
             Text(viewModel.error ?? "Unknown error")
         }
         .sheet(isPresented: $viewModel.isSettingUp) {
-            PortsSetupProgressSheet(step: viewModel.setupStep)
+            PortsSetupProgressSheet(step: viewModel.setupStep, consoleOutput: $viewModel.consoleOutput)
         }
         .onChange(of: viewModel.error) { oldValue, newValue in
             if newValue != nil {
@@ -658,6 +658,7 @@ class PortsViewModel: ObservableObject {
     @Published var gitInstalled = false
     @Published var isSettingUp = false
     @Published var setupStep = ""
+    @Published var consoleOutput = ""
 
     private let sshManager = SSHConnectionManager.shared
 
@@ -695,37 +696,68 @@ class PortsViewModel: ObservableObject {
 
     func setupPorts() async {
         isSettingUp = true
+        consoleOutput = ""
         error = nil
 
         do {
             // Step 1: Install git if not present
             if !gitInstalled {
                 setupStep = "Installing git..."
-                _ = try await sshManager.executeCommand("pkg install -y git")
+                appendConsole("[Step 1/3] Installing git package...\n")
+                _ = try await sshManager.executeCommandStreaming("pkg install -y git") { [weak self] output in
+                    Task { @MainActor in
+                        self?.appendConsole(output)
+                    }
+                }
+                appendConsole("\n✓ Git installed successfully\n\n")
                 gitInstalled = true
+            } else {
+                appendConsole("[Step 1/3] Git already installed ✓\n\n")
             }
 
             // Step 2: Clone ports tree
             if !isInstalled {
-                setupStep = "Cloning ports tree (this may take a few minutes)..."
-                _ = try await sshManager.executeCommand("git clone https://git.FreeBSD.org/ports.git /usr/ports --depth=1")
+                setupStep = "Cloning ports tree..."
+                appendConsole("[Step 2/3] Cloning FreeBSD ports tree (shallow clone with --depth=1)...\n")
+                appendConsole("Repository: https://git.FreeBSD.org/ports.git\n")
+                appendConsole("Destination: /usr/ports\n\n")
+                _ = try await sshManager.executeCommandStreaming("git clone --progress https://git.FreeBSD.org/ports.git /usr/ports --depth=1") { [weak self] output in
+                    Task { @MainActor in
+                        self?.appendConsole(output)
+                    }
+                }
+                appendConsole("\n✓ Ports tree cloned successfully\n\n")
                 isInstalled = true
                 portsPath = "/usr/ports"
+            } else {
+                appendConsole("[Step 2/3] Ports tree already installed ✓\n\n")
             }
 
             // Step 3: Generate INDEX file
             if !hasIndex {
-                setupStep = "Generating INDEX file (this may take several minutes)..."
-                _ = try await sshManager.executeCommand("cd /usr/ports && make index")
+                setupStep = "Generating INDEX file..."
+                appendConsole("[Step 3/3] Generating INDEX file...\n")
+                appendConsole("Running: cd /usr/ports && make index\n")
+                appendConsole("This scans all ports to build a searchable index.\n\n")
+                _ = try await sshManager.executeCommandStreaming("cd /usr/ports && make index") { [weak self] output in
+                    Task { @MainActor in
+                        self?.appendConsole(output)
+                    }
+                }
+                appendConsole("\n✓ INDEX file generated successfully\n\n")
                 hasIndex = true
             }
 
             setupStep = "Setup complete!"
+            appendConsole("═══════════════════════════════════════\n")
+            appendConsole("✓ Ports tree setup completed!\n")
+            appendConsole("═══════════════════════════════════════\n")
 
             // Reload ports data
             await loadPorts()
 
         } catch {
+            appendConsole("\n✗ Error: \(error.localizedDescription)\n")
             self.error = "Setup failed: \(error.localizedDescription)"
         }
 
@@ -733,13 +765,33 @@ class PortsViewModel: ObservableObject {
         setupStep = ""
     }
 
+    private func appendConsole(_ text: String) {
+        consoleOutput += text
+    }
+
     func generateIndex() async {
         isSettingUp = true
+        consoleOutput = ""
         error = nil
 
         do {
-            setupStep = "Generating INDEX file (this may take several minutes)..."
-            _ = try await sshManager.executeCommand("cd \(portsPath) && make index")
+            setupStep = "Generating INDEX file..."
+            appendConsole("═══════════════════════════════════════\n")
+            appendConsole("Generating INDEX file\n")
+            appendConsole("═══════════════════════════════════════\n\n")
+            appendConsole("Ports tree: \(portsPath)\n")
+            appendConsole("Running: cd \(portsPath) && make index\n")
+            appendConsole("This scans all ports to build a searchable index.\n\n")
+
+            _ = try await sshManager.executeCommandStreaming("cd \(portsPath) && make index") { [weak self] output in
+                Task { @MainActor in
+                    self?.appendConsole(output)
+                }
+            }
+
+            appendConsole("\n═══════════════════════════════════════\n")
+            appendConsole("✓ INDEX file generated successfully!\n")
+            appendConsole("═══════════════════════════════════════\n")
             hasIndex = true
             setupStep = "INDEX generated!"
 
@@ -747,6 +799,7 @@ class PortsViewModel: ObservableObject {
             await loadPorts()
 
         } catch {
+            appendConsole("\n✗ Error: \(error.localizedDescription)\n")
             self.error = "Failed to generate INDEX: \(error.localizedDescription)"
         }
 
@@ -784,29 +837,77 @@ class PortsViewModel: ObservableObject {
 
 struct PortsSetupProgressSheet: View {
     let step: String
+    @Binding var consoleOutput: String
+    @State private var autoScroll = true
 
     var body: some View {
-        VStack(spacing: 20) {
-            Text("Setting Up Ports Tree")
-                .font(.title2)
-                .bold()
+        VStack(spacing: 16) {
+            // Header
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Setting Up Ports Tree")
+                        .font(.title2)
+                        .bold()
+                    Text(step)
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                ProgressView()
+                    .scaleEffect(0.8)
+            }
+            .padding(.horizontal)
+            .padding(.top)
 
-            ProgressView()
-                .scaleEffect(1.5)
-                .padding()
+            Divider()
 
-            Text(step)
-                .font(.body)
-                .foregroundColor(.secondary)
-                .frame(minWidth: 300)
-                .multilineTextAlignment(.center)
+            // Console output
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(consoleOutput.isEmpty ? "Waiting for output..." : consoleOutput)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(consoleOutput.isEmpty ? .secondary : .primary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
 
-            Text("Please wait...")
-                .font(.caption)
-                .foregroundColor(.secondary)
+                        // Anchor for auto-scroll
+                        Color.clear
+                            .frame(height: 1)
+                            .id("bottom")
+                    }
+                    .padding(12)
+                }
+                .background(Color(nsColor: .textBackgroundColor))
+                .cornerRadius(8)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                )
+                .onChange(of: consoleOutput) { _, _ in
+                    if autoScroll {
+                        withAnimation(.easeOut(duration: 0.1)) {
+                            proxy.scrollTo("bottom", anchor: .bottom)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal)
+
+            // Footer with auto-scroll toggle
+            HStack {
+                Toggle("Auto-scroll", isOn: $autoScroll)
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+                Spacer()
+                Text("Please wait while the operation completes...")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal)
+            .padding(.bottom)
         }
-        .padding(40)
-        .frame(minWidth: 400)
+        .frame(width: 700, height: 500)
         .interactiveDismissDisabled()
     }
 }
