@@ -600,7 +600,6 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case logs = "Logs"
     case network = "Network"
     case packages = "Packages"
-    case ports = "Ports"
     case poudriere = "Poudriere"
     case security = "Security"
     case services = "Services"
@@ -620,7 +619,6 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .logs: return "doc.text"
         case .network: return "network"
         case .packages: return "shippingbox.fill"
-        case .ports: return "app.connected.to.app.below.fill"
         case .poudriere: return "shippingbox"
         case .security: return "shield.lefthalf.filled"
         case .services: return "gearshape.2"
@@ -996,9 +994,6 @@ struct DetailView: View {
             } else if section == .packages {
                 // Package management
                 PackagesContentView()
-            } else if section == .ports {
-                // Ports tree browser
-                PortsContentView()
             } else if section == .poudriere {
                 // Poudriere build status viewer
                 PoudriereContentView()
