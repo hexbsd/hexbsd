@@ -2,7 +2,7 @@
 //  NetworkView.swift
 //  HexBSD
 //
-//  Network interface management for ethernet, wireless, and bridges
+//  Network interface management for ethernet and bridges
 //
 
 import SwiftUI
@@ -12,7 +12,6 @@ import AppKit
 
 enum InterfaceType: String, CaseIterable {
     case ethernet = "Ethernet"
-    case wireless = "Wireless"
     case bridge = "Bridge"
     case tap = "TAP"
     case epair = "Epair"
@@ -24,7 +23,6 @@ enum InterfaceType: String, CaseIterable {
     var icon: String {
         switch self {
         case .ethernet: return "cable.connector"
-        case .wireless: return "wifi"
         case .bridge: return "point.3.connected.trianglepath.dotted"
         case .tap: return "arrow.up.arrow.down.circle"
         case .epair: return "arrow.left.arrow.right.circle"
@@ -38,7 +36,6 @@ enum InterfaceType: String, CaseIterable {
     var color: Color {
         switch self {
         case .ethernet: return .blue
-        case .wireless: return .green
         case .bridge: return .purple
         case .tap: return .pink
         case .epair: return .indigo
@@ -148,64 +145,6 @@ struct NetworkInterfaceInfo: Identifiable, Hashable {
     }
 }
 
-// MARK: - Wireless Models
-
-struct WirelessNetwork: Identifiable, Hashable {
-    let id = UUID()
-    let ssid: String
-    let bssid: String
-    let channel: Int
-    let rssi: Int           // Signal strength in dBm
-    let noiseFloor: Int     // Noise in dBm
-    let rate: String        // e.g., "54M"
-    let security: String    // WPA2, WPA3, OPEN, etc.
-    let isConnected: Bool
-
-    var signalQuality: Int {
-        // Convert RSSI to percentage (typical range -30 to -90 dBm)
-        let minRSSI = -90
-        let maxRSSI = -30
-        let clamped = max(minRSSI, min(maxRSSI, rssi))
-        return Int(Double(clamped - minRSSI) / Double(maxRSSI - minRSSI) * 100)
-    }
-
-    var signalIcon: String {
-        let quality = signalQuality
-        if quality >= 75 {
-            return "wifi"
-        } else if quality >= 50 {
-            return "wifi"
-        } else if quality >= 25 {
-            return "wifi"
-        } else {
-            return "wifi.exclamationmark"
-        }
-    }
-
-    var signalColor: Color {
-        let quality = signalQuality
-        if quality >= 75 {
-            return .green
-        } else if quality >= 50 {
-            return .yellow
-        } else if quality >= 25 {
-            return .orange
-        } else {
-            return .red
-        }
-    }
-}
-
-struct WirelessStatus {
-    let interfaceName: String
-    let ssid: String
-    let bssid: String
-    let channel: Int
-    let rssi: Int
-    let rate: String
-    let authMode: String
-}
-
 // MARK: - Bridge Models
 
 struct BridgeInterface: Identifiable, Hashable {
@@ -249,7 +188,6 @@ struct VMSwitch: Identifiable, Hashable {
 
 enum NetworkTab: String, CaseIterable {
     case interfaces = "Interfaces"
-    case wireless = "Wireless"
     case bridges = "Bridges"
     case switches = "Switches"
     case routing = "Routing"
@@ -257,7 +195,6 @@ enum NetworkTab: String, CaseIterable {
     var icon: String {
         switch self {
         case .interfaces: return "network"
-        case .wireless: return "wifi"
         case .bridges: return "point.3.connected.trianglepath.dotted"
         case .switches: return "arrow.left.arrow.right.square"
         case .routing: return "arrow.triangle.branch"
@@ -270,7 +207,6 @@ enum NetworkTab: String, CaseIterable {
 enum InterfaceTypeFilter: String, CaseIterable {
     case all = "All"
     case ethernet = "Ethernet"
-    case wireless = "Wireless"
     case vlan = "VLAN"
     case other = "Other"
 
@@ -278,7 +214,6 @@ enum InterfaceTypeFilter: String, CaseIterable {
         switch self {
         case .all: return "square.grid.2x2"
         case .ethernet: return "cable.connector"
-        case .wireless: return "wifi"
         case .vlan: return "tag"
         case .other: return "network"
         }
@@ -363,8 +298,6 @@ struct NetworkContentView: View {
             switch selectedTab {
             case .interfaces:
                 InterfacesTabView()
-            case .wireless:
-                WirelessTabView()
             case .bridges:
                 BridgesTabView()
             case .switches:
@@ -404,8 +337,6 @@ struct InterfacesTabView: View {
             break
         case .ethernet:
             interfaces = interfaces.filter { $0.type == .ethernet }
-        case .wireless:
-            interfaces = interfaces.filter { $0.type == .wireless }
         case .vlan:
             interfaces = interfaces.filter { $0.type == .vlan }
         case .other:
@@ -1076,358 +1007,6 @@ struct ConfigureInterfaceSheet: View {
         }
 
         isSaving = false
-    }
-}
-
-// MARK: - Wireless Tab View
-
-struct WirelessTabView: View {
-    @StateObject private var viewModel = WirelessViewModel()
-    @State private var selectedNetwork: WirelessNetwork?
-    @State private var showConnectSheet = false
-    @State private var showError = false
-    @State private var searchText = ""
-
-    var filteredNetworks: [WirelessNetwork] {
-        if searchText.isEmpty {
-            return viewModel.networks
-        }
-        return viewModel.networks.filter {
-            $0.ssid.localizedCaseInsensitiveContains(searchText) ||
-            $0.bssid.localizedCaseInsensitiveContains(searchText)
-        }
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Toolbar
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Wireless Networks")
-                        .font(.headline)
-
-                    if let status = viewModel.wirelessStatus {
-                        HStack(spacing: 4) {
-                            Image(systemName: "wifi")
-                                .foregroundColor(.green)
-                            Text("Connected to \(status.ssid)")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    } else if viewModel.wirelessInterface != nil {
-                        Text("Not connected")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    } else {
-                        Text("No wireless interface found")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-
-                Spacer()
-
-                // Search
-                TextField("Search...", text: $searchText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 150)
-
-                Button(action: {
-                    Task {
-                        await viewModel.scanNetworks()
-                    }
-                }) {
-                    Label("Scan", systemImage: "antenna.radiowaves.left.and.right")
-                }
-                .buttonStyle(.bordered)
-                .disabled(viewModel.wirelessInterface == nil || viewModel.isScanning)
-
-                Button(action: {
-                    Task {
-                        await viewModel.refresh()
-                    }
-                }) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
-            }
-            .padding()
-
-            Divider()
-
-            // Content
-            if viewModel.isLoading {
-                VStack(spacing: 20) {
-                    ProgressView()
-                        .scaleEffect(1.5)
-                    Text("Loading wireless information...")
-                        .font(.headline)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if viewModel.wirelessInterface == nil {
-                VStack(spacing: 20) {
-                    Image(systemName: "wifi.slash")
-                        .font(.system(size: 72))
-                        .foregroundColor(.secondary)
-                    Text("No Wireless Interface")
-                        .font(.title2)
-                        .foregroundColor(.secondary)
-                    Text("No wireless network interface was detected on this system")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if viewModel.isScanning {
-                VStack(spacing: 20) {
-                    ProgressView()
-                        .scaleEffect(1.5)
-                    Text("Scanning for wireless networks...")
-                        .font(.headline)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if viewModel.networks.isEmpty {
-                VStack(spacing: 20) {
-                    Image(systemName: "wifi.exclamationmark")
-                        .font(.system(size: 72))
-                        .foregroundColor(.secondary)
-                    Text("No Networks Found")
-                        .font(.title2)
-                        .foregroundColor(.secondary)
-                    Text("Click Scan to search for available wireless networks")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    Button(action: {
-                        Task {
-                            await viewModel.scanNetworks()
-                        }
-                    }) {
-                        Label("Scan for Networks", systemImage: "antenna.radiowaves.left.and.right")
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                List(filteredNetworks, selection: $selectedNetwork) { network in
-                    WirelessNetworkRow(network: network)
-                        .tag(network)
-                        .contextMenu {
-                            if network.isConnected {
-                                Button("Disconnect") {
-                                    Task {
-                                        await viewModel.disconnect()
-                                    }
-                                }
-                            } else {
-                                Button("Connect") {
-                                    selectedNetwork = network
-                                    showConnectSheet = true
-                                }
-                            }
-                        }
-                }
-            }
-        }
-        .sheet(isPresented: $showConnectSheet) {
-            if let network = selectedNetwork {
-                ConnectToNetworkSheet(network: network, viewModel: viewModel)
-            }
-        }
-        .alert("Error", isPresented: $showError) {
-            Button("OK") {
-                showError = false
-            }
-        } message: {
-            Text(viewModel.error ?? "Unknown error")
-        }
-        .onChange(of: viewModel.error) { oldValue, newValue in
-            if newValue != nil {
-                showError = true
-            }
-        }
-        .onAppear {
-            Task {
-                await viewModel.loadWirelessInfo()
-            }
-        }
-    }
-}
-
-// MARK: - Wireless Network Row
-
-struct WirelessNetworkRow: View {
-    let network: WirelessNetwork
-
-    var body: some View {
-        HStack(spacing: 12) {
-            // Signal strength icon
-            Image(systemName: network.signalIcon)
-                .font(.system(size: 20))
-                .foregroundColor(network.signalColor)
-                .frame(width: 24)
-
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text(network.ssid.isEmpty ? "(Hidden Network)" : network.ssid)
-                        .font(.headline)
-
-                    if network.isConnected {
-                        Text("Connected")
-                            .font(.caption2)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.green.opacity(0.2))
-                            .foregroundColor(.green)
-                            .cornerRadius(4)
-                    }
-                }
-
-                HStack(spacing: 12) {
-                    Text(network.security)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    Text("Ch \(network.channel)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    Text(network.rate)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-
-            Spacer()
-
-            // Signal quality percentage
-            VStack(alignment: .trailing, spacing: 2) {
-                Text("\(network.signalQuality)%")
-                    .font(.headline)
-                    .foregroundColor(network.signalColor)
-                Text("\(network.rssi) dBm")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-        }
-        .padding(.vertical, 6)
-    }
-}
-
-// MARK: - Connect to Network Sheet
-
-struct ConnectToNetworkSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    let network: WirelessNetwork
-    @ObservedObject var viewModel: WirelessViewModel
-
-    @State private var password = ""
-    @State private var isConnecting = false
-    @State private var connectError: String?
-
-    var requiresPassword: Bool {
-        network.security != "OPEN" && network.security != "open"
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            HStack {
-                Image(systemName: network.signalIcon)
-                    .font(.system(size: 32))
-                    .foregroundColor(network.signalColor)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Connect to Network")
-                        .font(.title2)
-                        .fontWeight(.semibold)
-                    Text(network.ssid)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                Spacer()
-
-                Text(network.security)
-                    .font(.caption)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Color.secondary.opacity(0.2))
-                    .cornerRadius(8)
-            }
-            .padding()
-
-            Divider()
-
-            // Password field
-            VStack(alignment: .leading, spacing: 12) {
-                if requiresPassword {
-                    Text("Password")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    SecureField("Enter network password", text: $password)
-                        .textFieldStyle(.roundedBorder)
-                } else {
-                    Text("This network is open and does not require a password.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-            .padding()
-
-            // Error message
-            if let error = connectError {
-                HStack {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.orange)
-                    Text(error)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Spacer()
-                }
-                .padding(.horizontal)
-            }
-
-            Spacer()
-
-            Divider()
-
-            // Action buttons
-            HStack(spacing: 12) {
-                Button("Cancel") {
-                    dismiss()
-                }
-                .keyboardShortcut(.cancelAction)
-
-                Spacer()
-
-                Button(isConnecting ? "Connecting..." : "Connect") {
-                    Task {
-                        await connect()
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(isConnecting || (requiresPassword && password.isEmpty))
-                .keyboardShortcut(.defaultAction)
-            }
-            .padding()
-        }
-        .frame(width: 400, height: 280)
-    }
-
-    private func connect() async {
-        isConnecting = true
-        connectError = nil
-
-        do {
-            try await viewModel.connect(to: network, password: requiresPassword ? password : nil)
-            dismiss()
-        } catch {
-            connectError = error.localizedDescription
-        }
-
-        isConnecting = false
     }
 }
 
@@ -2543,68 +2122,6 @@ class InterfacesViewModel: ObservableObject {
             await refresh()
         } catch {
             self.error = "Failed to destroy \(name): \(error.localizedDescription)"
-        }
-    }
-}
-
-@MainActor
-class WirelessViewModel: ObservableObject {
-    @Published var wirelessInterface: String?
-    @Published var wirelessStatus: WirelessStatus?
-    @Published var networks: [WirelessNetwork] = []
-    @Published var isLoading = false
-    @Published var isScanning = false
-    @Published var error: String?
-
-    private let sshManager = SSHConnectionManager.shared
-
-    func loadWirelessInfo() async {
-        isLoading = true
-        error = nil
-
-        do {
-            wirelessInterface = try await sshManager.getWirelessInterface()
-            if wirelessInterface != nil {
-                wirelessStatus = try await sshManager.getWirelessStatus()
-            }
-        } catch {
-            self.error = "Failed to load wireless info: \(error.localizedDescription)"
-        }
-
-        isLoading = false
-    }
-
-    func refresh() async {
-        await loadWirelessInfo()
-    }
-
-    func scanNetworks() async {
-        guard wirelessInterface != nil else { return }
-
-        isScanning = true
-        error = nil
-
-        do {
-            networks = try await sshManager.scanWirelessNetworks()
-        } catch {
-            self.error = "Failed to scan networks: \(error.localizedDescription)"
-        }
-
-        isScanning = false
-    }
-
-    func connect(to network: WirelessNetwork, password: String?) async throws {
-        try await sshManager.connectToWirelessNetwork(ssid: network.ssid, password: password)
-        await refresh()
-    }
-
-    func disconnect() async {
-        error = nil
-        do {
-            try await sshManager.disconnectWireless()
-            await refresh()
-        } catch {
-            self.error = "Failed to disconnect: \(error.localizedDescription)"
         }
     }
 }
