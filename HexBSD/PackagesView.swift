@@ -120,7 +120,7 @@ struct RepositoryInfo: Identifiable {
 
 struct PackageMirror: Identifiable, Hashable {
     let id: String  // hostname
-    let name: String  // display name (e.g., "New York, USA")
+    let name: String  // display name (e.g., "pkg0.nyi.freebsd.org")
     let hostname: String  // e.g., "pkg0.nyi.freebsd.org"
 
     var isAutomatic: Bool {
@@ -132,17 +132,6 @@ struct PackageMirror: Identifiable, Hashable {
         name: "Automatic (SRV lookup)",
         hostname: ""
     )
-
-    // Known FreeBSD mirrors
-    static let knownMirrors: [PackageMirror] = [
-        automatic,
-        PackageMirror(id: "pkg0.nyi", name: "New York, USA", hostname: "pkg0.nyi.freebsd.org"),
-        PackageMirror(id: "pkg0.kwc", name: "Kansas City, USA", hostname: "pkg0.kwc.freebsd.org"),
-        PackageMirror(id: "pkg0.isc", name: "San Francisco, USA (ISC)", hostname: "pkg0.isc.freebsd.org"),
-        PackageMirror(id: "pkg0.bme", name: "Budapest, Hungary", hostname: "pkg0.bme.freebsd.org"),
-        PackageMirror(id: "pkg0.twn", name: "Taiwan", hostname: "pkg0.twn.freebsd.org"),
-        PackageMirror(id: "pkg0.jinx", name: "Australia", hostname: "pkg0.jinx.freebsd.org"),
-    ]
 }
 
 // MARK: - Main View
@@ -709,6 +698,7 @@ struct PackagesContentView: View {
             ChangeMirrorSheet(
                 currentMirror: viewModel.currentMirror,
                 currentRepository: viewModel.currentRepository ?? .quarterly,
+                availableMirrors: viewModel.availableMirrors,
                 onChangeMirror: { mirror in
                     Task {
                         await viewModel.changeMirror(to: mirror)
@@ -1464,14 +1454,16 @@ struct SwitchRepositorySheet: View {
 struct ChangeMirrorSheet: View {
     let currentMirror: PackageMirror
     let currentRepository: RepositoryType
+    let availableMirrors: [PackageMirror]
     let onChangeMirror: (PackageMirror) -> Void
     let onCancel: () -> Void
 
     @State private var selectedMirror: PackageMirror
 
-    init(currentMirror: PackageMirror, currentRepository: RepositoryType, onChangeMirror: @escaping (PackageMirror) -> Void, onCancel: @escaping () -> Void) {
+    init(currentMirror: PackageMirror, currentRepository: RepositoryType, availableMirrors: [PackageMirror], onChangeMirror: @escaping (PackageMirror) -> Void, onCancel: @escaping () -> Void) {
         self.currentMirror = currentMirror
         self.currentRepository = currentRepository
+        self.availableMirrors = availableMirrors
         self.onChangeMirror = onChangeMirror
         self.onCancel = onCancel
         _selectedMirror = State(initialValue: currentMirror)
@@ -1517,7 +1509,7 @@ struct ChangeMirrorSheet: View {
 
                 ScrollView {
                     VStack(spacing: 8) {
-                        ForEach(PackageMirror.knownMirrors) { mirror in
+                        ForEach(availableMirrors) { mirror in
                             Button(action: {
                                 selectedMirror = mirror
                             }) {
@@ -1614,6 +1606,7 @@ class PackagesViewModel: ObservableObject {
     @Published var cacheSize: String = ""
     @Published var cacheCount: Int = 0
     @Published var currentMirror: PackageMirror = .automatic
+    @Published var availableMirrors: [PackageMirror] = [.automatic]
 
     private let sshManager = SSHConnectionManager.shared
 
@@ -1628,13 +1621,17 @@ class PackagesViewModel: ObservableObject {
             let cacheInfo = try await sshManager.getPackageCacheInfo()
             cacheSize = cacheInfo.size
             cacheCount = cacheInfo.count
+            // Load available mirrors from DNS
+            let mirrorHostnames = try await sshManager.getAvailableMirrors()
+            availableMirrors = [.automatic] + mirrorHostnames.map { hostname in
+                PackageMirror(id: hostname, name: hostname, hostname: hostname)
+            }
             // Load current mirror
             let mirrorHostname = try await sshManager.getCurrentMirror()
             if mirrorHostname.isEmpty {
                 currentMirror = .automatic
             } else {
-                // Find matching known mirror or create custom one
-                currentMirror = PackageMirror.knownMirrors.first { $0.hostname == mirrorHostname }
+                currentMirror = availableMirrors.first { $0.hostname == mirrorHostname }
                     ?? PackageMirror(id: mirrorHostname, name: mirrorHostname, hostname: mirrorHostname)
             }
         } catch {

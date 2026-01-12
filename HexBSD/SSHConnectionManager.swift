@@ -5832,6 +5832,27 @@ extension SSHConnectionManager {
     }
 
     /// Switch package repository between quarterly and latest
+    /// Get available package mirrors from DNS SRV records
+    func getAvailableMirrors() async throws -> [String] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Query DNS SRV records for pkg.freebsd.org
+        let output = try await executeCommand("host -t SRV _http._tcp.pkg.freebsd.org 2>/dev/null | grep 'has SRV record' | awk '{print $NF}' | sed 's/\\.$//' | sort -u")
+
+        var mirrors: [String] = []
+        for line in output.split(separator: "\n") {
+            let hostname = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !hostname.isEmpty && hostname.contains("freebsd.org") {
+                mirrors.append(hostname)
+            }
+        }
+
+        return mirrors
+    }
+
     /// Get the currently configured mirror hostname, or empty string if using automatic SRV
     func getCurrentMirror() async throws -> String {
         guard client != nil else {
