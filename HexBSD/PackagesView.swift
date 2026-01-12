@@ -130,6 +130,7 @@ struct PackagesContentView: View {
     @State private var selectedUpgradablePackages: Set<UpgradablePackage.ID> = []
     @State private var selectedAvailablePackage: AvailablePackage?
     @State private var selectedRepositoryFilter: String? = nil  // nil means "All Repositories"
+    @State private var searchTask: Task<Void, Never>?
 
     // Get unique repository names from installed packages
     var availableRepositories: [String] {
@@ -176,6 +177,15 @@ struct PackagesContentView: View {
                 pkg.description.localizedCaseInsensitiveContains(searchText)
             }
         }
+    }
+
+    // Set of installed package names for quick lookup
+    var installedPackageNames: Set<String> {
+        Set(viewModel.packages.map { $0.name })
+    }
+
+    func isPackageInstalled(_ packageName: String) -> Bool {
+        installedPackageNames.contains(packageName)
     }
 
     var packageCountText: String {
@@ -357,7 +367,14 @@ struct PackagesContentView: View {
                     .textFieldStyle(.plain)
                     .onChange(of: searchText) { oldValue, newValue in
                         if selectedTab == .available {
-                            Task {
+                            // Clear selection when search changes to prevent auto-selection
+                            selectedAvailablePackage = nil
+                            // Cancel previous search and debounce
+                            searchTask?.cancel()
+                            searchTask = Task {
+                                // Wait 300ms before searching
+                                try? await Task.sleep(nanoseconds: 300_000_000)
+                                guard !Task.isCancelled else { return }
                                 await viewModel.searchAvailablePackages(query: newValue)
                             }
                         }
@@ -510,11 +527,14 @@ struct PackagesContentView: View {
                             } else if filteredAvailablePackages.isEmpty {
                                 searchEmptyView()
                             } else {
-                                List(filteredAvailablePackages, selection: $selectedAvailablePackage) { pkg in
-                                    AvailablePackageRow(package: pkg)
+                                List(filteredAvailablePackages) { pkg in
+                                    let installed = isPackageInstalled(pkg.name)
+                                    AvailablePackageRow(package: pkg, isInstalled: installed)
                                         .contentShape(Rectangle())
                                         .onTapGesture {
-                                            selectedAvailablePackage = pkg
+                                            if !installed {
+                                                selectedAvailablePackage = pkg
+                                            }
                                         }
                                 }
                             }
@@ -751,18 +771,32 @@ struct UpgradablePackageRow: View {
 
 struct AvailablePackageRow: View {
     let package: AvailablePackage
+    let isInstalled: Bool
 
     var body: some View {
         HStack(spacing: 12) {
             // Icon
-            Image(systemName: "square.and.arrow.down")
+            Image(systemName: isInstalled ? "checkmark.circle.fill" : "square.and.arrow.down")
                 .font(.title2)
-                .foregroundColor(.green)
+                .foregroundColor(isInstalled ? .secondary : .green)
                 .frame(width: 30)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(package.name)
-                    .font(.headline)
+                HStack {
+                    Text(package.name)
+                        .font(.headline)
+                        .foregroundColor(isInstalled ? .secondary : .primary)
+
+                    if isInstalled {
+                        Text("Installed")
+                            .font(.caption2)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.secondary.opacity(0.2))
+                            .foregroundColor(.secondary)
+                            .cornerRadius(4)
+                    }
+                }
 
                 Label(package.version, systemImage: "number")
                     .font(.caption)
@@ -779,6 +813,7 @@ struct AvailablePackageRow: View {
             Spacer()
         }
         .padding(.vertical, 4)
+        .opacity(isInstalled ? 0.6 : 1.0)
     }
 }
 
