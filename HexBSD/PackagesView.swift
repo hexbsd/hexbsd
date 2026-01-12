@@ -333,13 +333,26 @@ struct PackagesContentView: View {
                                 .font(.headline)
                                 .foregroundColor(.secondary)
 
-                            if let repoType = viewModel.currentRepository {
-                                HStack(spacing: 4) {
-                                    Image(systemName: repoType.icon)
-                                        .foregroundColor(repoType.color)
-                                    Text("Repository: \(repoType.displayName)")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
+                            HStack(spacing: 12) {
+                                if let repoType = viewModel.currentRepository {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: repoType.icon)
+                                            .foregroundColor(repoType.color)
+                                        Text("Repository: \(repoType.displayName)")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+
+                                // Show cache info only on installed tab
+                                if selectedTab == .installed && !viewModel.cacheSize.isEmpty {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "archivebox")
+                                            .foregroundColor(.secondary)
+                                        Text("Cache: \(viewModel.cacheSize) (\(viewModel.cacheCount) pkg\(viewModel.cacheCount == 1 ? "" : "s"))")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
                                 }
                             }
                         }
@@ -396,7 +409,17 @@ struct PackagesContentView: View {
                             Label("Refresh", systemImage: "arrow.clockwise")
                         }
                         .buttonStyle(.bordered)
-                        .disabled(viewModel.isLoading || viewModel.isUpgrading || viewModel.isSwitchingRepository)
+                        .disabled(viewModel.isLoading || viewModel.isUpgrading || viewModel.isSwitchingRepository || viewModel.isPackageOperation)
+
+                        Button(action: {
+                            Task {
+                                await viewModel.cleanCache()
+                            }
+                        }) {
+                            Label("Clean Cache", systemImage: "trash")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(viewModel.isLoading || viewModel.isUpgrading || viewModel.isSwitchingRepository || viewModel.isPackageOperation)
                     }
                     .padding()
 
@@ -1405,6 +1428,8 @@ class PackagesViewModel: ObservableObject {
     @Published var isSwitchingRepository = false
     @Published var repositorySwitchOutput = ""
     @Published var error: String?
+    @Published var cacheSize: String = ""
+    @Published var cacheCount: Int = 0
 
     private let sshManager = SSHConnectionManager.shared
 
@@ -1415,6 +1440,10 @@ class PackagesViewModel: ObservableObject {
         do {
             packages = try await sshManager.listInstalledPackages()
             currentRepository = try await sshManager.getCurrentRepository()
+            // Load cache info
+            let cacheInfo = try await sshManager.getPackageCacheInfo()
+            cacheSize = cacheInfo.size
+            cacheCount = cacheInfo.count
         } catch {
             self.error = "Failed to load packages: \(error.localizedDescription)"
             packages = []
@@ -1719,5 +1748,43 @@ class PackagesViewModel: ObservableObject {
         packageOperationTitle = ""
         // Reload packages to reflect the changes
         await loadPackages()
+    }
+
+    func cleanCache() async {
+        // Build info text with current cache stats
+        var infoText = "This will remove all cached package files. This frees up disk space but means packages will need to be re-downloaded if reinstalled."
+        if !cacheSize.isEmpty && cacheCount > 0 {
+            infoText = "Cache contains \(cacheCount) package file\(cacheCount == 1 ? "" : "s") using \(cacheSize).\n\n\(infoText)"
+        }
+
+        // Confirm clean
+        let alert = NSAlert()
+        alert.messageText = "Clean Package Cache?"
+        alert.informativeText = infoText
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Clean")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+
+        isPackageOperation = true
+        packageOperationComplete = false
+        packageOperationOutput = ""
+        packageOperationTitle = "Cleaning Package Cache"
+        error = nil
+
+        do {
+            try await sshManager.cleanPackageCacheStreaming { [weak self] output in
+                self?.packageOperationOutput += output
+            }
+            packageOperationComplete = true
+            isPackageOperation = false
+        } catch {
+            packageOperationOutput += "\n\nError: \(error.localizedDescription)"
+            packageOperationComplete = true
+            isPackageOperation = false
+        }
     }
 }

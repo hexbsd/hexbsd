@@ -5765,6 +5765,37 @@ extension SSHConnectionManager {
         }
     }
 
+    func getPackageCacheInfo() async throws -> (size: String, count: Int) {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Get cache directory size
+        let sizeOutput = try await executeCommand("du -sh /var/cache/pkg 2>/dev/null | cut -f1")
+        let size = sizeOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Get count of cached packages
+        let countOutput = try await executeCommand("ls -1 /var/cache/pkg/*.pkg 2>/dev/null | wc -l")
+        let count = Int(countOutput.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+
+        return (size: size.isEmpty ? "0B" : size, count: count)
+    }
+
+    func cleanPackageCacheStreaming(onOutput: @escaping (String) -> Void) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Clean all cached packages
+        let exitCode = try await executeCommandStreaming("pkg clean -ay", onOutput: onOutput)
+        if exitCode != 0 {
+            throw NSError(domain: "SSHConnectionManager", code: exitCode,
+                         userInfo: [NSLocalizedDescriptionKey: "Package cache clean failed with exit code \(exitCode)"])
+        }
+    }
+
     func upgradeSelectedPackages(names: [String]) async throws -> String {
         guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
