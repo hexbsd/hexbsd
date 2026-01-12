@@ -5751,6 +5751,22 @@ extension SSHConnectionManager {
         return output
     }
 
+    func upgradeSelectedPackages(names: [String]) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        guard !names.isEmpty else {
+            return "No packages specified"
+        }
+
+        // Build the command with specific package names
+        let packageList = names.joined(separator: " ")
+        let output = try await executeCommand("pkg upgrade -y \(packageList)")
+        return output
+    }
+
     /// Switch package repository between quarterly and latest
     func switchPackageRepository(to newRepo: RepositoryType) async throws -> String {
         guard client != nil else {

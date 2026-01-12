@@ -127,7 +127,7 @@ struct PackagesContentView: View {
     @State private var showSwitchRepo = false
     @State private var selectedTab: PackageTab = .installed
     @State private var selectedPackage: Package?
-    @State private var selectedUpgradablePackage: UpgradablePackage?
+    @State private var selectedUpgradablePackages: Set<UpgradablePackage.ID> = []
     @State private var selectedAvailablePackage: AvailablePackage?
     @State private var selectedRepositoryFilter: String? = nil  // nil means "All Repositories"
 
@@ -225,27 +225,25 @@ struct PackagesContentView: View {
                         .cornerRadius(6)
                 }
 
-                Button(action: {
-                    Task {
-                        await viewModel.checkForUpdates()
-                        // Automatically switch to Upgradable tab after checking
-                        if viewModel.updatesAvailable > 0 {
-                            selectedTab = .upgradable
-                        }
-                    }
-                }) {
-                    Label("Check Updates", systemImage: "arrow.triangle.2.circlepath")
-                }
-                .buttonStyle(.bordered)
-                .disabled(viewModel.isLoading || viewModel.isUpgrading || viewModel.isSwitchingRepository)
-
-                if viewModel.updatesAvailable > 0 {
+                // Show upgrade button when on upgradable tab and there are packages
+                if selectedTab == .upgradable && !viewModel.upgradablePackages.isEmpty {
                     Button(action: {
                         Task {
-                            await viewModel.upgradePackages()
+                            if selectedUpgradablePackages.isEmpty {
+                                await viewModel.upgradePackages()
+                            } else {
+                                let packagesToUpgrade = viewModel.upgradablePackages
+                                    .filter { selectedUpgradablePackages.contains($0.id) }
+                                    .map { $0.name }
+                                await viewModel.upgradeSelectedPackages(names: packagesToUpgrade)
+                                selectedUpgradablePackages.removeAll()
+                            }
                         }
                     }) {
-                        Label("Upgrade All", systemImage: "arrow.up.circle")
+                        let count = selectedUpgradablePackages.isEmpty
+                            ? viewModel.upgradablePackages.count
+                            : selectedUpgradablePackages.count
+                        Label("Upgrade \(count) Package\(count == 1 ? "" : "s")", systemImage: "arrow.up.circle")
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(viewModel.isLoading || viewModel.isUpgrading || viewModel.isSwitchingRepository)
@@ -461,7 +459,7 @@ struct PackagesContentView: View {
                             } else if filteredUpgradablePackages.isEmpty {
                                 searchEmptyView()
                             } else {
-                                List(filteredUpgradablePackages, selection: $selectedUpgradablePackage) { pkg in
+                                List(filteredUpgradablePackages, selection: $selectedUpgradablePackages) { pkg in
                                     UpgradablePackageRow(package: pkg)
                                 }
                             }
@@ -1343,6 +1341,48 @@ class PackagesViewModel: ObservableObject {
             // Reload packages
             await loadPackages()
             updatesAvailable = 0
+            upgradablePackages = []
+        } catch {
+            self.error = "Failed to upgrade packages: \(error.localizedDescription)"
+        }
+
+        isUpgrading = false
+        upgradeOutput = ""
+    }
+
+    func upgradeSelectedPackages(names: [String]) async {
+        guard !names.isEmpty else { return }
+
+        // Confirm upgrade
+        let alert = NSAlert()
+        alert.messageText = "Upgrade Selected Packages?"
+        alert.informativeText = "This will upgrade \(names.count) package(s) to their latest versions. This may take several minutes."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Upgrade")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+
+        isUpgrading = true
+        upgradeOutput = ""
+        error = nil
+
+        do {
+            let output = try await sshManager.upgradeSelectedPackages(names: names)
+            upgradeOutput = output
+
+            // Show success alert
+            let successAlert = NSAlert()
+            successAlert.messageText = "Upgrade Complete"
+            successAlert.informativeText = "\(names.count) package(s) have been upgraded successfully."
+            successAlert.alertStyle = .informational
+            successAlert.addButton(withTitle: "OK")
+            successAlert.runModal()
+
+            // Reload upgradable packages to refresh the list
+            await loadUpgradablePackages()
         } catch {
             self.error = "Failed to upgrade packages: \(error.localizedDescription)"
         }
@@ -1386,10 +1426,8 @@ class PackagesViewModel: ObservableObject {
             break
 
         case .upgradable:
-            // Only load if not already loaded (e.g., from checkForUpdates)
-            if upgradablePackages.isEmpty {
-                await loadUpgradablePackages()
-            }
+            // Always check for updates when switching to this tab
+            await loadUpgradablePackages()
 
         case .available:
             // Available packages are loaded on-demand via search
@@ -1406,9 +1444,11 @@ class PackagesViewModel: ObservableObject {
 
         do {
             upgradablePackages = try await sshManager.listUpgradablePackages()
+            updatesAvailable = upgradablePackages.count
         } catch {
             self.error = "Failed to load upgradable packages: \(error.localizedDescription)"
             upgradablePackages = []
+            updatesAvailable = 0
         }
 
         isLoading = false
