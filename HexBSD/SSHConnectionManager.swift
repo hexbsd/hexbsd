@@ -6117,6 +6117,33 @@ EOFPKG
         return output
     }
 
+    func installPackageStreaming(name: String, onOutput: @escaping (String) -> Void) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let exitCode = try await executeCommandStreaming("pkg install -y '\(name)'", onOutput: onOutput)
+        if exitCode != 0 {
+            throw NSError(domain: "SSHConnectionManager", code: exitCode,
+                         userInfo: [NSLocalizedDescriptionKey: "Package installation failed with exit code \(exitCode)"])
+        }
+    }
+
+    func removePackageStreaming(name: String, force: Bool = false, onOutput: @escaping (String) -> Void) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let forceFlag = force ? "-f" : ""
+        let exitCode = try await executeCommandStreaming("pkg delete -y \(forceFlag) '\(name)'", onOutput: onOutput)
+        if exitCode != 0 {
+            throw NSError(domain: "SSHConnectionManager", code: exitCode,
+                         userInfo: [NSLocalizedDescriptionKey: "Package removal failed with exit code \(exitCode)"])
+        }
+    }
+
     /// Get info about an available (not installed) package
     func getAvailablePackageInfo(name: String) async throws -> PackageInfo {
         guard client != nil else {

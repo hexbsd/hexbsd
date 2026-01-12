@@ -264,6 +264,65 @@ struct PackagesContentView: View {
                         .background(Color.secondary.opacity(0.05))
                     }
                 }
+            } else if viewModel.isPackageOperation || viewModel.packageOperationComplete {
+                // Full-screen package operation console (install/remove)
+                VStack(spacing: 0) {
+                    // Header
+                    HStack {
+                        Image(systemName: viewModel.packageOperationComplete ? "checkmark.circle.fill" : "shippingbox.fill")
+                            .font(.title2)
+                            .foregroundColor(viewModel.packageOperationComplete ? .green : .blue)
+
+                        Text(viewModel.packageOperationComplete ? "Operation Complete" : viewModel.packageOperationTitle)
+                            .font(.headline)
+
+                        Spacer()
+
+                        if !viewModel.packageOperationComplete {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                        }
+                    }
+                    .padding()
+                    .background(viewModel.packageOperationComplete ? Color.green.opacity(0.1) : Color.blue.opacity(0.1))
+
+                    Divider()
+
+                    // Console output
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            Text(viewModel.packageOperationOutput.isEmpty ? "Starting..." : viewModel.packageOperationOutput)
+                                .font(.system(.body, design: .monospaced))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding()
+                                .id("pkgbottom")
+                        }
+                        .background(Color(NSColor.textBackgroundColor))
+                        .onChange(of: viewModel.packageOperationOutput) { _, _ in
+                            withAnimation {
+                                proxy.scrollTo("pkgbottom", anchor: .bottom)
+                            }
+                        }
+                    }
+
+                    Divider()
+
+                    // Close button when complete
+                    if viewModel.packageOperationComplete {
+                        HStack {
+                            Spacer()
+                            Button("Close") {
+                                Task {
+                                    await viewModel.dismissPackageOperationConsole()
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .keyboardShortcut(.defaultAction)
+                        }
+                        .padding()
+                        .background(Color.secondary.opacity(0.05))
+                    }
+                }
             } else {
                 // Normal package view
                 VStack(spacing: 0) {
@@ -1339,6 +1398,10 @@ class PackagesViewModel: ObservableObject {
     @Published var isUpgrading = false
     @Published var upgradeComplete = false
     @Published var upgradeOutput = ""
+    @Published var isPackageOperation = false  // For install/remove operations
+    @Published var packageOperationComplete = false
+    @Published var packageOperationOutput = ""
+    @Published var packageOperationTitle = ""  // "Installing" or "Removing"
     @Published var isSwitchingRepository = false
     @Published var repositorySwitchOutput = ""
     @Published var error: String?
@@ -1595,45 +1658,23 @@ class PackagesViewModel: ObservableObject {
             return false
         }
 
-        isLoading = true
+        isPackageOperation = true
+        packageOperationComplete = false
+        packageOperationOutput = ""
+        packageOperationTitle = "Removing '\(name)'"
         error = nil
 
         do {
-            let output = try await sshManager.removePackage(name: name, force: force)
-
-            // Check for vital package error in output
-            if output.contains("vital") || output.contains("Cannot delete") {
-                let errorAlert = NSAlert()
-                errorAlert.messageText = "Cannot Remove Package"
-                errorAlert.informativeText = "'\(name)' is a vital system package and cannot be removed."
-                errorAlert.alertStyle = .warning
-                errorAlert.addButton(withTitle: "OK")
-                errorAlert.runModal()
-                isLoading = false
-                return false
+            try await sshManager.removePackageStreaming(name: name, force: force) { [weak self] output in
+                self?.packageOperationOutput += output
             }
-
-            // Check if removal was successful
-            if output.contains("Deinstalling") || output.contains("Deleting") {
-                let successAlert = NSAlert()
-                successAlert.messageText = "Package Removed"
-                successAlert.informativeText = "'\(name)' has been successfully removed."
-                successAlert.alertStyle = .informational
-                successAlert.addButton(withTitle: "OK")
-                successAlert.runModal()
-
-                // Reload packages
-                await loadPackages()
-                isLoading = false
-                return true
-            } else {
-                self.error = "Package removal may have failed: \(output)"
-                isLoading = false
-                return false
-            }
+            packageOperationComplete = true
+            isPackageOperation = false
+            return true
         } catch {
-            self.error = "Failed to remove package: \(error.localizedDescription)"
-            isLoading = false
+            packageOperationOutput += "\n\nError: \(error.localizedDescription)"
+            packageOperationComplete = true
+            isPackageOperation = false
             return false
         }
     }
@@ -1651,34 +1692,32 @@ class PackagesViewModel: ObservableObject {
             return false
         }
 
-        isLoading = true
+        isPackageOperation = true
+        packageOperationComplete = false
+        packageOperationOutput = ""
+        packageOperationTitle = "Installing '\(name)'"
         error = nil
 
         do {
-            let output = try await sshManager.installPackage(name: name)
-
-            // Check if installation was successful
-            if output.contains("Installing") || output.contains("already installed") || output.contains("Extracting") {
-                let successAlert = NSAlert()
-                successAlert.messageText = "Package Installed"
-                successAlert.informativeText = "'\(name)' has been successfully installed."
-                successAlert.alertStyle = .informational
-                successAlert.addButton(withTitle: "OK")
-                successAlert.runModal()
-
-                // Reload packages
-                await loadPackages()
-                isLoading = false
-                return true
-            } else {
-                self.error = "Package installation may have failed: \(output)"
-                isLoading = false
-                return false
+            try await sshManager.installPackageStreaming(name: name) { [weak self] output in
+                self?.packageOperationOutput += output
             }
+            packageOperationComplete = true
+            isPackageOperation = false
+            return true
         } catch {
-            self.error = "Failed to install package: \(error.localizedDescription)"
-            isLoading = false
+            packageOperationOutput += "\n\nError: \(error.localizedDescription)"
+            packageOperationComplete = true
+            isPackageOperation = false
             return false
         }
+    }
+
+    func dismissPackageOperationConsole() async {
+        packageOperationComplete = false
+        packageOperationOutput = ""
+        packageOperationTitle = ""
+        // Reload packages to reflect the changes
+        await loadPackages()
     }
 }
