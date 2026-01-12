@@ -5832,6 +5832,145 @@ extension SSHConnectionManager {
     }
 
     /// Switch package repository between quarterly and latest
+    /// Get the currently configured mirror hostname, or empty string if using automatic SRV
+    func getCurrentMirror() async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Check if there's a custom mirror configured
+        let configExists = try await executeCommand("test -f /usr/local/etc/pkg/repos/FreeBSD.conf && echo 'exists' || echo 'none'")
+        if configExists.trimmingCharacters(in: .whitespacesAndNewlines) == "none" {
+            return ""  // Using automatic
+        }
+
+        // Check if using SRV (automatic) or a specific mirror
+        let config = try await executeCommand("cat /usr/local/etc/pkg/repos/FreeBSD.conf 2>/dev/null || echo ''")
+        if config.contains("mirror_type") && config.contains("srv") {
+            return ""  // Using automatic SRV lookup
+        }
+
+        // Extract mirror hostname from URL
+        // URL format: http://pkg0.nyi.freebsd.org/${ABI}/...
+        if let range = config.range(of: "url:\\s*\"?https?://([^/\"]+)", options: .regularExpression) {
+            let match = String(config[range])
+            if let hostRange = match.range(of: "://") {
+                let afterProtocol = match[hostRange.upperBound...]
+                let hostname = String(afterProtocol.prefix(while: { $0 != "/" && $0 != "\"" }))
+                if hostname != "pkg.FreeBSD.org" && hostname != "pkg.freebsd.org" {
+                    return hostname
+                }
+            }
+        }
+
+        return ""  // Using automatic
+    }
+
+    /// Set a specific mirror or reset to automatic SRV lookup
+    func setMirror(hostname: String, repoType: RepositoryType) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var outputLog = ""
+        let repoPath = repoType == .quarterly ? "quarterly" : "latest"
+        let kmodsPath = repoType == .quarterly ? "kmods_quarterly_${VERSION_MINOR}" : "kmods_latest_${VERSION_MINOR}"
+
+        // Ensure the repos directory exists
+        _ = try await executeCommand("mkdir -p /usr/local/etc/pkg/repos")
+
+        // Remove existing repository config files
+        outputLog += "Removing old repository configurations...\n"
+        _ = try await executeCommand("rm -f /usr/local/etc/pkg/repos/*.conf")
+
+        if hostname.isEmpty {
+            // Reset to automatic SRV lookup
+            outputLog += "Setting up automatic mirror selection (SRV lookup)...\n"
+
+            if repoType == .quarterly {
+                // For quarterly with automatic, just use system defaults
+                outputLog += "Using system default quarterly repositories...\n"
+            } else {
+                // For latest with automatic, need to override to latest but keep SRV
+                let configContent = """
+# Disable the default quarterly repositories
+FreeBSD-ports: { enabled: no }
+FreeBSD-ports-kmods: { enabled: no }
+
+# Enable the latest repository for packages with automatic mirror selection
+FreeBSD: {
+  url: "pkg+http://pkg.FreeBSD.org/${ABI}/latest",
+  mirror_type: "srv",
+  signature_type: "fingerprints",
+  fingerprints: "/usr/share/keys/pkg",
+  enabled: yes
+}
+
+# Enable the latest repository for kernel modules
+FreeBSD-kmods: {
+  url: "pkg+http://pkg.FreeBSD.org/${ABI}/kmods_latest_${VERSION_MINOR}",
+  mirror_type: "srv",
+  signature_type: "fingerprints",
+  fingerprints: "/usr/share/keys/pkg",
+  enabled: yes
+}
+"""
+                let command = """
+cat > /usr/local/etc/pkg/repos/FreeBSD.conf << 'EOFPKG'
+\(configContent)
+EOFPKG
+"""
+                _ = try await executeCommand(command)
+            }
+        } else {
+            // Use specific mirror - no SRV, direct HTTP
+            outputLog += "Setting mirror to \(hostname) (\(repoPath))...\n"
+
+            let configContent = """
+# Disable the default repositories
+FreeBSD-ports: { enabled: no }
+FreeBSD-ports-kmods: { enabled: no }
+
+# Use specific mirror for packages
+FreeBSD: {
+  url: "http://\(hostname)/${ABI}/\(repoPath)",
+  signature_type: "fingerprints",
+  fingerprints: "/usr/share/keys/pkg",
+  enabled: yes
+}
+
+# Use specific mirror for kernel modules
+FreeBSD-kmods: {
+  url: "http://\(hostname)/${ABI}/\(kmodsPath)",
+  signature_type: "fingerprints",
+  fingerprints: "/usr/share/keys/pkg",
+  enabled: yes
+}
+"""
+            let command = """
+cat > /usr/local/etc/pkg/repos/FreeBSD.conf << 'EOFPKG'
+\(configContent)
+EOFPKG
+"""
+            _ = try await executeCommand(command)
+        }
+
+        // Clear repository cache to force a clean switch
+        outputLog += "Clearing repository cache...\n"
+        _ = try await executeCommand("rm -rf /var/db/pkg/repos/*")
+
+        // Verify repository configuration
+        outputLog += "\nVerifying active repositories...\n"
+        let verifyOutput = try await executeCommand("pkg -vv 2>&1 | grep -A 10 'Repositories:' | head -15")
+        outputLog += verifyOutput + "\n"
+
+        outputLog += "\nMirror configuration complete!\n"
+
+        return outputLog
+    }
+
     func switchPackageRepository(to newRepo: RepositoryType) async throws -> String {
         guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,

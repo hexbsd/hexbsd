@@ -118,6 +118,33 @@ struct RepositoryInfo: Identifiable {
     let enabled: Bool
 }
 
+struct PackageMirror: Identifiable, Hashable {
+    let id: String  // hostname
+    let name: String  // display name (e.g., "New York, USA")
+    let hostname: String  // e.g., "pkg0.nyi.freebsd.org"
+
+    var isAutomatic: Bool {
+        hostname.isEmpty
+    }
+
+    static let automatic = PackageMirror(
+        id: "automatic",
+        name: "Automatic (SRV lookup)",
+        hostname: ""
+    )
+
+    // Known FreeBSD mirrors
+    static let knownMirrors: [PackageMirror] = [
+        automatic,
+        PackageMirror(id: "pkg0.nyi", name: "New York, USA", hostname: "pkg0.nyi.freebsd.org"),
+        PackageMirror(id: "pkg0.kwc", name: "Kansas City, USA", hostname: "pkg0.kwc.freebsd.org"),
+        PackageMirror(id: "pkg0.isc", name: "San Francisco, USA (ISC)", hostname: "pkg0.isc.freebsd.org"),
+        PackageMirror(id: "pkg0.bme", name: "Budapest, Hungary", hostname: "pkg0.bme.freebsd.org"),
+        PackageMirror(id: "pkg0.twn", name: "Taiwan", hostname: "pkg0.twn.freebsd.org"),
+        PackageMirror(id: "pkg0.jinx", name: "Australia", hostname: "pkg0.jinx.freebsd.org"),
+    ]
+}
+
 // MARK: - Main View
 
 struct PackagesContentView: View {
@@ -125,6 +152,7 @@ struct PackagesContentView: View {
     @State private var showError = false
     @State private var searchText = ""
     @State private var showSwitchRepo = false
+    @State private var showChangeMirror = false
     @State private var selectedTab: PackageTab = .installed
     @State private var selectedPackage: Package?
     @State private var selectedUpgradablePackages: Set<UpgradablePackage.ID> = []
@@ -402,6 +430,14 @@ struct PackagesContentView: View {
                         .disabled(viewModel.isLoading || viewModel.isUpgrading || viewModel.isSwitchingRepository)
 
                         Button(action: {
+                            showChangeMirror = true
+                        }) {
+                            Label("Mirror", systemImage: "server.rack")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(viewModel.isLoading || viewModel.isUpgrading || viewModel.isSwitchingRepository)
+
+                        Button(action: {
                             Task {
                                 await viewModel.refresh()
                             }
@@ -666,6 +702,21 @@ struct PackagesContentView: View {
                 },
                 onCancel: {
                     showSwitchRepo = false
+                }
+            )
+        }
+        .sheet(isPresented: $showChangeMirror) {
+            ChangeMirrorSheet(
+                currentMirror: viewModel.currentMirror,
+                currentRepository: viewModel.currentRepository ?? .quarterly,
+                onChangeMirror: { mirror in
+                    Task {
+                        await viewModel.changeMirror(to: mirror)
+                        showChangeMirror = false
+                    }
+                },
+                onCancel: {
+                    showChangeMirror = false
                 }
             )
         }
@@ -1408,6 +1459,138 @@ struct SwitchRepositorySheet: View {
     }
 }
 
+// MARK: - Change Mirror Sheet
+
+struct ChangeMirrorSheet: View {
+    let currentMirror: PackageMirror
+    let currentRepository: RepositoryType
+    let onChangeMirror: (PackageMirror) -> Void
+    let onCancel: () -> Void
+
+    @State private var selectedMirror: PackageMirror
+
+    init(currentMirror: PackageMirror, currentRepository: RepositoryType, onChangeMirror: @escaping (PackageMirror) -> Void, onCancel: @escaping () -> Void) {
+        self.currentMirror = currentMirror
+        self.currentRepository = currentRepository
+        self.onChangeMirror = onChangeMirror
+        self.onCancel = onCancel
+        _selectedMirror = State(initialValue: currentMirror)
+    }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Change Package Mirror")
+                .font(.title2)
+                .bold()
+
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    Text("Current Repository:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text(currentRepository.displayName)
+                        .font(.caption)
+                        .foregroundColor(currentRepository.color)
+                }
+
+                Text("Current Mirror")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                HStack {
+                    Image(systemName: currentMirror.isAutomatic ? "antenna.radiowaves.left.and.right" : "server.rack")
+                        .foregroundColor(.blue)
+                    Text(currentMirror.name)
+                        .font(.body)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.blue.opacity(0.1))
+                .cornerRadius(8)
+
+                Divider()
+                    .padding(.vertical, 8)
+
+                Text("Select Mirror")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                ScrollView {
+                    VStack(spacing: 8) {
+                        ForEach(PackageMirror.knownMirrors) { mirror in
+                            Button(action: {
+                                selectedMirror = mirror
+                            }) {
+                                HStack {
+                                    Image(systemName: mirror.isAutomatic ? "antenna.radiowaves.left.and.right" : "server.rack")
+                                        .foregroundColor(.blue)
+                                        .frame(width: 24)
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(mirror.name)
+                                            .font(.headline)
+                                            .foregroundColor(.primary)
+                                        if !mirror.hostname.isEmpty {
+                                            Text(mirror.hostname)
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                        }
+                                    }
+
+                                    Spacer()
+
+                                    if selectedMirror.id == mirror.id {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundColor(.blue)
+                                    }
+                                }
+                                .padding(10)
+                                .background(selectedMirror.id == mirror.id ? Color.blue.opacity(0.1) : Color.clear)
+                                .cornerRadius(8)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(selectedMirror.id == mirror.id ? Color.blue : Color.clear, lineWidth: 2)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .frame(maxHeight: 250)
+
+                if selectedMirror.id != currentMirror.id {
+                    HStack(spacing: 8) {
+                        Image(systemName: "info.circle.fill")
+                            .foregroundColor(.blue)
+                        Text("Changing mirror will update your repository configuration. The package catalog will be refreshed from the new mirror.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(12)
+                    .background(Color.blue.opacity(0.1))
+                    .cornerRadius(8)
+                }
+            }
+            .padding()
+
+            HStack {
+                Button("Cancel") {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button("Change Mirror") {
+                    onChangeMirror(selectedMirror)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(selectedMirror.id == currentMirror.id)
+            }
+        }
+        .padding()
+        .frame(width: 450)
+    }
+}
+
 // MARK: - View Model
 
 @MainActor
@@ -1430,6 +1613,7 @@ class PackagesViewModel: ObservableObject {
     @Published var error: String?
     @Published var cacheSize: String = ""
     @Published var cacheCount: Int = 0
+    @Published var currentMirror: PackageMirror = .automatic
 
     private let sshManager = SSHConnectionManager.shared
 
@@ -1444,6 +1628,15 @@ class PackagesViewModel: ObservableObject {
             let cacheInfo = try await sshManager.getPackageCacheInfo()
             cacheSize = cacheInfo.size
             cacheCount = cacheInfo.count
+            // Load current mirror
+            let mirrorHostname = try await sshManager.getCurrentMirror()
+            if mirrorHostname.isEmpty {
+                currentMirror = .automatic
+            } else {
+                // Find matching known mirror or create custom one
+                currentMirror = PackageMirror.knownMirrors.first { $0.hostname == mirrorHostname }
+                    ?? PackageMirror(id: mirrorHostname, name: mirrorHostname, hostname: mirrorHostname)
+            }
         } catch {
             self.error = "Failed to load packages: \(error.localizedDescription)"
             packages = []
@@ -1572,6 +1765,37 @@ class PackagesViewModel: ObservableObject {
             await loadPackages()
         } catch {
             self.error = "Failed to switch repository: \(error.localizedDescription)"
+        }
+
+        isSwitchingRepository = false
+        repositorySwitchOutput = ""
+    }
+
+    func changeMirror(to mirror: PackageMirror) async {
+        guard let repoType = currentRepository else { return }
+
+        isSwitchingRepository = true
+        repositorySwitchOutput = ""
+        error = nil
+
+        do {
+            let output = try await sshManager.setMirror(hostname: mirror.hostname, repoType: repoType)
+            repositorySwitchOutput = output
+            currentMirror = mirror
+
+            // Show success
+            let alert = NSAlert()
+            alert.messageText = "Mirror Changed"
+            let mirrorName = mirror.isAutomatic ? "automatic selection" : mirror.name
+            alert.informativeText = "Package mirror has been changed to \(mirrorName). The package catalog will be updated from the new mirror."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+
+            // Reload packages
+            await loadPackages()
+        } catch {
+            self.error = "Failed to change mirror: \(error.localizedDescription)"
         }
 
         isSwitchingRepository = false
