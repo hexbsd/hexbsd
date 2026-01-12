@@ -194,82 +194,144 @@ struct PackagesContentView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Toolbar
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(packageCountText)
-                        .font(.headline)
-                        .foregroundColor(.secondary)
+        Group {
+            if viewModel.isUpgrading || viewModel.upgradeComplete {
+                // Full-screen upgrade console
+                VStack(spacing: 0) {
+                    // Header
+                    HStack {
+                        Image(systemName: viewModel.upgradeComplete ? "checkmark.circle.fill" : "arrow.up.circle.fill")
+                            .font(.title2)
+                            .foregroundColor(viewModel.upgradeComplete ? .green : .orange)
 
-                    if let repoType = viewModel.currentRepository {
-                        HStack(spacing: 4) {
-                            Image(systemName: repoType.icon)
-                                .foregroundColor(repoType.color)
-                            Text("Repository: \(repoType.displayName)")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                        Text(viewModel.upgradeComplete ? "Upgrade Complete" : "Upgrading Packages...")
+                            .font(.headline)
+
+                        Spacer()
+
+                        if !viewModel.upgradeComplete {
+                            ProgressView()
+                                .scaleEffect(0.8)
                         }
                     }
-                }
+                    .padding()
+                    .background(viewModel.upgradeComplete ? Color.green.opacity(0.1) : Color.orange.opacity(0.1))
 
-                Spacer()
+                    Divider()
 
-                if viewModel.updatesAvailable > 0 {
-                    Text("\(viewModel.updatesAvailable) update(s) available")
-                        .font(.caption)
-                        .foregroundColor(.orange)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.orange.opacity(0.1))
-                        .cornerRadius(6)
-                }
-
-                // Show upgrade button when on upgradable tab and there are packages
-                if selectedTab == .upgradable && !viewModel.upgradablePackages.isEmpty {
-                    Button(action: {
-                        Task {
-                            if selectedUpgradablePackages.isEmpty {
-                                await viewModel.upgradePackages()
-                            } else {
-                                let packagesToUpgrade = viewModel.upgradablePackages
-                                    .filter { selectedUpgradablePackages.contains($0.id) }
-                                    .map { $0.name }
-                                await viewModel.upgradeSelectedPackages(names: packagesToUpgrade)
-                                selectedUpgradablePackages.removeAll()
+                    // Console output
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            Text(viewModel.upgradeOutput.isEmpty ? "Starting upgrade..." : viewModel.upgradeOutput)
+                                .font(.system(.body, design: .monospaced))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding()
+                                .id("bottom")
+                        }
+                        .background(Color(NSColor.textBackgroundColor))
+                        .onChange(of: viewModel.upgradeOutput) { _, _ in
+                            withAnimation {
+                                proxy.scrollTo("bottom", anchor: .bottom)
                             }
                         }
-                    }) {
-                        let count = selectedUpgradablePackages.isEmpty
-                            ? viewModel.upgradablePackages.count
-                            : selectedUpgradablePackages.count
-                        Label("Upgrade \(count) Package\(count == 1 ? "" : "s")", systemImage: "arrow.up.circle")
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(viewModel.isLoading || viewModel.isUpgrading || viewModel.isSwitchingRepository)
-                }
 
-                Button(action: {
-                    showSwitchRepo = true
-                }) {
-                    Label("Switch Repo", systemImage: "arrow.left.arrow.right")
-                }
-                .buttonStyle(.bordered)
-                .disabled(viewModel.isLoading || viewModel.isUpgrading || viewModel.isSwitchingRepository)
+                    Divider()
 
-                Button(action: {
-                    Task {
-                        await viewModel.refresh()
+                    // Close button when complete
+                    if viewModel.upgradeComplete {
+                        HStack {
+                            Spacer()
+                            Button("Close") {
+                                Task {
+                                    await viewModel.dismissUpgradeConsole()
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .keyboardShortcut(.defaultAction)
+                        }
+                        .padding()
+                        .background(Color.secondary.opacity(0.05))
                     }
-                }) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
                 }
-                .buttonStyle(.bordered)
-                .disabled(viewModel.isLoading || viewModel.isUpgrading || viewModel.isSwitchingRepository)
-            }
-            .padding()
+            } else {
+                // Normal package view
+                VStack(spacing: 0) {
+                    // Toolbar
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(packageCountText)
+                                .font(.headline)
+                                .foregroundColor(.secondary)
 
-            Divider()
+                            if let repoType = viewModel.currentRepository {
+                                HStack(spacing: 4) {
+                                    Image(systemName: repoType.icon)
+                                        .foregroundColor(repoType.color)
+                                    Text("Repository: \(repoType.displayName)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+
+                        Spacer()
+
+                        if viewModel.updatesAvailable > 0 {
+                            Text("\(viewModel.updatesAvailable) update(s) available")
+                                .font(.caption)
+                                .foregroundColor(.orange)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.orange.opacity(0.1))
+                                .cornerRadius(6)
+                        }
+
+                        // Show upgrade button when on upgradable tab and there are packages
+                        if selectedTab == .upgradable && !viewModel.upgradablePackages.isEmpty {
+                            Button(action: {
+                                Task {
+                                    if selectedUpgradablePackages.isEmpty {
+                                        await viewModel.upgradePackages()
+                                    } else {
+                                        let packagesToUpgrade = viewModel.upgradablePackages
+                                            .filter { selectedUpgradablePackages.contains($0.id) }
+                                            .map { $0.name }
+                                        await viewModel.upgradeSelectedPackages(names: packagesToUpgrade)
+                                        selectedUpgradablePackages.removeAll()
+                                    }
+                                }
+                            }) {
+                                let count = selectedUpgradablePackages.isEmpty
+                                    ? viewModel.upgradablePackages.count
+                                    : selectedUpgradablePackages.count
+                                Label("Upgrade \(count) Package\(count == 1 ? "" : "s")", systemImage: "arrow.up.circle")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(viewModel.isLoading || viewModel.isUpgrading || viewModel.isSwitchingRepository)
+                        }
+
+                        Button(action: {
+                            showSwitchRepo = true
+                        }) {
+                            Label("Switch Repo", systemImage: "arrow.left.arrow.right")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(viewModel.isLoading || viewModel.isUpgrading || viewModel.isSwitchingRepository)
+
+                        Button(action: {
+                            Task {
+                                await viewModel.refresh()
+                            }
+                        }) {
+                            Label("Refresh", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(viewModel.isLoading || viewModel.isUpgrading || viewModel.isSwitchingRepository)
+                    }
+                    .padding()
+
+                    Divider()
 
             // Tab Picker
             Picker("Package View", selection: $selectedTab) {
@@ -370,32 +432,6 @@ struct PackagesContentView: View {
                     Text("Loading packages...")
                         .font(.headline)
                         .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if viewModel.isUpgrading {
-                VStack(spacing: 20) {
-                    ProgressView()
-                        .scaleEffect(1.5)
-                    Text("Upgrading packages...")
-                        .font(.headline)
-                        .foregroundColor(.secondary)
-                    Text("This may take several minutes")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    if !viewModel.upgradeOutput.isEmpty {
-                        ScrollView {
-                            Text(viewModel.upgradeOutput)
-                                .font(.system(.caption, design: .monospaced))
-                                .foregroundColor(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding()
-                        }
-                        .frame(maxHeight: 200)
-                        .background(Color.secondary.opacity(0.05))
-                        .cornerRadius(8)
-                        .padding()
-                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if viewModel.isSwitchingRepository {
@@ -501,6 +537,8 @@ struct PackagesContentView: View {
                         )
                     }
                 }
+            }
+            }
             }
         }
         .alert("Package Error", isPresented: $showError) {
@@ -1264,6 +1302,7 @@ class PackagesViewModel: ObservableObject {
     @Published var updatesAvailable = 0
     @Published var isLoading = false
     @Published var isUpgrading = false
+    @Published var upgradeComplete = false
     @Published var upgradeOutput = ""
     @Published var isSwitchingRepository = false
     @Published var repositorySwitchOutput = ""
@@ -1323,31 +1362,21 @@ class PackagesViewModel: ObservableObject {
         }
 
         isUpgrading = true
+        upgradeComplete = false
         upgradeOutput = ""
         error = nil
 
         do {
-            let output = try await sshManager.upgradePackages()
-            upgradeOutput = output
-
-            // Show success alert
-            let successAlert = NSAlert()
-            successAlert.messageText = "Upgrade Complete"
-            successAlert.informativeText = "All packages have been upgraded successfully."
-            successAlert.alertStyle = .informational
-            successAlert.addButton(withTitle: "OK")
-            successAlert.runModal()
-
-            // Reload packages
-            await loadPackages()
-            updatesAvailable = 0
-            upgradablePackages = []
+            try await sshManager.upgradePackagesStreaming { [weak self] output in
+                self?.upgradeOutput += output
+            }
+            upgradeComplete = true
+            isUpgrading = false
         } catch {
-            self.error = "Failed to upgrade packages: \(error.localizedDescription)"
+            upgradeOutput += "\n\nError: \(error.localizedDescription)"
+            upgradeComplete = true
+            isUpgrading = false
         }
-
-        isUpgrading = false
-        upgradeOutput = ""
     }
 
     func upgradeSelectedPackages(names: [String]) async {
@@ -1366,29 +1395,32 @@ class PackagesViewModel: ObservableObject {
         }
 
         isUpgrading = true
+        upgradeComplete = false
         upgradeOutput = ""
         error = nil
 
         do {
-            let output = try await sshManager.upgradeSelectedPackages(names: names)
-            upgradeOutput = output
-
-            // Show success alert
-            let successAlert = NSAlert()
-            successAlert.messageText = "Upgrade Complete"
-            successAlert.informativeText = "\(names.count) package(s) have been upgraded successfully."
-            successAlert.alertStyle = .informational
-            successAlert.addButton(withTitle: "OK")
-            successAlert.runModal()
-
-            // Reload upgradable packages to refresh the list
-            await loadUpgradablePackages()
+            try await sshManager.upgradeSelectedPackagesStreaming(names: names) { [weak self] output in
+                self?.upgradeOutput += output
+            }
+            upgradeComplete = true
+            isUpgrading = false
         } catch {
-            self.error = "Failed to upgrade packages: \(error.localizedDescription)"
+            upgradeOutput += "\n\nError: \(error.localizedDescription)"
+            upgradeComplete = true
+            isUpgrading = false
         }
+    }
 
-        isUpgrading = false
+    func dismissUpgradeConsole() async {
+        upgradeComplete = false
         upgradeOutput = ""
+        // Reload packages to reflect the changes
+        await loadPackages()
+        updatesAvailable = 0
+        upgradablePackages = []
+        // Reload upgradable packages to check if any remain
+        await loadUpgradablePackages()
     }
 
     func switchRepository(to newRepo: RepositoryType) async {

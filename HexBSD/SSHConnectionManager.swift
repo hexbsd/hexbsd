@@ -5751,6 +5751,20 @@ extension SSHConnectionManager {
         return output
     }
 
+    func upgradePackagesStreaming(onOutput: @escaping (String) -> Void) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Perform the upgrade with -y to auto-confirm
+        let exitCode = try await executeCommandStreaming("pkg upgrade -y", onOutput: onOutput)
+        if exitCode != 0 {
+            throw NSError(domain: "SSHConnectionManager", code: exitCode,
+                         userInfo: [NSLocalizedDescriptionKey: "Package upgrade failed with exit code \(exitCode)"])
+        }
+    }
+
     func upgradeSelectedPackages(names: [String]) async throws -> String {
         guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
@@ -5765,6 +5779,25 @@ extension SSHConnectionManager {
         let packageList = names.joined(separator: " ")
         let output = try await executeCommand("pkg upgrade -y \(packageList)")
         return output
+    }
+
+    func upgradeSelectedPackagesStreaming(names: [String], onOutput: @escaping (String) -> Void) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        guard !names.isEmpty else {
+            return
+        }
+
+        // Build the command with specific package names
+        let packageList = names.joined(separator: " ")
+        let exitCode = try await executeCommandStreaming("pkg upgrade -y \(packageList)", onOutput: onOutput)
+        if exitCode != 0 {
+            throw NSError(domain: "SSHConnectionManager", code: exitCode,
+                         userInfo: [NSLocalizedDescriptionKey: "Package upgrade failed with exit code \(exitCode)"])
+        }
     }
 
     /// Switch package repository between quarterly and latest
