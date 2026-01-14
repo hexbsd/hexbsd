@@ -185,6 +185,8 @@ struct FilesContentView: View {
                     onRefresh: { await localVM.refresh() },
                     onNavigateTo: { file in await localVM.navigateTo(file) },
                     onDelete: { file in await localVM.deleteFile(file) },
+                    onRename: { file in await localVM.renameFile(file) },
+                    onCreateFolder: { await localVM.createFolder() },
                     onTransfer: { await transferToRemote() },
                     canTransfer: !localVM.selectedFiles.isEmpty && !isTransferring,
                     onDropReceived: { path in
@@ -205,6 +207,8 @@ struct FilesContentView: View {
                     onRefresh: { await remoteVM.refresh() },
                     onNavigateTo: { file in await remoteVM.navigateTo(file) },
                     onDelete: { file in await remoteVM.deleteFile(file) },
+                    onRename: { file in await remoteVM.renameFile(file) },
+                    onCreateFolder: { await remoteVM.createFolder() },
                     onTransfer: { await transferToLocal() },
                     canTransfer: !remoteVM.selectedFiles.isEmpty && !isTransferring,
                     onDropReceived: { path in
@@ -507,6 +511,8 @@ struct LocalFilePaneView: View {
     let onRefresh: () async -> Void
     let onNavigateTo: (LocalFile) async -> Void
     let onDelete: (LocalFile) async -> Void
+    let onRename: (LocalFile) async -> Void
+    let onCreateFolder: () async -> Void
     let onTransfer: () async -> Void
     let canTransfer: Bool
     var onDropReceived: ((String) -> Void)? = nil
@@ -547,11 +553,6 @@ struct LocalFilePaneView: View {
                     .foregroundColor(.secondary)
 
                 Spacer()
-
-                Button(action: { Task { await onRefresh() } }) {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
 
                 Button(action: { Task { await onTransfer() } }) {
                     Image(systemName: "arrow.right")
@@ -646,6 +647,9 @@ struct LocalFilePaneView: View {
                                     }
                                     Divider()
                                 }
+                                Button("Rename") {
+                                    Task { await onRename(file) }
+                                }
                                 Button("Delete", role: .destructive) {
                                     Task { await onDelete(file) }
                                 }
@@ -653,6 +657,11 @@ struct LocalFilePaneView: View {
                         }
                     }
                     .listStyle(.plain)
+                    .contextMenu {
+                        Button("New Folder") {
+                            Task { await onCreateFolder() }
+                        }
+                    }
                 }
 
                 // Drop highlight overlay
@@ -689,6 +698,8 @@ struct RemoteFilePaneView: View {
     let onRefresh: () async -> Void
     let onNavigateTo: (RemoteFile) async -> Void
     let onDelete: (RemoteFile) async -> Void
+    let onRename: (RemoteFile) async -> Void
+    let onCreateFolder: () async -> Void
     let onTransfer: () async -> Void
     let canTransfer: Bool
     var onDropReceived: ((String) -> Void)? = nil
@@ -730,11 +741,6 @@ struct RemoteFilePaneView: View {
                     .foregroundColor(.secondary)
 
                 Spacer()
-
-                Button(action: { Task { await onRefresh() } }) {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
 
                 Button(action: { Task { await onTransfer() } }) {
                     Image(systemName: "arrow.left")
@@ -815,6 +821,9 @@ struct RemoteFilePaneView: View {
                                     }
                                     Divider()
                                 }
+                                Button("Rename") {
+                                    Task { await onRename(file) }
+                                }
                                 Button("Delete", role: .destructive) {
                                     Task { await onDelete(file) }
                                 }
@@ -822,6 +831,11 @@ struct RemoteFilePaneView: View {
                         }
                     }
                     .listStyle(.plain)
+                    .contextMenu {
+                        Button("New Folder") {
+                            Task { await onCreateFolder() }
+                        }
+                    }
                 }
 
                 // Drop highlight overlay
@@ -957,6 +971,60 @@ class LocalFilesViewModel: ObservableObject {
             self.error = "Failed to delete: \(error.localizedDescription)"
         }
     }
+
+    func renameFile(_ file: LocalFile) async {
+        let alert = NSAlert()
+        alert.messageText = "Rename \(file.name)"
+        alert.informativeText = "Enter a new name:"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        textField.stringValue = file.name
+        alert.accessoryView = textField
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let newName = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !newName.isEmpty, newName != file.name else { return }
+
+        let newPath = (file.path as NSString).deletingLastPathComponent + "/" + newName
+
+        do {
+            try fileManager.moveItem(atPath: file.path, toPath: newPath)
+            await refresh()
+        } catch {
+            self.error = "Failed to rename: \(error.localizedDescription)"
+        }
+    }
+
+    func createFolder() async {
+        let alert = NSAlert()
+        alert.messageText = "New Folder"
+        alert.informativeText = "Enter folder name:"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        textField.stringValue = "New Folder"
+        alert.accessoryView = textField
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let folderName = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !folderName.isEmpty else { return }
+
+        let newPath = currentPath + "/" + folderName
+
+        do {
+            try fileManager.createDirectory(atPath: newPath, withIntermediateDirectories: false, attributes: nil)
+            await refresh()
+        } catch {
+            self.error = "Failed to create folder: \(error.localizedDescription)"
+        }
+    }
 }
 
 // MARK: - Remote Files View Model
@@ -1050,6 +1118,64 @@ class RemoteFilesViewModel: ObservableObject {
             await refresh()
         } catch {
             self.error = "Failed to delete: \(error.localizedDescription)"
+        }
+    }
+
+    func renameFile(_ file: RemoteFile) async {
+        let alert = NSAlert()
+        alert.messageText = "Rename \(file.name)"
+        alert.informativeText = "Enter a new name:"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        textField.stringValue = file.name
+        alert.accessoryView = textField
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let newName = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !newName.isEmpty, newName != file.name else { return }
+
+        let parentPath = (file.path as NSString).deletingLastPathComponent
+        let newPath = parentPath + "/" + newName
+
+        do {
+            let escapedOldPath = file.path.replacingOccurrences(of: "'", with: "'\\''")
+            let escapedNewPath = newPath.replacingOccurrences(of: "'", with: "'\\''")
+            _ = try await sshManager.executeCommand("mv '\(escapedOldPath)' '\(escapedNewPath)'")
+            await refresh()
+        } catch {
+            self.error = "Failed to rename: \(error.localizedDescription)"
+        }
+    }
+
+    func createFolder() async {
+        let alert = NSAlert()
+        alert.messageText = "New Folder"
+        alert.informativeText = "Enter folder name:"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        textField.stringValue = "New Folder"
+        alert.accessoryView = textField
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let folderName = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !folderName.isEmpty else { return }
+
+        let newPath = currentPath + "/" + folderName
+
+        do {
+            let escapedPath = newPath.replacingOccurrences(of: "'", with: "'\\''")
+            _ = try await sshManager.executeCommand("mkdir '\(escapedPath)'")
+            await refresh()
+        } catch {
+            self.error = "Failed to create folder: \(error.localizedDescription)"
         }
     }
 }
