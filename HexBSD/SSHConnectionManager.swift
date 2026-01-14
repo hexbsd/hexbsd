@@ -562,13 +562,11 @@ class SSHConnectionManager {
 
         print("DEBUG: Downloading file of size: \(fileSize) bytes")
 
-        // For large files (> 5MB), use scp which is much faster
-        if fileSize > 5_000_000 {
-            print("DEBUG: Using SCP for large file download")
-            return try await downloadWithSCP(remotePath: remotePath, localURL: localURL, fileSize: fileSize, progressCallback: progressCallback, cancelCheck: cancelCheck)
-        }
+        // Always use SCP for reliable binary transfers
+        print("DEBUG: Using SCP for file download")
+        return try await downloadWithSCP(remotePath: remotePath, localURL: localURL, fileSize: fileSize, progressCallback: progressCallback, cancelCheck: cancelCheck)
 
-        // For small files, use base64 encoding for reliable binary transfer
+        // Legacy base64 code below - kept for reference but no longer used
         print("DEBUG: Using base64 for small file download")
         progressCallback?(0, fileSize, "")
 
@@ -678,6 +676,121 @@ class SSHConnectionManager {
            let finalSize = attrs[.size] as? Int64 {
             progressCallback?(finalSize, fileSize, "")
         }
+    }
+
+    /// Download a directory recursively from the remote server
+    func downloadDirectory(
+        remotePath: String,
+        localURL: URL,
+        progressCallback: ((String) -> Void)?
+    ) async throws {
+        guard let keyPath = connectedKeyPath else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "No SSH key configured"])
+        }
+
+        guard let host = connectedHost else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected"])
+        }
+
+        let user = connectedUsername ?? "root"
+        let portNum = connectedPort ?? 22
+
+        print("DEBUG: Starting recursive SCP download from \(user)@\(host):\(remotePath)")
+        progressCallback?("Downloading directory...")
+
+        // Create local directory if it doesn't exist
+        try FileManager.default.createDirectory(at: localURL, withIntermediateDirectories: true, attributes: nil)
+
+        // Check if remote directory is empty
+        let listOutput = try await executeCommand("ls -A \"\(remotePath)\" 2>/dev/null | head -1")
+        if listOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Directory is empty, just create the local directory (already done above)
+            print("DEBUG: Remote directory is empty, created empty local directory")
+            progressCallback?("Download complete (empty directory)")
+            return
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/scp")
+        process.arguments = [
+            "-r",  // Recursive
+            "-P", String(portNum),
+            "-i", keyPath,
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "BatchMode=yes",
+            "\(user)@\(host):\(remotePath)/*",  // Copy contents of directory
+            localURL.path
+        ]
+
+        let pipe = Pipe()
+        process.standardError = pipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        if process.terminationStatus != 0 {
+            let errorData = pipe.fileHandleForReading.readDataToEndOfFile()
+            let errorStr = String(data: errorData, encoding: .utf8) ?? "Unknown error"
+            throw NSError(domain: "SSHConnectionManager", code: Int(process.terminationStatus),
+                         userInfo: [NSLocalizedDescriptionKey: "SCP failed: \(errorStr)"])
+        }
+
+        progressCallback?("Download complete")
+    }
+
+    /// Upload a directory recursively to the remote server
+    func uploadDirectory(
+        localURL: URL,
+        remotePath: String,
+        progressCallback: ((String) -> Void)?
+    ) async throws {
+        guard let keyPath = connectedKeyPath else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "No SSH key configured"])
+        }
+
+        guard let host = connectedHost else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected"])
+        }
+
+        let user = connectedUsername ?? "root"
+        let portNum = connectedPort ?? 22
+
+        print("DEBUG: Starting recursive SCP upload from \(localURL.path) to \(user)@\(host):\(remotePath)")
+        progressCallback?("Uploading directory...")
+
+        // Create remote directory first
+        _ = try await executeCommand("mkdir -p \"\(remotePath)\"")
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/scp")
+        process.arguments = [
+            "-r",  // Recursive
+            "-P", String(portNum),
+            "-i", keyPath,
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "BatchMode=yes",
+            localURL.path,  // Source directory
+            "\(user)@\(host):\(remotePath)"  // Destination path
+        ]
+
+        let pipe = Pipe()
+        process.standardError = pipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        if process.terminationStatus != 0 {
+            let errorData = pipe.fileHandleForReading.readDataToEndOfFile()
+            let errorStr = String(data: errorData, encoding: .utf8) ?? "Unknown error"
+            throw NSError(domain: "SSHConnectionManager", code: Int(process.terminationStatus),
+                         userInfo: [NSLocalizedDescriptionKey: "SCP failed: \(errorStr)"])
+        }
+
+        progressCallback?("Upload complete")
     }
 
     private func formatTransferRate(_ bytesPerSecond: Double) -> String {

@@ -276,7 +276,6 @@ struct FilesContentView: View {
             if transferCancelled { break }
 
             guard let file = localVM.files.first(where: { $0.id == fileId }) else { continue }
-            guard !file.isDirectory else { continue } // Skip directories for now
 
             await MainActor.run {
                 transferFileName = "Uploading: \(file.name)"
@@ -293,19 +292,34 @@ struct FilesContentView: View {
 
             do {
                 let localURL = URL(fileURLWithPath: file.path)
-                try await sshManager.uploadFile(
-                    localURL: localURL,
-                    remotePath: remotePath,
-                    detailedProgressCallback: { transferred, total, rate in
-                        Task { @MainActor in
-                            self.transferredBytes = transferred
-                            self.totalTransferBytes = total
-                            self.transferProgress = total > 0 ? Double(transferred) / Double(total) : 0
-                            self.transferRate = rate
+
+                if file.isDirectory {
+                    // Upload directory recursively
+                    try await sshManager.uploadDirectory(
+                        localURL: localURL,
+                        remotePath: remoteVM.currentPath,
+                        progressCallback: { status in
+                            Task { @MainActor in
+                                self.transferFileName = "Uploading: \(file.name) - \(status)"
+                            }
                         }
-                    },
-                    cancelCheck: { self.transferCancelled }
-                )
+                    )
+                } else {
+                    // Upload single file
+                    try await sshManager.uploadFile(
+                        localURL: localURL,
+                        remotePath: remotePath,
+                        detailedProgressCallback: { transferred, total, rate in
+                            Task { @MainActor in
+                                self.transferredBytes = transferred
+                                self.totalTransferBytes = total
+                                self.transferProgress = total > 0 ? Double(transferred) / Double(total) : 0
+                                self.transferRate = rate
+                            }
+                        },
+                        cancelCheck: { self.transferCancelled }
+                    )
+                }
             } catch {
                 if !transferCancelled {
                     await MainActor.run {
@@ -337,7 +351,6 @@ struct FilesContentView: View {
             if transferCancelled { break }
 
             guard let file = remoteVM.files.first(where: { $0.id == fileId }) else { continue }
-            guard !file.isDirectory else { continue } // Skip directories for now
 
             await MainActor.run {
                 transferFileName = "Downloading: \(file.name)"
@@ -354,19 +367,34 @@ struct FilesContentView: View {
 
             do {
                 let localURL = URL(fileURLWithPath: localPath)
-                try await sshManager.downloadFile(
-                    remotePath: file.path,
-                    localURL: localURL,
-                    progressCallback: { transferred, total, rate in
-                        Task { @MainActor in
-                            self.transferredBytes = transferred
-                            self.totalTransferBytes = total
-                            self.transferProgress = total > 0 ? Double(transferred) / Double(total) : 0
-                            self.transferRate = rate
+
+                if file.isDirectory {
+                    // Download directory recursively
+                    try await sshManager.downloadDirectory(
+                        remotePath: file.path,
+                        localURL: localURL,
+                        progressCallback: { status in
+                            Task { @MainActor in
+                                self.transferFileName = "Downloading: \(file.name) - \(status)"
+                            }
                         }
-                    },
-                    cancelCheck: { self.transferCancelled }
-                )
+                    )
+                } else {
+                    // Download single file
+                    try await sshManager.downloadFile(
+                        remotePath: file.path,
+                        localURL: localURL,
+                        progressCallback: { transferred, total, rate in
+                            Task { @MainActor in
+                                self.transferredBytes = transferred
+                                self.totalTransferBytes = total
+                                self.transferProgress = total > 0 ? Double(transferred) / Double(total) : 0
+                                self.transferRate = rate
+                            }
+                        },
+                        cancelCheck: { self.transferCancelled }
+                    )
+                }
             } catch {
                 if !transferCancelled {
                     await MainActor.run {
@@ -919,7 +947,7 @@ class LocalFilesViewModel: ObservableObject {
             let contents = try fileManager.contentsOfDirectory(
                 at: url,
                 includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey],
-                options: [.skipsHiddenFiles]
+                options: []
             )
 
             var loadedFiles: [LocalFile] = []
