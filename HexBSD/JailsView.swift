@@ -219,6 +219,14 @@ struct JailsContentView: View {
                 showError = true
             }
         }
+        .onChange(of: viewModel.jails) { _, newJails in
+            // Update selectedJail to the matching jail from the refreshed list
+            // This ensures the detail view reflects the current jail state
+            if let selected = selectedJail,
+               let updated = newJails.first(where: { $0.name == selected.name }) {
+                selectedJail = updated
+            }
+        }
         .onAppear {
             Task {
                 await viewModel.loadJails()
