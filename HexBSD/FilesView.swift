@@ -723,12 +723,6 @@ struct RemoteFilePaneView: View {
                 .buttonStyle(.borderless)
                 .help("Go to home directory")
 
-                Button(action: { Task { await onNavigateRoot() } }) {
-                    Image(systemName: "slash.circle")
-                }
-                .buttonStyle(.borderless)
-                .help("Go to root directory")
-
                 Text(currentPath)
                     .font(.caption)
                     .lineLimit(1)
@@ -978,12 +972,24 @@ class RemoteFilesViewModel: ObservableObject {
     private let sshManager = SSHConnectionManager.shared
 
     func loadInitialDirectory() async {
-        currentPath = "~"
+        // Resolve ~ to actual home directory path
+        do {
+            let homePath = try await sshManager.executeCommand("echo $HOME")
+            currentPath = homePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            currentPath = "/root"
+        }
         await loadDirectory(currentPath)
     }
 
     func navigateHome() async {
-        currentPath = "~"
+        // Resolve ~ to actual home directory path
+        do {
+            let homePath = try await sshManager.executeCommand("echo $HOME")
+            currentPath = homePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            currentPath = "/root"
+        }
         await loadDirectory(currentPath)
     }
 
@@ -993,12 +999,6 @@ class RemoteFilesViewModel: ObservableObject {
     }
 
     func navigateUp() async {
-        if currentPath == "~" {
-            // Go to parent of home directory (e.g., /home or /Users)
-            currentPath = "/"
-            await loadDirectory(currentPath)
-            return
-        }
         let components = currentPath.split(separator: "/")
         if components.count > 1 {
             currentPath = "/" + components.dropLast().joined(separator: "/")
