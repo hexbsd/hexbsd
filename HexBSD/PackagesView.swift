@@ -351,7 +351,16 @@ struct PackagesContentView: View {
                                 .foregroundColor(.secondary)
 
                             HStack(spacing: 12) {
-                                if let repoType = viewModel.currentRepository {
+                                if let customURL = viewModel.customRepoURL {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "link")
+                                            .foregroundColor(.purple)
+                                        Text("Custom Repository")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                            .help(customURL)
+                                    }
+                                } else if let repoType = viewModel.currentRepository {
                                     HStack(spacing: 4) {
                                         Image(systemName: repoType.icon)
                                             .foregroundColor(repoType.color)
@@ -683,9 +692,10 @@ struct PackagesContentView: View {
         .sheet(isPresented: $showSwitchRepo) {
             SwitchRepositorySheet(
                 currentRepository: viewModel.currentRepository ?? .quarterly,
-                onSwitch: { newRepo in
+                currentCustomURL: viewModel.customRepoURL,
+                onSwitch: { selection in
                     Task {
-                        await viewModel.switchRepository(to: newRepo)
+                        await viewModel.handleRepositorySelection(selection)
                         showSwitchRepo = false
                     }
                 },
@@ -1333,20 +1343,33 @@ struct DetailItem: View {
     }
 }
 
+// MARK: - Repository Selection Result
+
+enum RepositorySelection {
+    case standard(RepositoryType)
+    case custom(url: String)
+}
+
 // MARK: - Switch Repository Sheet
 
 struct SwitchRepositorySheet: View {
     let currentRepository: RepositoryType
-    let onSwitch: (RepositoryType) -> Void
+    let currentCustomURL: String?
+    let onSwitch: (RepositorySelection) -> Void
     let onCancel: () -> Void
 
     @State private var selectedRepository: RepositoryType
+    @State private var useCustomRepository = false
+    @State private var customURL = ""
 
-    init(currentRepository: RepositoryType, onSwitch: @escaping (RepositoryType) -> Void, onCancel: @escaping () -> Void) {
+    init(currentRepository: RepositoryType, currentCustomURL: String? = nil, onSwitch: @escaping (RepositorySelection) -> Void, onCancel: @escaping () -> Void) {
         self.currentRepository = currentRepository
+        self.currentCustomURL = currentCustomURL
         self.onSwitch = onSwitch
         self.onCancel = onCancel
         _selectedRepository = State(initialValue: currentRepository)
+        _useCustomRepository = State(initialValue: currentCustomURL != nil)
+        _customURL = State(initialValue: currentCustomURL ?? "")
     }
 
     var body: some View {
@@ -1361,14 +1384,23 @@ struct SwitchRepositorySheet: View {
                     .foregroundColor(.secondary)
 
                 HStack {
-                    Image(systemName: currentRepository.icon)
-                        .foregroundColor(currentRepository.color)
-                    Text(currentRepository.displayName)
-                        .font(.body)
+                    if let customURL = currentCustomURL {
+                        Image(systemName: "link")
+                            .foregroundColor(.purple)
+                        Text("Custom: \(customURL)")
+                            .font(.body)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    } else {
+                        Image(systemName: currentRepository.icon)
+                            .foregroundColor(currentRepository.color)
+                        Text(currentRepository.displayName)
+                            .font(.body)
+                    }
                 }
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(currentRepository.color.opacity(0.1))
+                .background((currentCustomURL != nil ? Color.purple : currentRepository.color).opacity(0.1))
                 .cornerRadius(8)
 
                 Divider()
@@ -1379,9 +1411,11 @@ struct SwitchRepositorySheet: View {
                     .foregroundColor(.secondary)
 
                 VStack(spacing: 12) {
+                    // Standard repository options
                     ForEach(RepositoryType.allCases, id: \.self) { repo in
                         Button(action: {
                             selectedRepository = repo
+                            useCustomRepository = false
                         }) {
                             HStack {
                                 Image(systemName: repo.icon)
@@ -1399,24 +1433,76 @@ struct SwitchRepositorySheet: View {
 
                                 Spacer()
 
-                                if selectedRepository == repo {
+                                if !useCustomRepository && selectedRepository == repo {
                                     Image(systemName: "checkmark.circle.fill")
                                         .foregroundColor(repo.color)
                                 }
                             }
                             .padding(12)
-                            .background(selectedRepository == repo ? repo.color.opacity(0.1) : Color.clear)
+                            .background(!useCustomRepository && selectedRepository == repo ? repo.color.opacity(0.1) : Color.clear)
                             .cornerRadius(8)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 8)
-                                    .stroke(selectedRepository == repo ? repo.color : Color.clear, lineWidth: 2)
+                                    .stroke(!useCustomRepository && selectedRepository == repo ? repo.color : Color.clear, lineWidth: 2)
                             )
                         }
                         .buttonStyle(.plain)
                     }
+
+                    // Custom repository option
+                    Button(action: {
+                        useCustomRepository = true
+                    }) {
+                        HStack {
+                            Image(systemName: "link")
+                                .foregroundColor(.purple)
+                                .frame(width: 24)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Custom Repository")
+                                    .font(.headline)
+                                    .foregroundColor(.primary)
+                                Text("Use your own package builder URL (e.g., poudriere)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+
+                            Spacer()
+
+                            if useCustomRepository {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.purple)
+                            }
+                        }
+                        .padding(12)
+                        .background(useCustomRepository ? Color.purple.opacity(0.1) : Color.clear)
+                        .cornerRadius(8)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(useCustomRepository ? Color.purple : Color.clear, lineWidth: 2)
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    // Custom URL text field
+                    if useCustomRepository {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Repository URL")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            TextField("https://pkg.example.com/FreeBSD:14:amd64/latest", text: $customURL)
+                                .textFieldStyle(.roundedBorder)
+
+                            Text("Enter the full URL to your package repository. The URL should point to the directory containing the package metadata.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.leading, 36)
+                    }
                 }
 
-                if selectedRepository != currentRepository {
+                if hasChanges {
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundColor(.orange)
@@ -1438,14 +1524,34 @@ struct SwitchRepositorySheet: View {
                 .keyboardShortcut(.cancelAction)
 
                 Button("Switch Repository") {
-                    onSwitch(selectedRepository)
+                    if useCustomRepository {
+                        onSwitch(.custom(url: customURL))
+                    } else {
+                        onSwitch(.standard(selectedRepository))
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(selectedRepository == currentRepository)
+                .disabled(!canSwitch)
             }
         }
         .padding()
         .frame(width: 500)
+    }
+
+    private var hasChanges: Bool {
+        if useCustomRepository {
+            return !customURL.isEmpty && customURL != currentCustomURL
+        } else {
+            return selectedRepository != currentRepository || currentCustomURL != nil
+        }
+    }
+
+    private var canSwitch: Bool {
+        if useCustomRepository {
+            return !customURL.isEmpty && (customURL != currentCustomURL || currentCustomURL == nil)
+        } else {
+            return selectedRepository != currentRepository || currentCustomURL != nil
+        }
     }
 }
 
@@ -1607,6 +1713,7 @@ class PackagesViewModel: ObservableObject {
     @Published var cacheCount: Int = 0
     @Published var currentMirror: PackageMirror = .automatic
     @Published var availableMirrors: [PackageMirror] = [.automatic]
+    @Published var customRepoURL: String?
 
     private let sshManager = SSHConnectionManager.shared
 
@@ -1617,6 +1724,8 @@ class PackagesViewModel: ObservableObject {
         do {
             packages = try await sshManager.listInstalledPackages()
             currentRepository = try await sshManager.getCurrentRepository()
+            // Load custom repo URL if configured
+            customRepoURL = try await sshManager.getCurrentCustomRepoURL()
             // Load cache info
             let cacheInfo = try await sshManager.getPackageCacheInfo()
             cacheSize = cacheInfo.size
@@ -1749,6 +1858,7 @@ class PackagesViewModel: ObservableObject {
             let output = try await sshManager.switchPackageRepository(to: newRepo)
             repositorySwitchOutput = output
             currentRepository = newRepo
+            customRepoURL = nil  // Clear custom URL when switching to standard repo
 
             // Show success and recommend checking for updates
             let alert = NSAlert()
@@ -1766,6 +1876,43 @@ class PackagesViewModel: ObservableObject {
 
         isSwitchingRepository = false
         repositorySwitchOutput = ""
+    }
+
+    func switchToCustomRepository(url: String) async {
+        isSwitchingRepository = true
+        repositorySwitchOutput = ""
+        error = nil
+
+        do {
+            let output = try await sshManager.setCustomRepository(url: url)
+            repositorySwitchOutput = output
+            customRepoURL = url
+
+            // Show success and recommend checking for updates
+            let alert = NSAlert()
+            alert.messageText = "Custom Repository Set"
+            alert.informativeText = "Package repository has been set to custom URL. Click 'Check Updates' to see available packages from the new repository."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+
+            // Reload packages
+            await loadPackages()
+        } catch {
+            self.error = "Failed to set custom repository: \(error.localizedDescription)"
+        }
+
+        isSwitchingRepository = false
+        repositorySwitchOutput = ""
+    }
+
+    func handleRepositorySelection(_ selection: RepositorySelection) async {
+        switch selection {
+        case .standard(let repoType):
+            await switchRepository(to: repoType)
+        case .custom(let url):
+            await switchToCustomRepository(url: url)
+        }
     }
 
     func changeMirror(to mirror: PackageMirror) async {

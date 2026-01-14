@@ -1140,26 +1140,11 @@ struct FirewallTabView: View {
     }
 }
 
-// MARK: - Firewall Sub-Tab
-
-enum FirewallSubTab: String, CaseIterable {
-    case services = "Services"
-    case logging = "Logging"
-
-    var icon: String {
-        switch self {
-        case .services: return "list.bullet.rectangle"
-        case .logging: return "doc.text"
-        }
-    }
-}
-
 // MARK: - Firewall Services View (macOS-style)
 
 struct FirewallServicesView: View {
     @ObservedObject var viewModel: FirewallViewModel
     @Binding var showAddServiceSheet: Bool
-    @State private var selectedSubTab: FirewallSubTab = .services
 
     // Get list of allowed ports from current rules
     var allowedPorts: Set<Int> {
@@ -1188,39 +1173,10 @@ struct FirewallServicesView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Sub-tabs
-            HStack(spacing: 0) {
-                ForEach(FirewallSubTab.allCases, id: \.self) { tab in
-                    Button(action: { selectedSubTab = tab }) {
-                        HStack(spacing: 4) {
-                            Image(systemName: tab.icon)
-                            Text(tab.rawValue)
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(selectedSubTab == tab ? Color.accentColor.opacity(0.2) : Color.clear)
-                        .foregroundColor(selectedSubTab == tab ? .accentColor : .secondary)
-                        .cornerRadius(4)
-                    }
-                    .buttonStyle(.plain)
-                }
-                Spacer()
+        servicesContent
+            .sheet(isPresented: $showAddServiceSheet) {
+                AddServiceSheet(viewModel: viewModel, availableServices: availableServices)
             }
-            .padding(.horizontal)
-            .padding(.vertical, 6)
-
-            Divider()
-
-            if selectedSubTab == .services {
-                servicesContent
-            } else {
-                loggingContent
-            }
-        }
-        .sheet(isPresented: $showAddServiceSheet) {
-            AddServiceSheet(viewModel: viewModel, availableServices: availableServices)
-        }
     }
 
     @ViewBuilder
@@ -1295,97 +1251,6 @@ struct FirewallServicesView: View {
             .padding(.horizontal)
             .padding(.vertical, 8)
             .background(Color(nsColor: .controlBackgroundColor))
-        }
-    }
-
-    @ViewBuilder
-    var loggingContent: some View {
-        VStack(spacing: 0) {
-            // Logging toggle
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Enable firewall logging")
-                        .font(.subheadline)
-                    Text("Log blocked connections to system log")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-                Toggle("", isOn: $viewModel.loggingEnabled)
-                    .labelsHidden()
-                    .onChange(of: viewModel.loggingEnabled) { _, newValue in
-                        Task {
-                            await viewModel.setLogging(enabled: newValue)
-                        }
-                    }
-            }
-            .padding()
-            .background(Color(nsColor: .controlBackgroundColor))
-
-            Divider()
-
-            // Log viewer
-            if viewModel.isLoadingLogs {
-                VStack(spacing: 20) {
-                    ProgressView()
-                    Text("Loading logs...")
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if viewModel.firewallLogs.isEmpty {
-                VStack(spacing: 20) {
-                    Image(systemName: "doc.text")
-                        .font(.system(size: 48))
-                        .foregroundColor(.secondary)
-                    Text("No firewall logs")
-                        .font(.title2)
-                        .foregroundColor(.secondary)
-                    Text(viewModel.loggingEnabled ? "Blocked connections will appear here" : "Enable logging to see blocked connections")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    Button(action: {
-                        Task {
-                            await viewModel.loadFirewallLogs()
-                        }
-                    }) {
-                        Label("Refresh", systemImage: "arrow.clockwise")
-                    }
-                    .buttonStyle(.bordered)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                List {
-                    ForEach(viewModel.firewallLogs, id: \.self) { log in
-                        Text(log)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundColor(.secondary)
-                    }
-                }
-
-                HStack {
-                    Text("\(viewModel.firewallLogs.count) log entries")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Spacer()
-                    Button(action: {
-                        Task {
-                            await viewModel.loadFirewallLogs()
-                        }
-                    }) {
-                        Label("Refresh", systemImage: "arrow.clockwise")
-                    }
-                    .buttonStyle(.borderless)
-                }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
-                .background(Color(nsColor: .controlBackgroundColor))
-            }
-        }
-        .onAppear {
-            Task {
-                await viewModel.loadFirewallLogs()
-            }
         }
     }
 
@@ -1732,9 +1597,6 @@ class FirewallViewModel: ObservableObject {
     @Published var rules: [FirewallRule] = []
     @Published var isLoading = false
     @Published var error: String?
-    @Published var loggingEnabled = true
-    @Published var firewallLogs: [String] = []
-    @Published var isLoadingLogs = false
 
     private let sshManager = SSHConnectionManager.shared
 
@@ -1746,8 +1608,6 @@ class FirewallViewModel: ObservableObject {
             let result = try await sshManager.getFirewallStatus()
             status = result.status
             rules = result.rules
-            // Also check logging status
-            await checkLoggingStatus()
         } catch {
             self.error = "Failed to check firewall status: \(error.localizedDescription)"
             status = .unknown
@@ -1825,38 +1685,5 @@ class FirewallViewModel: ObservableObject {
         }
 
         isLoading = false
-    }
-
-    func setLogging(enabled: Bool) async {
-        do {
-            try await sshManager.setFirewallLogging(enabled: enabled)
-            loggingEnabled = enabled
-        } catch {
-            self.error = "Failed to set logging: \(error.localizedDescription)"
-            // Revert the toggle
-            loggingEnabled = !enabled
-        }
-    }
-
-    func loadFirewallLogs() async {
-        isLoadingLogs = true
-
-        do {
-            firewallLogs = try await sshManager.getFirewallLogs()
-        } catch {
-            self.error = "Failed to load logs: \(error.localizedDescription)"
-            firewallLogs = []
-        }
-
-        isLoadingLogs = false
-    }
-
-    func checkLoggingStatus() async {
-        do {
-            loggingEnabled = try await sshManager.getFirewallLoggingStatus()
-        } catch {
-            // Default to true if we can't determine
-            loggingEnabled = true
-        }
     }
 }

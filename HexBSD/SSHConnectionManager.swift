@@ -2431,8 +2431,10 @@ extension SSHConnectionManager {
 ipfw -q flush
 # Allow loopback traffic
 ipfw -q add 00100 allow all from any to any via lo0 // loopback
-# Allow all outgoing traffic
-ipfw -q add 00200 allow all from any to any out // outbound
+# Check state for return traffic (must be before outbound rule)
+ipfw -q add 00150 check-state // check-state
+# Allow all outgoing traffic and track state
+ipfw -q add 00200 allow all from any to any out keep-state // outbound
 # Allow SSH inbound
 ipfw -q add 01000 allow tcp from any to any 22 in // SSH
 # Deny everything else inbound
@@ -2617,68 +2619,46 @@ ipfw -q add 65534 deny log all from any to any in // deny-all-inbound
         // Get current rules
         let rulesOutput = try await executeCommand("ipfw list 2>&1")
 
-        // Build the rules file content
-        var content = "#!/bin/sh\n# HexBSD Firewall Rules\nipfw -q flush\n"
+        // Build the rules file content with proper base rules
+        // Note: ipfw list doesn't show check-state/keep-state keywords, so we hardcode the base rules
+        var content = """
+#!/bin/sh
+# HexBSD Firewall Rules
+ipfw -q flush
+# Allow loopback traffic
+ipfw -q add 00100 allow all from any to any via lo0 // loopback
+# Check state for return traffic (must be before outbound rule)
+ipfw -q add 00150 check-state // check-state
+# Allow all outgoing traffic and track state
+ipfw -q add 00200 allow all from any to any out keep-state // outbound
+
+"""
+
+        // Add user-defined rules (skip base rules we already added)
+        let baseRuleNumbers = Set(["00100", "00150", "00200", "65534", "65535"])
 
         for line in rulesOutput.components(separatedBy: .newlines) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty else { continue }
 
-            // Skip the default 65535 deny rule (kernel adds it automatically)
-            if trimmed.hasPrefix("65535") { continue }
+            // Extract rule number (first component)
+            let ruleNumber = String(trimmed.prefix(5))
 
-            // Convert "00100 allow..." to "ipfw -q add 00100 allow..."
+            // Skip base rules and default deny rules
+            if baseRuleNumbers.contains(ruleNumber) { continue }
+
+            // Convert "01000 allow..." to "ipfw -q add 01000 allow..."
             content += "ipfw -q add \(trimmed)\n"
         }
+
+        // Add the final deny rule
+        content += "# Deny everything else inbound\nipfw -q add 65534 deny log all from any to any in // deny-all-inbound\n"
 
         // Write to file
         let escapedContent = content.replacingOccurrences(of: "'", with: "'\\''")
         let _ = try await executeCommand("printf '%s' '\(escapedContent)' > /etc/ipfw.rules 2>&1")
         let _ = try await executeCommand("chmod +x /etc/ipfw.rules 2>&1")
         print("DEBUG: Updated /etc/ipfw.rules")
-    }
-
-    /// Set firewall logging enabled/disabled
-    func setFirewallLogging(enabled: Bool) async throws {
-        guard client != nil else {
-            throw NSError(domain: "SSHConnectionManager", code: 1,
-                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
-        }
-
-        let value = enabled ? "YES" : "NO"
-        print("DEBUG: Setting firewall logging to \(value)")
-        let _ = try await executeCommand("sysrc firewall_logging=\"\(value)\" 2>&1")
-        print("DEBUG: Firewall logging set to \(value)")
-    }
-
-    /// Get current firewall logging status
-    func getFirewallLoggingStatus() async throws -> Bool {
-        guard client != nil else {
-            throw NSError(domain: "SSHConnectionManager", code: 1,
-                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
-        }
-
-        let output = try await executeCommand("sysrc -n firewall_logging 2>/dev/null || echo 'YES'")
-        let value = output.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        return value == "YES" || value == "TRUE" || value == "1"
-    }
-
-    /// Get firewall logs from system log
-    func getFirewallLogs() async throws -> [String] {
-        guard client != nil else {
-            throw NSError(domain: "SSHConnectionManager", code: 1,
-                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
-        }
-
-        // Search for ipfw entries in /var/log/security or /var/log/messages
-        // ipfw logs typically go to security log on FreeBSD
-        let output = try await executeCommand("grep -i 'ipfw' /var/log/security 2>/dev/null | tail -100 || grep -i 'ipfw' /var/log/messages 2>/dev/null | tail -100 || echo ''")
-
-        let lines = output.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-
-        return lines
     }
 }
 
@@ -6069,6 +6049,94 @@ EOFPKG
         outputLog += "Click 'Check Updates' to update the package catalog.\n"
 
         return outputLog
+    }
+
+    /// Set a custom repository URL (for poudriere or custom package builders)
+    func setCustomRepository(url: String) async throws -> String {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var outputLog = ""
+        outputLog += "Setting custom repository: \(url)\n"
+
+        // Ensure the repos directory exists
+        _ = try await executeCommand("mkdir -p /usr/local/etc/pkg/repos")
+
+        // Remove ALL existing repository config files first
+        outputLog += "Removing old repository configurations...\n"
+        _ = try await executeCommand("rm -f /usr/local/etc/pkg/repos/*.conf")
+
+        // Create configuration for custom repository
+        // Note: Custom repositories typically don't use fingerprint verification
+        // Users can add their own signing configuration if needed
+        let configContent = """
+# Disable the default repositories
+FreeBSD-ports: { enabled: no }
+FreeBSD-ports-kmods: { enabled: no }
+
+# Custom package repository
+Custom: {
+  url: "\(url)",
+  enabled: yes
+}
+"""
+
+        // Write the configuration
+        outputLog += "Writing custom repository configuration...\n"
+        let command = """
+cat > /usr/local/etc/pkg/repos/Custom.conf << 'EOFPKG'
+\(configContent)
+EOFPKG
+"""
+
+        _ = try await executeCommand(command)
+
+        // Clear repository cache to force a clean switch
+        outputLog += "Clearing repository cache...\n"
+        _ = try await executeCommand("rm -rf /var/db/pkg/repos/*")
+
+        // Verify repository configuration
+        outputLog += "\nVerifying active repositories...\n"
+        let verifyOutput = try await executeCommand("pkg -vv 2>&1 | grep -A 10 'Repositories:' | head -15")
+        outputLog += verifyOutput + "\n"
+
+        outputLog += "\nCustom repository configuration complete!\n"
+        outputLog += "Click 'Check Updates' to update the package catalog.\n"
+
+        return outputLog
+    }
+
+    /// Get the current custom repository URL if one is configured
+    func getCurrentCustomRepoURL() async throws -> String? {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Check if there's a custom repository configuration
+        let customConfOutput = try await executeCommand("cat /usr/local/etc/pkg/repos/Custom.conf 2>/dev/null || echo ''")
+
+        if !customConfOutput.isEmpty && customConfOutput.contains("Custom:") {
+            // Extract the URL from the configuration
+            // Looking for: url: "https://..."
+            let lines = customConfOutput.split(separator: "\n")
+            for line in lines {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.starts(with: "url:") {
+                    // Extract the URL between quotes
+                    if let startQuote = trimmed.firstIndex(of: "\""),
+                       let endQuote = trimmed.lastIndex(of: "\""),
+                       startQuote < endQuote {
+                        let urlStart = trimmed.index(after: startQuote)
+                        return String(trimmed[urlStart..<endQuote])
+                    }
+                }
+            }
+        }
+
+        return nil
     }
 
     /// List packages that have upgrades available
