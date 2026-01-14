@@ -113,15 +113,6 @@ struct LogsContentView: View {
                         .font(.headline)
 
                     Spacer()
-
-                    Button(action: {
-                        Task {
-                            await viewModel.refresh()
-                        }
-                    }) {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .buttonStyle(.borderless)
                 }
                 .padding()
 
@@ -285,21 +276,6 @@ struct LogsContentView: View {
                         .pickerStyle(.segmented)
                         .frame(width: 250)
 
-                        Toggle(isOn: $viewModel.autoRefresh) {
-                            Image(systemName: "arrow.clockwise.circle")
-                        }
-                        .toggleStyle(.button)
-                        .help("Auto-refresh every 5 seconds")
-
-                        Button(action: {
-                            Task {
-                                await viewModel.refreshContent()
-                            }
-                        }) {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                        .buttonStyle(.borderless)
-
                         Button(action: {
                             viewModel.exportLog()
                         }) {
@@ -358,8 +334,8 @@ struct LogsContentView: View {
                         }
                         .background(Color(nsColor: .textBackgroundColor))
                         .onChange(of: viewModel.logContent) { oldValue, newValue in
-                            // Auto-scroll to bottom when content updates
-                            if viewModel.autoRefresh {
+                            // Auto-scroll to bottom when streaming
+                            if viewModel.isStreaming {
                                 proxy.scrollTo("logContent", anchor: .bottom)
                             }
                         }
@@ -380,15 +356,13 @@ struct LogsContentView: View {
             }
         }
         .onChange(of: viewModel.selectedLog) { oldValue, newValue in
-            if newValue != nil {
-                Task {
-                    await viewModel.loadLogContent()
-                }
+            Task {
+                await viewModel.startStreaming()
             }
         }
         .onChange(of: viewModel.lineCount) { oldValue, newValue in
             Task {
-                await viewModel.loadLogContent()
+                await viewModel.startStreaming()
             }
         }
         .onAppear {
@@ -396,12 +370,8 @@ struct LogsContentView: View {
                 await viewModel.loadLogFiles()
             }
         }
-        .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
-            if viewModel.autoRefresh && viewModel.selectedLog != nil {
-                Task {
-                    await viewModel.refreshContent()
-                }
-            }
+        .onDisappear {
+            viewModel.stopStreaming()
         }
         .background {
             Button("") {
@@ -426,7 +396,7 @@ class LogsViewModel: ObservableObject {
     @Published var isLoadingContent = false
     @Published var error: String?
     @Published var lineCount: Int = 100
-    @Published var autoRefresh: Bool = false
+    @Published var isStreaming: Bool = false
     @Published var searchText: String = ""
 
     // Global search
@@ -434,6 +404,9 @@ class LogsViewModel: ObservableObject {
     @Published var searchResults: [LogSearchResult] = []
     @Published var isSearchingAll = false
     @Published var showingSearchResults = false
+
+    // Streaming task
+    private var streamTask: Task<Void, Never>?
 
     var filteredLogContent: String {
         guard !searchText.isEmpty else { return logContent }
@@ -472,24 +445,59 @@ class LogsViewModel: ObservableObject {
         await loadLogFiles()
     }
 
-    func loadLogContent() async {
-        guard let log = selectedLog else { return }
+    func startStreaming() async {
+        // Stop any existing stream
+        stopStreaming()
+
+        guard let log = selectedLog else {
+            logContent = ""
+            return
+        }
 
         isLoadingContent = true
         error = nil
 
+        // First load initial content
         do {
             logContent = try await sshManager.readLogFile(path: log.path, lines: lineCount)
         } catch {
             self.error = "Failed to read log: \(error.localizedDescription)"
             logContent = ""
+            isLoadingContent = false
+            return
         }
 
         isLoadingContent = false
+        isStreaming = true
+
+        // Start streaming with tail -f
+        let logPath = log.path
+        streamTask = Task {
+            await streamLogUpdates(path: logPath)
+        }
     }
 
-    func refreshContent() async {
-        await loadLogContent()
+    func stopStreaming() {
+        streamTask?.cancel()
+        streamTask = nil
+        isStreaming = false
+    }
+
+    private func streamLogUpdates(path: String) async {
+        do {
+            try await sshManager.streamLogFile(path: path) { [weak self] newLine in
+                Task { @MainActor in
+                    guard let self = self, !Task.isCancelled else { return }
+                    self.logContent += newLine + "\n"
+                }
+            }
+        } catch {
+            if !Task.isCancelled {
+                await MainActor.run {
+                    self.isStreaming = false
+                }
+            }
+        }
     }
 
     func exportLog() {

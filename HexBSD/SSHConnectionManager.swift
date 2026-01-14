@@ -1170,6 +1170,35 @@ extension SSHConnectionManager {
         return try await executeCommand(command)
     }
 
+    /// Stream log file updates using tail -f
+    func streamLogFile(path: String, onNewLine: @escaping (String) -> Void) async throws {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Use tail -f to follow log file updates
+        // Using -F to also handle log rotation
+        let command = "tail -F '\(path)' 2>/dev/null"
+
+        let streams = try await client.executeCommandStream(command)
+
+        for try await event in streams {
+            // Check for task cancellation
+            try Task.checkCancellation()
+
+            switch event {
+            case .stdout(let data), .stderr(let data):
+                let text = String(buffer: data)
+                // Split into lines and call callback for each
+                let lines = text.components(separatedBy: "\n")
+                for line in lines where !line.isEmpty {
+                    onNewLine(line)
+                }
+            }
+        }
+    }
+
     /// Search all log files for a pattern, returns files with match counts
     func searchAllLogs(pattern: String) async throws -> [LogSearchResult] {
         guard client != nil else {
