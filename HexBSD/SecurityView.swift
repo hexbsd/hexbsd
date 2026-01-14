@@ -1623,6 +1623,13 @@ class FirewallViewModel: ObservableObject {
         do {
             try await sshManager.enableFirewall()
             await checkStatus()
+
+            // Check if domain services are already configured and add firewall rules if needed
+            if let domainRole = try await sshManager.getDomainRole() {
+                print("DEBUG: Domain role '\(domainRole)' detected, enabling firewall rules")
+                try await sshManager.enableDomainFirewallRules(role: domainRole)
+                await checkStatus()
+            }
         } catch {
             self.error = "Failed to enable firewall: \(error.localizedDescription)"
         }

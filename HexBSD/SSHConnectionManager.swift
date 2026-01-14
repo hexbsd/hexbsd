@@ -2660,6 +2660,109 @@ ipfw -q add 00200 allow all from any to any out keep-state // outbound
         let _ = try await executeCommand("chmod +x /etc/ipfw.rules 2>&1")
         print("DEBUG: Updated /etc/ipfw.rules")
     }
+
+    /// Enable firewall rules required for NIS/NFS domain services
+    /// - Parameter role: "server" for domain server, "client" for domain client
+    func enableDomainFirewallRules(role: String) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Check if firewall is enabled
+        let (status, rules) = try await getFirewallStatus()
+        guard status == .enabled else {
+            print("DEBUG: Firewall not enabled, skipping domain firewall rules")
+            return
+        }
+
+        // Find next available rule number
+        let userRules = rules.filter { $0.ruleNumber >= 1000 && $0.ruleNumber < 65000 }
+        var nextRuleNum = (userRules.map { $0.ruleNumber }.max() ?? 999) + 1
+
+        // Check which ports already have rules
+        let existingPorts = Set(rules.compactMap { $0.port })
+
+        // Ports needed for domain services:
+        // - 111 (RPC Portmapper) - required for NIS and NFS service discovery
+        // - 2049 (NFS) - Network File System (server only)
+
+        // Add RPC Portmapper if not already allowed (needed for both server and client)
+        if !existingPorts.contains(111) {
+            print("DEBUG: Adding RPC Portmapper (111/tcp) firewall rule")
+            try await addFirewallRule(ruleNumber: nextRuleNum, action: "allow", proto: "tcp",
+                                      source: "any", destination: "any", port: 111,
+                                      direction: "in", comment: "RPC-Portmapper-Domain")
+            nextRuleNum += 1
+
+            // Also add UDP for portmapper
+            try await addFirewallRule(ruleNumber: nextRuleNum, action: "allow", proto: "udp",
+                                      source: "any", destination: "any", port: 111,
+                                      direction: "in", comment: "RPC-Portmapper-UDP-Domain")
+            nextRuleNum += 1
+        }
+
+        // Server needs NFS port
+        if role == "server" && !existingPorts.contains(2049) {
+            print("DEBUG: Adding NFS (2049/tcp) firewall rule")
+            try await addFirewallRule(ruleNumber: nextRuleNum, action: "allow", proto: "tcp",
+                                      source: "any", destination: "any", port: 2049,
+                                      direction: "in", comment: "NFS-Domain")
+        }
+
+        print("DEBUG: Domain firewall rules enabled for role: \(role)")
+    }
+
+    /// Remove firewall rules added for NIS/NFS domain services
+    func disableDomainFirewallRules() async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Check if firewall is enabled
+        let (status, rules) = try await getFirewallStatus()
+        guard status == .enabled else {
+            print("DEBUG: Firewall not enabled, skipping domain firewall rule removal")
+            return
+        }
+
+        // Find and remove rules with "Domain" in the comment
+        let domainRules = rules.filter { $0.comment.contains("Domain") }
+
+        for rule in domainRules {
+            print("DEBUG: Removing domain firewall rule \(rule.ruleNumber): \(rule.comment)")
+            try await deleteFirewallRule(ruleNumber: rule.ruleNumber)
+        }
+
+        print("DEBUG: Domain firewall rules removed")
+    }
+
+    /// Check if NIS/NFS domain services are configured and return the role
+    /// Returns: "server" if NIS server is enabled, "client" if NIS client is enabled, nil if neither
+    func getDomainRole() async throws -> String? {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Check if NIS server is enabled
+        let serverEnabled = try await executeCommand("sysrc -n nis_server_enable 2>/dev/null || echo 'NO'")
+        if serverEnabled.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "YES" {
+            print("DEBUG: NIS server is enabled")
+            return "server"
+        }
+
+        // Check if NIS client is enabled
+        let clientEnabled = try await executeCommand("sysrc -n nis_client_enable 2>/dev/null || echo 'NO'")
+        if clientEnabled.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "YES" {
+            print("DEBUG: NIS client is enabled")
+            return "client"
+        }
+
+        print("DEBUG: No domain role configured")
+        return nil
+    }
 }
 
 // MARK: - Jails Operations

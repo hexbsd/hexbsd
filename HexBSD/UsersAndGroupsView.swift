@@ -888,6 +888,11 @@ SAVEHIST=10000
         let ypbindStatus = try await sshManager.executeCommand("service ypbind status 2>&1 || echo 'not running'")
         print("DEBUG NIS Server: ypbind status: \(ypbindStatus)")
 
+        // Enable firewall rules for domain services if firewall is active
+        networkConfigStep = "Configuring firewall..."
+        print("DEBUG NIS Server: Enabling domain firewall rules...")
+        try await sshManager.enableDomainFirewallRules(role: "server")
+
         confirmationMessage = """
         NIS/NFS server configured and started successfully!
 
@@ -1053,6 +1058,11 @@ SAVEHIST=10000
         print("DEBUG CLIENT: NIS client setup completed successfully!")
         print("DEBUG CLIENT: Network users found: \(networkUsers)")
 
+        // Enable firewall rules for domain services if firewall is active
+        networkConfigStep = "Configuring firewall..."
+        print("DEBUG CLIENT: Enabling domain firewall rules...")
+        try await sshManager.enableDomainFirewallRules(role: "client")
+
         confirmationMessage = """
         NIS/NFS client configured and started successfully!
 
@@ -1122,6 +1132,10 @@ SAVEHIST=10000
             // Remount /Network ZFS dataset
             networkConfigStep = "Remounting /Network ZFS dataset..."
             _ = try await sshManager.executeCommand("zfs mount /Network 2>&1 || true")
+
+            // Remove domain firewall rules if firewall is active
+            networkConfigStep = "Removing firewall rules..."
+            try await sshManager.disableDomainFirewallRules()
 
             networkConfigStep = "Refreshing status..."
 
@@ -1210,6 +1224,10 @@ SAVEHIST=10000
 
             // Clear the domain name
             _ = try await sshManager.executeCommand("domainname '' 2>&1 || true")
+
+            // Remove domain firewall rules if firewall is active
+            networkConfigStep = "Removing firewall rules..."
+            try await sshManager.disableDomainFirewallRules()
 
             networkConfigStep = "Refreshing status..."
 
