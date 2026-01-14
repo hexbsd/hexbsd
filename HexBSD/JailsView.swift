@@ -161,21 +161,6 @@ struct JailsContentView: View {
                     }
                     .buttonStyle(.bordered)
                 }
-
-                Button(action: {
-                    Task {
-                        await viewModel.refresh()
-                    }
-                }) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
-
-                Toggle(isOn: $viewModel.autoRefresh) {
-                    Image(systemName: "arrow.clockwise.circle")
-                }
-                .toggleStyle(.button)
-                .help("Auto-refresh every 5 seconds")
             }
             .padding()
 
@@ -231,13 +216,6 @@ struct JailsContentView: View {
             Task {
                 await viewModel.loadJails()
                 await viewModel.loadTemplates()
-            }
-        }
-        .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
-            if viewModel.autoRefresh {
-                Task {
-                    await viewModel.refreshQuiet()
-                }
             }
         }
     }
