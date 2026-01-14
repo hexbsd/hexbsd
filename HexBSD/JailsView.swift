@@ -286,19 +286,23 @@ struct JailsContentView: View {
                 .frame(minWidth: 300, idealWidth: 400)
 
                 // Detail view
-                if let jail = selectedJail {
-                    JailDetailView(jail: jail, viewModel: viewModel)
-                } else {
-                    VStack(spacing: 20) {
-                        Image(systemName: "sidebar.left")
-                            .font(.system(size: 48))
-                            .foregroundColor(.secondary)
-                        Text("Select a jail to view details")
-                            .font(.title2)
-                            .foregroundColor(.secondary)
+                Group {
+                    if let jail = selectedJail {
+                        JailDetailView(jail: jail, viewModel: viewModel)
+                    } else {
+                        VStack(spacing: 20) {
+                            Image(systemName: "sidebar.left")
+                                .font(.system(size: 48))
+                                .foregroundColor(.secondary)
+                            Text("Select a jail to view details")
+                                .font(.title2)
+                                .foregroundColor(.secondary)
+                        }
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+                .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
+                .layoutPriority(1)
+                .animation(nil, value: selectedJail)
             }
         }
     }
