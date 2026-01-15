@@ -195,7 +195,7 @@ struct AsyncSemaphoreTests {
                     concurrentCount -= 1
                     lock.unlock()
 
-                    semaphore.release()
+                    await semaphore.release()
                 }
             }
         }
