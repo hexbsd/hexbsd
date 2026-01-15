@@ -22,27 +22,10 @@ A macOS application for managing FreeBSD servers over SSH.
 - Integrated terminal
 - Security vulnerability reporting
 
-## Requirements
+## Acknowledgements
 
-- macOS 14.0 or later
-- Xcode 15.0 or later
-
-## Building
-
-1. Clone the repository:
-   ```
-   git clone https://github.com/hexbsd/hexbsd.git
-   cd hexbsd
-   ```
-
-2. Open the project in Xcode:
-   ```
-   open HexBSD.xcodeproj
-   ```
-
-3. Select your signing team in the project settings (Signing & Capabilities)
-
-4. Build and run with `Cmd+R` or Product > Run
+- [Citadel](https://github.com/orlandos-nl/Citadel) - SSH client library
+- [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) - Terminal emulator
 
 ## License
 
