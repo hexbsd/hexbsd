@@ -5,6 +5,7 @@
 //  Tests for SSH connection behavior using Swift Testing.
 //
 
+import Foundation
 import Testing
 @testable import HexBSD
 
