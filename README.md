@@ -20,7 +20,6 @@ A macOS application for managing FreeBSD servers over SSH.
 - File browser with transfer support
 - Poudriere build management
 - bhyve VM management
-- VNC viewer
 - Integrated terminal
 - Security vulnerability reporting
 
