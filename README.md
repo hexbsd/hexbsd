@@ -15,6 +15,8 @@ A macOS application for managing FreeBSD servers over SSH.
 - Service control
 - User and group administration
 - Network configuration
+- Firewall management
+- Log viewing, searching, and downloading
 - File browser with transfer support
 - Poudriere build management
 - bhyve VM management
