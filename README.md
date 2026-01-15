@@ -19,7 +19,7 @@ A macOS application for managing FreeBSD servers over SSH.
 - Firewall management
 - Log viewing, searching, and downloading
 - File browser with transfer support
-- Poudriere build management
+- Poudriere build management and monitoring
 - bhyve VM management
 - Integrated terminal
 - Security vulnerability reporting
