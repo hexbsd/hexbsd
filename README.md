@@ -14,6 +14,7 @@ A macOS application for managing FreeBSD servers over SSH.
 - Package management
 - Service control
 - User and group administration
+- Create or join NIS domains
 - Network configuration
 - Firewall management
 - Log viewing, searching, and downloading
@@ -22,6 +23,7 @@ A macOS application for managing FreeBSD servers over SSH.
 - bhyve VM management
 - Integrated terminal
 - Security vulnerability reporting
+- Realtime connection and user session monitoring
 
 ## Acknowledgements
 
