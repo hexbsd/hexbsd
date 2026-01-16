@@ -3066,24 +3066,16 @@ struct DomainPhase: View {
             } else if isConfiguredAsClient {
                 // Client is joined - show leave button
                 Divider()
-                VStack(alignment: .leading, spacing: 4) {
-                    Button(action: {
-                        Task {
-                            await viewModel.leaveNetworkDomain()
-                        }
-                    }) {
-                        Label("Leave Domain", systemImage: "network.slash")
+                Button(action: {
+                    Task {
+                        await viewModel.leaveNetworkDomain()
                     }
-                    .buttonStyle(.bordered)
-                    .tint(.red)
-                    .disabled(viewModel.isLoading || !viewModel.canRemoveDomain)
-
-                    if !viewModel.canRemoveDomain {
-                        Text(viewModel.removeDomainDisabledReason)
-                            .font(.caption)
-                            .foregroundColor(.orange)
-                    }
+                }) {
+                    Label("Leave Domain", systemImage: "network.slash")
                 }
+                .buttonStyle(.bordered)
+                .tint(.red)
+                .disabled(viewModel.isLoading)
             } else if isConfiguredAsServer {
                 // Server is configured - show remove domain button
                 Divider()
