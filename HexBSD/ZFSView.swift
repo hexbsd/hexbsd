@@ -869,6 +869,7 @@ struct DatasetsView: View {
     @State private var showCloneDataset = false
     @State private var showCreateDataset = false
     @State private var showCreateZvol = false
+    @State private var showShareDataset = false
     @State private var showModifyProperties = false
     @State private var snapshotName = ""
     @State private var cloneDestination = ""
@@ -1135,6 +1136,23 @@ struct DatasetsView: View {
                 )
             }
         }
+        .sheet(isPresented: $showShareDataset) {
+            if let dataset = selectedDataset {
+                ShareDatasetSheet(
+                    dataset: dataset,
+                    onSave: { shareOptions in
+                        Task {
+                            await viewModel.setProperty(dataset: dataset.name, property: "sharenfs", value: shareOptions)
+                            await viewModel.refreshDatasets()
+                            showShareDataset = false
+                        }
+                    },
+                    onCancel: {
+                        showShareDataset = false
+                    }
+                )
+            }
+        }
         .sheet(isPresented: $showModifyProperties) {
             if let dataset = selectedDataset {
                 ModifyPropertiesSheet(
@@ -1142,6 +1160,7 @@ struct DatasetsView: View {
                     onSave: { property, value in
                         Task {
                             await viewModel.setProperty(dataset: dataset.name, property: property, value: value)
+                            await viewModel.refreshDatasets()
                             showModifyProperties = false
                         }
                     },
@@ -1245,6 +1264,21 @@ struct DatasetsView: View {
                         .buttonStyle(.bordered)
 
                         Button(action: {
+                            cloneDestination = ""
+                            showCloneDataset = true
+                        }) {
+                            Label("Clone", systemImage: "doc.on.doc")
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button(action: {
+                            showShareDataset = true
+                        }) {
+                            Label("Share", systemImage: "network")
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button(action: {
                             showModifyProperties = true
                         }) {
                             Label("Properties", systemImage: "slider.horizontal.3")
@@ -1259,25 +1293,8 @@ struct DatasetsView: View {
                         .buttonStyle(.bordered)
                         .disabled(dataset.isProtected)
                         .help(dataset.protectionReason ?? "Delete this dataset")
-
-                        Button(action: {
-                            cloneDestination = ""
-                            showCloneDataset = true
-                        }) {
-                            Label("Clone", systemImage: "doc.on.doc")
-                        }
-                        .buttonStyle(.bordered)
                     }
                 }
-
-                Button(action: {
-                    Task {
-                        await viewModel.refreshDatasets()
-                    }
-                }) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
             }
             .padding()
 
@@ -3279,6 +3296,156 @@ struct CreateZvolSheet: View {
             .padding()
         }
         .frame(width: 540)
+    }
+}
+
+// MARK: - Share Dataset Sheet
+
+struct ShareDatasetSheet: View {
+    let dataset: ZFSDataset
+    let onSave: (String) -> Void
+    let onCancel: () -> Void
+
+    @State private var shareEnabled: Bool
+    @State private var readOnly = false
+    @State private var networkRestriction = ""
+    @State private var mapRoot = false
+
+    init(dataset: ZFSDataset, onSave: @escaping (String) -> Void, onCancel: @escaping () -> Void) {
+        self.dataset = dataset
+        self.onSave = onSave
+        self.onCancel = onCancel
+        // Initialize state based on current share status
+        let isCurrentlyShared = dataset.sharenfs != "off" && dataset.sharenfs != "-"
+        _shareEnabled = State(initialValue: isCurrentlyShared)
+        // Parse existing options if shared
+        if isCurrentlyShared && dataset.sharenfs != "on" {
+            _readOnly = State(initialValue: dataset.sharenfs.contains("-ro"))
+            _mapRoot = State(initialValue: dataset.sharenfs.contains("-maproot=root"))
+            // Extract network if present
+            if let networkRange = dataset.sharenfs.range(of: "-network\\s+\\S+", options: .regularExpression) {
+                let networkPart = String(dataset.sharenfs[networkRange])
+                let parts = networkPart.components(separatedBy: .whitespaces)
+                if parts.count >= 2 {
+                    _networkRestriction = State(initialValue: parts[1])
+                }
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("NFS Sharing")
+                .font(.title2)
+                .fontWeight(.semibold)
+                .padding(.top, 20)
+                .padding(.bottom, 16)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 20) {
+                // Dataset info
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Dataset")
+                        .font(.headline)
+                    Text(dataset.name)
+                        .font(.body)
+                        .foregroundColor(.primary)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .cornerRadius(6)
+                }
+
+                // Current status
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Current Status")
+                        .font(.headline)
+                    HStack {
+                        Circle()
+                            .fill(dataset.isShared ? Color.green : Color.gray)
+                            .frame(width: 10, height: 10)
+                        Text(dataset.isShared ? "Shared" : "Not Shared")
+                            .foregroundColor(dataset.isShared ? .green : .secondary)
+                        if dataset.isShared && dataset.sharenfs != "on" {
+                            Text("(\(dataset.sharenfs))")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+
+                Divider()
+
+                // Enable/disable sharing
+                Toggle("Enable NFS Sharing", isOn: $shareEnabled)
+                    .font(.headline)
+
+                if shareEnabled {
+                    // Sharing options
+                    VStack(alignment: .leading, spacing: 16) {
+                        Toggle("Read-only", isOn: $readOnly)
+                            .font(.subheadline)
+
+                        Toggle("Map root user", isOn: $mapRoot)
+                            .font(.subheadline)
+                        Text("Allows root access from NFS clients")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Network Restriction (Optional)")
+                                .font(.subheadline)
+                            TextField("e.g., 192.168.1.0", text: $networkRestriction)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 200)
+                            Text("Leave empty to allow all networks")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(.leading, 20)
+                }
+            }
+            .padding()
+
+            Spacer()
+
+            Divider()
+
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Button(shareEnabled ? "Apply Sharing" : "Disable Sharing") {
+                    if shareEnabled {
+                        var options: [String] = []
+                        if readOnly {
+                            options.append("-ro")
+                        }
+                        if mapRoot {
+                            options.append("-maproot=root")
+                        }
+                        if !networkRestriction.isEmpty {
+                            options.append("-network \(networkRestriction)")
+                            options.append("-mask 255.255.255.0")
+                        }
+                        let shareValue = options.isEmpty ? "on" : options.joined(separator: " ")
+                        onSave(shareValue)
+                    } else {
+                        onSave("off")
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+            }
+            .padding()
+        }
+        .frame(width: 480, height: 500)
     }
 }
 
