@@ -127,6 +127,32 @@ enum HomeDirectoryStyle: String, CaseIterable {
     }
 }
 
+enum NFSVersion: String, CaseIterable {
+    case v3 = "nfsv3"
+    case v4 = "nfsv4"
+
+    var displayName: String {
+        switch self {
+        case .v3: return "NFSv3"
+        case .v4: return "NFSv4"
+        }
+    }
+
+    var mountOption: String {
+        switch self {
+        case .v3: return "nfsv3"
+        case .v4: return "nfsv4"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .v3: return "Traditional, widely compatible"
+        case .v4: return "Modern, single port (2049)"
+        }
+    }
+}
+
 struct NetworkDomainStatus {
     let role: NetworkRole
     let nisConfigured: Bool
@@ -213,6 +239,7 @@ struct UsersAndGroupsState {
     var netgroups: [Netgroup] = []
     var activeSessions: [UserSession] = []
     var homeDirectoryStyle: HomeDirectoryStyle = .unix
+    var nfsVersion: NFSVersion = .v4
 
     // Returns only the datasets relevant for the current home directory style
     var relevantZFSDatasets: [ZFSDatasetStatus] {
@@ -277,6 +304,9 @@ class UsersAndGroupsViewModel: ObservableObject {
     // Home Directory Style
     @Published var selectedHomeDirectoryStyle: HomeDirectoryStyle = .unix
 
+    // NFS Version (for clients)
+    @Published var selectedNFSVersion: NFSVersion = .v4
+
     // Computed property to check if home directory style can be changed
     var isHomeDirectoryStyleLocked: Bool {
         // Locked if domain is configured (server or client)
@@ -329,8 +359,9 @@ class UsersAndGroupsViewModel: ObservableObject {
             async let userState = detectUserConfig()
             async let networkState = detectNetworkDomain()
             async let homeStyleState = detectHomeDirectoryStyle()
+            async let nfsVersionState = detectNFSVersion()
 
-            let (zfs, user, network, homeStyle) = try await (zfsState, userState, networkState, homeStyleState)
+            let (zfs, user, network, homeStyle, nfsVersion) = try await (zfsState, userState, networkState, homeStyleState, nfsVersionState)
 
             setupState.zfsDatasets = zfs.datasets
             setupState.bootEnvironment = zfs.bootEnvironment
@@ -338,11 +369,13 @@ class UsersAndGroupsViewModel: ObservableObject {
             setupState.userConfig = user
             setupState.networkDomain = network
             setupState.homeDirectoryStyle = homeStyle
+            setupState.nfsVersion = nfsVersion
 
             // Only set initial network role based on detection if requested (initial load)
             if updateNetworkRole {
                 selectedNetworkRole = network.role
                 selectedHomeDirectoryStyle = homeStyle
+                selectedNFSVersion = nfsVersion
             }
 
         } catch {
@@ -533,6 +566,13 @@ class UsersAndGroupsViewModel: ObservableObject {
         } catch {
             self.error = "Failed to save home directory style: \(error.localizedDescription)"
         }
+    }
+
+    private func detectNFSVersion() async throws -> NFSVersion {
+        // Check sysrc for hexbsd_nfs_version setting
+        let versionOutput = try await sshManager.executeCommand("sysrc -n hexbsd_nfs_version 2>/dev/null || echo 'nfsv4'")
+        let version = versionOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        return NFSVersion(rawValue: version) ?? .v4
     }
 
     // MARK: - Setup Actions
@@ -900,6 +940,8 @@ SAVEHIST=10000
         print("DEBUG NIS Server: sysrc mountd_enable result: \(result)")
         result = try await sshManager.executeCommand("sysrc rpc_lockd_enable=\"YES\"")
         print("DEBUG NIS Server: sysrc rpc_lockd_enable result: \(result)")
+        result = try await sshManager.executeCommand("sysrc nfsv4_server_enable=\"YES\"")
+        print("DEBUG NIS Server: sysrc nfsv4_server_enable result: \(result)")
 
         // Create directories for network shares
         networkConfigStep = "Creating network directories..."
@@ -1020,6 +1062,8 @@ SAVEHIST=10000
         print("DEBUG NIS Server: mountd start result: \(result)")
         result = try await sshManager.executeCommand("service lockd start 2>&1 || true")
         print("DEBUG NIS Server: lockd start result: \(result)")
+        result = try await sshManager.executeCommand("service nfsuserd start 2>&1 || true")
+        print("DEBUG NIS Server: nfsuserd start result: \(result)")
 
         // Configure server as NIS client of itself (required for ypcat and local NIS lookups)
         networkConfigStep = "Configuring NIS client on server..."
@@ -1172,9 +1216,12 @@ SAVEHIST=10000
         print("DEBUG CLIENT: Current fstab content:\n\(fstabContent)")
 
         if !fstabContent.contains("/Network") {
-            let fstabEntry = "\(nisServerAddress):/Network\t/Network\tnfs\trw\t0\t0"
+            let nfsOptions = "rw,\(selectedNFSVersion.mountOption)"
+            let fstabEntry = "\(nisServerAddress):/Network\t/Network\tnfs\t\(nfsOptions)\t0\t0"
             print("DEBUG CLIENT: Adding fstab entry: \(fstabEntry)")
             _ = try await sshManager.executeCommand("echo '\(fstabEntry)' >> /etc/fstab")
+            // Save NFS version preference
+            _ = try await sshManager.executeCommand("sysrc hexbsd_nfs_version=\"\(selectedNFSVersion.rawValue)\"")
         } else {
             print("DEBUG CLIENT: /Network entry already exists in fstab")
         }
@@ -3011,6 +3058,14 @@ struct DomainPhase: View {
                 if viewModel.selectedNetworkRole == .client {
                     TextField("NIS Server Address (hostname or IP)", text: $viewModel.nisServerAddress)
                         .textFieldStyle(.roundedBorder)
+
+                    Picker("NFS Version", selection: $viewModel.selectedNFSVersion) {
+                        ForEach(NFSVersion.allCases, id: \.self) { version in
+                            Text("\(version.displayName) - \(version.description)")
+                                .tag(version)
+                        }
+                    }
+                    .pickerStyle(.radioGroup)
                 }
             }
 
@@ -3064,8 +3119,15 @@ struct DomainPhase: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(viewModel.isLoading || viewModel.nisServerAddress.isEmpty)
             } else if isConfiguredAsClient {
-                // Client is joined - show leave button
+                // Client is joined - show NFS version info and leave button
                 Divider()
+                HStack {
+                    Text("NFS Version:")
+                        .foregroundColor(.secondary)
+                    Text(viewModel.setupState.nfsVersion.displayName)
+                }
+                .font(.caption)
+
                 Button(action: {
                     Task {
                         await viewModel.leaveNetworkDomain()
