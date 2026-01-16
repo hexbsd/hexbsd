@@ -118,6 +118,13 @@ enum HomeDirectoryStyle: String, CaseIterable {
         case .unix: return "house"
         }
     }
+
+    var defaultShell: String {
+        switch self {
+        case .gnustep: return "/usr/local/bin/zsh"
+        case .unix: return "/bin/sh"
+        }
+    }
 }
 
 struct NetworkDomainStatus {
@@ -605,16 +612,12 @@ class UsersAndGroupsViewModel: ObservableObject {
             let zshCompletionsInstalled = completionsCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
             print("DEBUG: zsh-completions installed: \(zshCompletionsInstalled)")
 
-            let sudoCheck = try await sshManager.executeCommand("test -f /usr/local/bin/sudo && echo 'installed' || echo 'missing'")
-            let sudoInstalled = sudoCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
-            print("DEBUG: sudo installed: \(sudoInstalled)")
-
             let zshrcCheck = try await sshManager.executeCommand("test -f /usr/local/etc/zshrc && echo 'configured' || echo 'missing'")
             let zshrcConfigured = zshrcCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "configured"
             print("DEBUG: global zshrc configured: \(zshrcConfigured)")
 
             // Run pkg update if any packages need to be installed
-            if !zshInstalled || !zshAutosuggestionsInstalled || !zshCompletionsInstalled || !sudoInstalled {
+            if !zshInstalled || !zshAutosuggestionsInstalled || !zshCompletionsInstalled {
                 userConfigStep = "Updating package repository..."
                 print("DEBUG: Running pkg update...")
                 let updateResult = try await sshManager.executeCommand("pkg update 2>&1")
@@ -643,26 +646,6 @@ class UsersAndGroupsViewModel: ObservableObject {
                 print("DEBUG: Installing zsh-completions...")
                 let completionsResult = try await sshManager.executeCommand("pkg install -y zsh-completions 2>&1")
                 print("DEBUG: zsh-completions install result: \(completionsResult.prefix(500))")
-            }
-
-            // Install sudo if not present
-            if !sudoInstalled {
-                userConfigStep = "Installing sudo..."
-                print("DEBUG: Installing sudo...")
-                let sudoResult = try await sshManager.executeCommand("pkg install -y sudo 2>&1")
-                print("DEBUG: sudo install result: \(sudoResult.prefix(500))")
-            }
-
-            // Configure sudoers to allow wheel group (for standalone local users)
-            userConfigStep = "Configuring sudo..."
-            print("DEBUG: Configuring sudoers for wheel group...")
-            _ = try await sshManager.executeCommand("mkdir -p /usr/local/etc/sudoers.d")
-            // Check if wheel sudoers config exists
-            let wheelSudoersCheck = try await sshManager.executeCommand("test -f /usr/local/etc/sudoers.d/wheel && echo 'exists' || echo 'missing'")
-            if wheelSudoersCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
-                _ = try await sshManager.executeCommand("echo '%wheel ALL=(ALL) ALL' > /usr/local/etc/sudoers.d/wheel")
-                _ = try await sshManager.executeCommand("chmod 440 /usr/local/etc/sudoers.d/wheel")
-                print("DEBUG: Created /usr/local/etc/sudoers.d/wheel")
             }
 
             // Create global zshrc in /usr/local/etc if not present
@@ -785,6 +768,65 @@ SAVEHIST=10000
 
         } catch {
             self.error = "Failed to configure user settings: \(error.localizedDescription)"
+            isConfiguringUser = false
+            userConfigStep = ""
+            isLoading = false
+            return false
+        }
+    }
+
+    /// Setup for Traditional Unix style - only installs sudo package
+    @discardableResult
+    func setupSudo() async -> Bool {
+        isLoading = true
+        isConfiguringUser = true
+        error = nil
+
+        do {
+            userConfigStep = "Checking package manager..."
+
+            // Bootstrap pkg if needed
+            var pkgCheck = try await sshManager.executeCommand("which pkg 2>/dev/null || echo 'missing'")
+            if pkgCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+                userConfigStep = "Bootstrapping package manager..."
+                _ = try await sshManager.executeCommand("env ASSUME_ALWAYS_YES=yes pkg bootstrap 2>&1")
+                pkgCheck = try await sshManager.executeCommand("which pkg 2>/dev/null || echo 'missing'")
+                if pkgCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+                    throw NSError(domain: "UsersAndGroups", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to bootstrap pkg"])
+                }
+            }
+
+            // Check if sudo is installed
+            let sudoCheck = try await sshManager.executeCommand("test -f /usr/local/bin/sudo && echo 'installed' || echo 'missing'")
+            let sudoInstalled = sudoCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
+
+            if !sudoInstalled {
+                userConfigStep = "Updating package repository..."
+                _ = try await sshManager.executeCommand("pkg update 2>&1")
+
+                userConfigStep = "Installing sudo..."
+                _ = try await sshManager.executeCommand("pkg install -y sudo 2>&1")
+            }
+
+            // Configure sudoers to allow wheel group
+            userConfigStep = "Configuring sudo..."
+            _ = try await sshManager.executeCommand("mkdir -p /usr/local/etc/sudoers.d")
+            let wheelSudoersCheck = try await sshManager.executeCommand("test -f /usr/local/etc/sudoers.d/wheel && echo 'exists' || echo 'missing'")
+            if wheelSudoersCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+                _ = try await sshManager.executeCommand("echo '%wheel ALL=(ALL) ALL' > /usr/local/etc/sudoers.d/wheel")
+                _ = try await sshManager.executeCommand("chmod 440 /usr/local/etc/sudoers.d/wheel")
+            }
+
+            userConfigStep = "Refreshing status..."
+            await loadSetupState(updateNetworkRole: false)
+
+            isConfiguringUser = false
+            userConfigStep = ""
+            isLoading = false
+            return true
+
+        } catch {
+            self.error = "Failed to setup sudo: \(error.localizedDescription)"
             isConfiguringUser = false
             userConfigStep = ""
             isLoading = false
@@ -919,13 +961,35 @@ SAVEHIST=10000
         let trimmedHostname = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
         print("DEBUG NIS Server: Hostname is '\(trimmedHostname)'")
 
+        // Ensure Makefile exists (ypinit should create it, but sometimes it doesn't)
+        print("DEBUG NIS Server: Checking for Makefile...")
+        let makefileCheck = try await sshManager.executeCommand("test -f /var/yp/Makefile && echo 'exists' || echo 'missing'")
+        if makefileCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+            print("DEBUG NIS Server: Makefile missing, checking Makefile.dist...")
+            let makefileDistCheck = try await sshManager.executeCommand("test -f /var/yp/Makefile.dist && echo 'exists' || echo 'missing'")
+            if makefileDistCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+                // Reinstall FreeBSD-yp package to restore Makefiles
+                print("DEBUG NIS Server: Makefile.dist missing, reinstalling FreeBSD-yp package...")
+                _ = try await sshManager.executeCommand("pkg install -fy FreeBSD-yp 2>&1 || true")
+            }
+            // Create symlink if it doesn't exist
+            _ = try await sshManager.executeCommand("ln -sf Makefile.dist /var/yp/Makefile 2>/dev/null || true")
+        }
+
+        // Create ypservers file with this server's hostname
+        print("DEBUG NIS Server: Creating ypservers file...")
+        _ = try await sshManager.executeCommand("echo '\(trimmedHostname)' > /var/yp/ypservers")
+
         print("DEBUG NIS Server: Running ypinit -m \(nisDomainName)...")
         result = try await sshManager.executeCommand("cd /var/yp && printf '%s\\n\\ny\\n' '\(trimmedHostname)' | ypinit -m \(nisDomainName) 2>&1 || true")
         print("DEBUG NIS Server: ypinit result: \(result)")
 
-        // Note: We don't modify the Makefile. Instead, we pass MASTER_PASSWD as an argument
-        // when running make to rebuild NIS maps. The Makefile is designed to accept this.
-        print("DEBUG NIS Server: Skipping Makefile modification - will pass MASTER_PASSWD to make command")
+        // Verify Makefile exists after ypinit (in case ypinit overwrote it)
+        let postInitMakefileCheck = try await sshManager.executeCommand("test -f /var/yp/Makefile && echo 'exists' || echo 'missing'")
+        if postInitMakefileCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+            print("DEBUG NIS Server: Makefile still missing after ypinit, restoring...")
+            _ = try await sshManager.executeCommand("ln -sf Makefile.dist /var/yp/Makefile")
+        }
 
         // Start NIS server
         networkConfigStep = "Starting NIS server..."
@@ -1327,9 +1391,14 @@ SAVEHIST=10000
             // Remove sudoers network-users config
             _ = try await sshManager.executeCommand("rm -f /usr/local/etc/sudoers.d/network-users 2>/dev/null || true")
 
-            // Remove NIS maps and data
+            // Remove NIS maps and data (but preserve Makefile and Makefile.dist)
             networkConfigStep = "Removing NIS data..."
-            _ = try await sshManager.executeCommand("rm -rf /var/yp/* 2>&1 || true")
+            // Remove domain-specific directories
+            _ = try await sshManager.executeCommand("rm -rf /var/yp/*/passwd.* /var/yp/*/group.* /var/yp/*/master.passwd.* /var/yp/*/netgroup* /var/yp/*/ypservers* /var/yp/*/hosts.* /var/yp/*/networks.* /var/yp/*/protocols.* /var/yp/*/rpc.* /var/yp/*/services.* /var/yp/*/shells* /var/yp/*/ipnodes.* /var/yp/*/netid.* /var/yp/*/shadow.* 2>/dev/null || true")
+            // Remove domain directories themselves
+            _ = try await sshManager.executeCommand("for d in /var/yp/*/; do [ -d \"$d\" ] && [ \"$(basename \"$d\")\" != \"binding\" ] && rm -rf \"$d\"; done 2>/dev/null || true")
+            // Remove our custom NIS data files (but not Makefile*)
+            _ = try await sshManager.executeCommand("rm -f /var/yp/master.passwd /var/yp/passwd /var/yp/group /var/yp/netgroup /var/yp/ypservers 2>/dev/null || true")
 
             // Clear the domain name
             _ = try await sshManager.executeCommand("domainname '' 2>&1 || true")
@@ -1488,9 +1557,9 @@ SAVEHIST=10000
         error = nil
 
         do {
-            // Use home directory path based on configured style
+            // Use home directory path and shell based on configured style
             let homePrefix = setupState.homeDirectoryStyle.localUsersPath
-            let shell = "/usr/local/bin/zsh"
+            let shell = setupState.homeDirectoryStyle.defaultShell
 
             // Use pw command to create user non-interactively
             // -n: username, -c: full name/comment, -d: home directory, -s: shell, -m: create home directory, -G: additional groups
@@ -1673,6 +1742,7 @@ SAVEHIST=10000
             var users: [LocalUser] = []
             let isServer = setupState.networkDomain?.role == .server
             print("DEBUG loadNetworkUsers: role=\(String(describing: setupState.networkDomain?.role)), isServer=\(isServer)")
+            print("DEBUG loadNetworkUsers: networkDomain = \(String(describing: setupState.networkDomain))")
 
             // Get sudo-users netgroup members
             var sudoUsers: Set<String> = []
@@ -1708,14 +1778,20 @@ SAVEHIST=10000
 
             if isServer {
                 // Server: read from /var/yp/master.passwd (10 fields)
+                print("DEBUG loadNetworkUsers: Checking /var/yp/master.passwd...")
                 let checkFile = try await sshManager.executeCommand("test -f /var/yp/master.passwd && echo 'exists' || echo 'missing'")
+                print("DEBUG loadNetworkUsers: /var/yp/master.passwd check: \(checkFile.trimmingCharacters(in: .whitespacesAndNewlines))")
                 if checkFile.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
+                    print("DEBUG loadNetworkUsers: master.passwd is missing, returning empty list")
                     setupState.networkUsers = []
                     isLoading = false
                     return
                 }
 
+                print("DEBUG loadNetworkUsers: Reading /var/yp/master.passwd...")
                 let passwdOutput = try await sshManager.executeCommand("cat /var/yp/master.passwd")
+                print("DEBUG loadNetworkUsers: master.passwd content length: \(passwdOutput.count)")
+                print("DEBUG loadNetworkUsers: master.passwd content: \(passwdOutput.prefix(500))")
 
                 for line in passwdOutput.split(separator: "\n") {
                     // master.passwd has 10 fields: name:password:uid:gid:class:change:expire:gecos:home:shell
@@ -1779,8 +1855,10 @@ SAVEHIST=10000
             }
 
             setupState.networkUsers = users.sorted { $0.username < $1.username }
+            print("DEBUG loadNetworkUsers: Successfully loaded \(users.count) network users")
 
         } catch {
+            print("DEBUG loadNetworkUsers: ERROR - \(error.localizedDescription)")
             self.error = "Failed to load network users: \(error.localizedDescription)"
         }
 
@@ -1977,73 +2055,99 @@ SAVEHIST=10000
         error = nil
 
         do {
+            print("DEBUG createNetworkUser: Starting for username '\(username)'")
+
             // Check if /var/yp/master.passwd exists
             let checkFile = try await sshManager.executeCommand("test -f /var/yp/master.passwd && echo 'exists' || echo 'missing'")
+            print("DEBUG createNetworkUser: /var/yp/master.passwd check: \(checkFile.trimmingCharacters(in: .whitespacesAndNewlines))")
             if checkFile.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
                 throw NSError(domain: "UsersAndGroups", code: 6, userInfo: [NSLocalizedDescriptionKey: "NIS not initialized. Please run 'ypinit -m' first."])
             }
 
-            // Use home directory path based on configured style
+            // Use home directory path and shell based on configured style
             let homePrefix = setupState.homeDirectoryStyle.networkUsersPath
-            let shell = "/usr/local/bin/zsh"
+            let shell = setupState.homeDirectoryStyle.defaultShell
+            print("DEBUG createNetworkUser: homePrefix=\(homePrefix), shell=\(shell)")
 
             // Get the next available UID (starting from 1001 for network users)
             let uidResult = try await sshManager.executeCommand("awk -F: 'BEGIN{max=1000} $3>max && $3<60000 {max=$3} END{print max+1}' /var/yp/master.passwd /etc/master.passwd 2>/dev/null | sort -n | tail -1")
             let uid = uidResult.trimmingCharacters(in: .whitespacesAndNewlines)
             let uidNum = Int(uid) ?? 1001
-            print("DEBUG: Next available UID: \(uidNum)")
+            print("DEBUG createNetworkUser: Next available UID: \(uidNum)")
 
-            // Generate password hash using openssl
-            let hashResult = try await sshManager.executeCommand("openssl passwd -6 '\(password)'")
+            // Generate password hash using openssl (escape single quotes in password)
+            let escapedPassword = password.replacingOccurrences(of: "'", with: "'\\''")
+            print("DEBUG createNetworkUser: Generating password hash...")
+            let hashResult = try await sshManager.executeCommand("openssl passwd -6 '\(escapedPassword)'")
             let passwordHash = hashResult.trimmingCharacters(in: .whitespacesAndNewlines)
+            print("DEBUG createNetworkUser: Password hash generated (length: \(passwordHash.count))")
 
             // Create the master.passwd entry directly (10 fields)
             // name:password:uid:gid:class:change:expire:gecos:home:shell
             let masterPasswdEntry = "\(username):\(passwordHash):\(uidNum):\(uidNum)::0:0:\(fullName):\(homePrefix)/\(username):\(shell)"
+            print("DEBUG createNetworkUser: master.passwd entry created")
 
             // Append to /var/yp/master.passwd
+            print("DEBUG createNetworkUser: Appending to /var/yp/master.passwd...")
             _ = try await sshManager.executeCommand("echo '\(masterPasswdEntry)' >> /var/yp/master.passwd")
+            print("DEBUG createNetworkUser: Appended to master.passwd")
 
             // Check if user's private group already exists in /var/yp/group
+            print("DEBUG createNetworkUser: Checking if group exists...")
             let userGroupExists = try await sshManager.executeCommand("grep -q '^\(username):' /var/yp/group 2>/dev/null && echo 'exists' || echo 'missing'")
             if userGroupExists.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
                 // Create the user's private group in /var/yp/group
                 let groupEntry = "\(username):*:\(uidNum):"
                 _ = try await sshManager.executeCommand("echo '\(groupEntry)' >> /var/yp/group")
+                print("DEBUG createNetworkUser: Created group entry")
             }
 
             // If adding sudo access, add user to sudo-users netgroup
             if addToWheel {
+                print("DEBUG createNetworkUser: Adding to sudo-users netgroup...")
                 // Check if user is already in sudo-users netgroup
                 let inNetgroup = try await sshManager.executeCommand("grep '^sudo-users' /var/yp/netgroup | grep -q '(,\(username),)' && echo 'exists' || echo 'missing'")
                 if inNetgroup.trimmingCharacters(in: .whitespacesAndNewlines) == "missing" {
                     // Append user to sudo-users netgroup: (,username,) format
                     _ = try await sshManager.executeCommand("/usr/bin/sed -i '' 's/^sudo-users.*/& (,\(username),)/' /var/yp/netgroup")
+                    print("DEBUG createNetworkUser: Added to sudo-users netgroup")
                 }
             }
 
             // Create home directory
+            print("DEBUG createNetworkUser: Creating home directory at \(homePrefix)/\(username)...")
             _ = try await sshManager.executeCommand("mkdir -p \(homePrefix)/\(username)")
             _ = try await sshManager.executeCommand("chown \(uidNum):\(uidNum) \(homePrefix)/\(username)")
             _ = try await sshManager.executeCommand("chmod 755 \(homePrefix)/\(username)")
+            print("DEBUG createNetworkUser: Home directory created")
 
             // Copy skeleton files (rename dot.foo to .foo per FreeBSD convention)
+            print("DEBUG createNetworkUser: Copying skeleton files...")
             _ = try await sshManager.executeCommand("for f in /usr/share/skel/dot.*; do cp \"$f\" \"\(homePrefix)/\(username)/.${f##*/dot.}\"; done 2>/dev/null || true")
             _ = try await sshManager.executeCommand("chown -R \(uidNum):\(uidNum) \(homePrefix)/\(username)")
+            print("DEBUG createNetworkUser: Skeleton files copied")
 
             // Rebuild NIS maps
+            print("DEBUG createNetworkUser: Getting domain name...")
             guard let domain = setupState.networkDomain?.domainName else {
+                print("DEBUG createNetworkUser: ERROR - networkDomain is nil or domainName is nil")
+                print("DEBUG createNetworkUser: networkDomain = \(String(describing: setupState.networkDomain))")
                 throw NSError(domain: "UsersAndGroups", code: 7, userInfo: [NSLocalizedDescriptionKey: "NIS domain name not found"])
             }
+            print("DEBUG createNetworkUser: Domain name: \(domain)")
 
             // Regenerate /var/yp/passwd from /var/yp/master.passwd (7-field format from 10-field format)
             // master.passwd: name:password:uid:gid:class:change:expire:gecos:home:shell
             // passwd:        name:password:uid:gid:gecos:home:shell
+            print("DEBUG createNetworkUser: Regenerating /var/yp/passwd...")
             _ = try await sshManager.executeCommand("awk -F: 'NF==10 {print $1\":\"$2\":\"$3\":\"$4\":\"$8\":\"$9\":\"$10}' /var/yp/master.passwd > /var/yp/passwd")
 
             // Delete and rebuild NIS maps to ensure changes are picked up
-            // Pass GROUP=/var/yp/group and NETGROUP=/var/yp/netgroup so make uses our NIS files
-            _ = try await sshManager.executeCommand("rm -f /var/yp/*/passwd.byname /var/yp/*/passwd.byuid /var/yp/*/group.byname /var/yp/*/group.bygid /var/yp/*/master.passwd.byname /var/yp/*/master.passwd.byuid /var/yp/*/netgroup /var/yp/*/netgroup.byuser /var/yp/*/netgroup.byhost 2>/dev/null; cd /var/yp && make GROUP=/var/yp/group NETGROUP=/var/yp/netgroup 2>&1")
+            // Pass all required paths so make uses our NIS files
+            print("DEBUG createNetworkUser: Rebuilding NIS maps...")
+            // Wrap in subshell with || true to ensure we always get output even if make fails
+            let makeResult = try await sshManager.executeCommand("(rm -f /var/yp/\(domain)/passwd.* /var/yp/\(domain)/group.* /var/yp/\(domain)/master.passwd.* /var/yp/\(domain)/netgroup* 2>/dev/null; cd /var/yp && make GROUP=/var/yp/group NETGROUP=/var/yp/netgroup MASTER_PASSWD=/var/yp/master.passwd PASSWD=/var/yp/passwd 2>&1) || true")
+            print("DEBUG createNetworkUser: NIS make result: \(makeResult)")
 
             var message = "Network user '\(username)' created successfully!\n\nNIS maps have been rebuilt. Clients should now see this user."
             if addToWheel {
@@ -2052,7 +2156,15 @@ SAVEHIST=10000
             confirmationMessage = message
             showingConfirmation = true
 
+            // Small delay to let NIS maps settle, then reload
+            print("DEBUG createNetworkUser: Waiting before reload...")
+            try await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+
+            // Execute a simple command to reset SSH session state
+            _ = try await sshManager.executeCommand("true")
+
             // Reload network users list
+            print("DEBUG createNetworkUser: Reloading network users...")
             await loadNetworkUsers()
 
         } catch {
@@ -2110,8 +2222,8 @@ SAVEHIST=10000
                 // Regenerate /var/yp/passwd from /var/yp/master.passwd
                 _ = try await sshManager.executeCommand("awk -F: 'NF==10 {print $1\":\"$2\":\"$3\":\"$4\":\"$8\":\"$9\":\"$10}' /var/yp/master.passwd > /var/yp/passwd")
 
-                // Rebuild NIS maps
-                _ = try await sshManager.executeCommand("rm -f /var/yp/*/passwd.byname /var/yp/*/passwd.byuid /var/yp/*/master.passwd.byname /var/yp/*/master.passwd.byuid /var/yp/*/netgroup /var/yp/*/netgroup.byuser /var/yp/*/netgroup.byhost 2>/dev/null; cd /var/yp && make NETGROUP=/var/yp/netgroup 2>&1")
+                // Rebuild NIS maps (wrap with || true to prevent non-zero exit from throwing)
+                _ = try await sshManager.executeCommand("(rm -f /var/yp/\(domain)/passwd.* /var/yp/\(domain)/master.passwd.* /var/yp/\(domain)/netgroup* 2>/dev/null; cd /var/yp && make GROUP=/var/yp/group NETGROUP=/var/yp/netgroup MASTER_PASSWD=/var/yp/master.passwd PASSWD=/var/yp/passwd 2>&1) || true")
 
                 confirmationMessage = "Network user '\(user.username)' updated: \(changes.joined(separator: ", ")).\n\nNIS maps have been rebuilt."
             } else {
@@ -2134,31 +2246,51 @@ SAVEHIST=10000
         error = nil
 
         do {
+            print("DEBUG removeNetworkUser: Starting for username '\(user.username)'")
+
             // Remove user from /var/yp/master.passwd
+            print("DEBUG removeNetworkUser: Removing from /var/yp/master.passwd...")
             _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/^\(user.username):/d' /var/yp/master.passwd")
 
             // Remove user's private group from /var/yp/group
+            print("DEBUG removeNetworkUser: Removing from /var/yp/group...")
             _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/^\(user.username):/d' /var/yp/group")
 
             // Remove user from sudo-users netgroup
             // Remove the (,username,) tuple from the netgroup line
+            print("DEBUG removeNetworkUser: Removing from sudo-users netgroup...")
             _ = try await sshManager.executeCommand("/usr/bin/sed -i '' 's/ (,\(user.username),)//g' /var/yp/netgroup")
 
             // Rebuild NIS maps
+            print("DEBUG removeNetworkUser: Getting domain name...")
+            print("DEBUG removeNetworkUser: networkDomain = \(String(describing: setupState.networkDomain))")
             guard let domain = setupState.networkDomain?.domainName else {
+                print("DEBUG removeNetworkUser: ERROR - networkDomain is nil or domainName is nil")
                 throw NSError(domain: "UsersAndGroups", code: 7, userInfo: [NSLocalizedDescriptionKey: "NIS domain name not found"])
             }
+            print("DEBUG removeNetworkUser: Domain name: \(domain)")
 
             // Regenerate /var/yp/passwd from /var/yp/master.passwd (7-field format from 10-field format)
+            print("DEBUG removeNetworkUser: Regenerating /var/yp/passwd...")
             _ = try await sshManager.executeCommand("awk -F: 'NF==10 {print $1\":\"$2\":\"$3\":\"$4\":\"$8\":\"$9\":\"$10}' /var/yp/master.passwd > /var/yp/passwd")
 
             // Delete and rebuild NIS maps to ensure changes are picked up
-            _ = try await sshManager.executeCommand("rm -f /var/yp/*/passwd.byname /var/yp/*/passwd.byuid /var/yp/*/group.byname /var/yp/*/group.bygid /var/yp/*/master.passwd.byname /var/yp/*/master.passwd.byuid /var/yp/*/netgroup /var/yp/*/netgroup.byuser /var/yp/*/netgroup.byhost 2>/dev/null; cd /var/yp && make GROUP=/var/yp/group NETGROUP=/var/yp/netgroup 2>&1")
+            print("DEBUG removeNetworkUser: Rebuilding NIS maps...")
+            let makeResult = try await sshManager.executeCommand("(rm -f /var/yp/\(domain)/passwd.* /var/yp/\(domain)/group.* /var/yp/\(domain)/master.passwd.* /var/yp/\(domain)/netgroup* 2>/dev/null; cd /var/yp && make GROUP=/var/yp/group NETGROUP=/var/yp/netgroup MASTER_PASSWD=/var/yp/master.passwd PASSWD=/var/yp/passwd 2>&1) || true")
+            print("DEBUG removeNetworkUser: NIS make result: \(makeResult)")
 
             confirmationMessage = "Network user '\(user.username)' removed successfully!\n\nNIS maps have been rebuilt. Note: Home directory was not removed."
             showingConfirmation = true
 
+            // Small delay to let NIS maps settle, then reload
+            print("DEBUG removeNetworkUser: Waiting before reload...")
+            try await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+
+            // Execute a simple command to reset SSH session state
+            _ = try await sshManager.executeCommand("true")
+
             // Reload network users list
+            print("DEBUG removeNetworkUser: Reloading network users...")
             await loadNetworkUsers()
 
         } catch {
@@ -2292,6 +2424,7 @@ struct UsersAndGroupsContentView: View {
         let zfsConfigured = viewModel.setupState.relevantZFSDatasets.allSatisfy { $0.status == .configured }
         let userConfigured = viewModel.setupState.userConfig?.status == .configured
         let networkRole = viewModel.selectedNetworkRole
+        let homeStyle = viewModel.selectedHomeDirectoryStyle
 
         // If users already exist with UID >= 1001 and home in /home, system is already set up
         // Skip setup wizard and show standalone user management
@@ -2302,13 +2435,25 @@ struct UsersAndGroupsContentView: View {
             return true
         }
 
-        // For Standalone, check ZFS + user config
+        // For Traditional Unix standalone, no setup required - ready to use immediately
+        if homeStyle == .unix && networkRole == .none {
+            return true
+        }
+
+        // For Gershwin Standalone, check ZFS + user config
         if networkRole == .none {
             return zfsConfigured && userConfigured
         }
 
         // For Server/Client, also check network domain status
         let networkConfigured = viewModel.setupState.networkDomain?.status == .configured
+
+        // Traditional Unix Server/Client only needs ZFS + network (no zsh user config)
+        if homeStyle == .unix {
+            return zfsConfigured && networkConfigured
+        }
+
+        // Gershwin Server/Client needs ZFS + user config + network
         return zfsConfigured && userConfigured && networkConfigured
     }
 
@@ -2316,6 +2461,7 @@ struct UsersAndGroupsContentView: View {
         let zfsConfigured = viewModel.setupState.relevantZFSDatasets.allSatisfy { $0.status == .configured }
         let userConfigured = viewModel.setupState.userConfig?.status == .configured
         let networkRole = viewModel.selectedNetworkRole
+        let homeStyle = viewModel.selectedHomeDirectoryStyle
 
         // If users already exist with UID >= 1001 and home in /home, system is already set up
         let hasExistingUnixUsers = viewModel.setupState.localUsers.contains { user in
@@ -2325,7 +2471,12 @@ struct UsersAndGroupsContentView: View {
             return .configured
         }
 
-        // For Standalone, check ZFS + user config
+        // For Traditional Unix standalone, no setup required - ready to use immediately
+        if homeStyle == .unix && networkRole == .none {
+            return .configured
+        }
+
+        // For Gershwin Standalone, check ZFS + user config
         if networkRole == .none {
             if zfsConfigured && userConfigured {
                 return .configured
@@ -2338,6 +2489,19 @@ struct UsersAndGroupsContentView: View {
 
         // For Server/Client, also check network domain status
         let networkConfigured = viewModel.setupState.networkDomain?.status == .configured
+
+        // Traditional Unix Server/Client only needs ZFS + network (no zsh user config)
+        if homeStyle == .unix {
+            if zfsConfigured && networkConfigured {
+                return .configured
+            } else if viewModel.setupState.relevantZFSDatasets.isEmpty {
+                return .pending
+            } else {
+                return .partiallyConfigured
+            }
+        }
+
+        // Gershwin Server/Client needs ZFS + user config + network
         if zfsConfigured && userConfigured && networkConfigured {
             return .configured
         } else if viewModel.setupState.relevantZFSDatasets.isEmpty && viewModel.setupState.userConfig == nil {
@@ -2592,13 +2756,26 @@ struct DomainPhase: View {
     @State private var packagesExpanded = false
     @State private var userConfigExpanded = false
 
+    // Traditional Unix style check
+    private var isTraditionalUnix: Bool {
+        viewModel.selectedHomeDirectoryStyle == .unix
+    }
+
     private var packagesConfigured: Bool {
         guard let config = viewModel.setupState.userConfig else { return false }
+        // Traditional Unix needs no packages, Gershwin needs zsh packages (sudo is optional via Netgroups)
+        if isTraditionalUnix {
+            return true
+        }
         return config.zshInstalled && config.zshAutosuggestionsInstalled &&
                config.zshCompletionsInstalled
     }
 
     private var userConfigConfigured: Bool {
+        // Traditional Unix doesn't need user config (uses /bin/sh)
+        if isTraditionalUnix {
+            return true
+        }
         guard let config = viewModel.setupState.userConfig else { return false }
         // Only check relevant datasets based on home directory style
         let zfsConfigured = viewModel.setupState.relevantZFSDatasets.allSatisfy { $0.status == .configured }
@@ -2618,6 +2795,16 @@ struct DomainPhase: View {
         viewModel.setupState.networkDomain?.nisConfigured == true
     }
 
+    // Traditional Unix standalone doesn't need any setup
+    private var isTraditionalUnixStandalone: Bool {
+        isTraditionalUnix && viewModel.selectedNetworkRole == .none
+    }
+
+    // Role is locked when users with UID >= 1001 exist
+    private var isRoleLocked: Bool {
+        viewModel.setupState.localUsers.contains(where: { $0.id >= 1001 })
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             // Role picker - always show at top unless already configured as server/client
@@ -2632,7 +2819,15 @@ struct DomainPhase: View {
                         Text("Client (Mount from server)").tag(NetworkRole.client)
                     }
                     .pickerStyle(.radioGroup)
-                    .onChange(of: viewModel.selectedNetworkRole) { oldValue, newValue in
+                    .disabled(isRoleLocked)
+
+                    if isRoleLocked {
+                        Label("Cannot change role after users are created", systemImage: "lock.fill")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
+                }
+                .onChange(of: viewModel.selectedNetworkRole) { oldValue, newValue in
                         Task {
                             await viewModel.loadSetupState(updateNetworkRole: false)
 
@@ -2643,7 +2838,6 @@ struct DomainPhase: View {
                             }
                         }
                     }
-                }
 
                 Divider()
 
@@ -2724,48 +2918,74 @@ struct DomainPhase: View {
                 Divider()
             }
 
-            // Required Packages Section
-            ExpandableConfigSection(
-                title: "Required Packages",
-                isConfigured: packagesConfigured,
-                isExpanded: $packagesExpanded
-            ) {
-                if let config = viewModel.setupState.userConfig {
-                    ConfigDetailRow(label: "zsh", isConfigured: config.zshInstalled)
-                    ConfigDetailRow(label: "zsh-autosuggestions", isConfigured: config.zshAutosuggestionsInstalled)
-                    ConfigDetailRow(label: "zsh-completions", isConfigured: config.zshCompletionsInstalled)
+            // Required Packages Section (only shown for Gershwin style)
+            if !isTraditionalUnix {
+                ExpandableConfigSection(
+                    title: "Required Packages",
+                    isConfigured: packagesConfigured,
+                    isExpanded: $packagesExpanded
+                ) {
+                    if let config = viewModel.setupState.userConfig {
+                        // Gershwin needs zsh packages (sudo is optional via Netgroups section)
+                        ConfigDetailRow(label: "zsh", isConfigured: config.zshInstalled)
+                        ConfigDetailRow(label: "zsh-autosuggestions", isConfigured: config.zshAutosuggestionsInstalled)
+                        ConfigDetailRow(label: "zsh-completions", isConfigured: config.zshCompletionsInstalled)
+                    }
+                }
+
+                // User Configuration Section
+                ExpandableConfigSection(
+                    title: "User Configuration",
+                    isConfigured: userConfigConfigured,
+                    isExpanded: $userConfigExpanded
+                ) {
+                    // ZFS Datasets
+                    Text("ZFS Datasets")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .padding(.top, 4)
+
+                    ForEach(viewModel.setupState.relevantZFSDatasets, id: \.name) { dataset in
+                        ConfigDetailRow(
+                            label: dataset.name,
+                            isConfigured: dataset.status == .configured,
+                            detail: dataset.exists ? (dataset.correctLocation ? nil : "Wrong location") : "Missing"
+                        )
+                    }
+
+                    // ZSH configuration
+                    if let config = viewModel.setupState.userConfig {
+                        Text("ZSH Configuration")
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .padding(.top, 8)
+
+                        ConfigDetailRow(label: "/usr/local/etc/zshrc", isConfigured: config.zshrcConfigured)
+                        ConfigDetailRow(label: "/usr/share/skel/dot.zshrc", isConfigured: config.zshrcConfigured)
+                    }
                 }
             }
 
-            // User Configuration Section
-            ExpandableConfigSection(
-                title: "User Configuration",
-                isConfigured: userConfigConfigured,
-                isExpanded: $userConfigExpanded
-            ) {
-                // ZFS Datasets
-                Text("ZFS Datasets")
-                    .font(.caption)
-                    .fontWeight(.medium)
-                    .padding(.top, 4)
+            // Netgroups Section (shown for server/client roles)
+            if viewModel.selectedNetworkRole == .server || viewModel.selectedNetworkRole == .client ||
+               isConfiguredAsServer || isConfiguredAsClient {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Netgroups")
+                        .font(.headline)
 
-                ForEach(viewModel.setupState.relevantZFSDatasets, id: \.name) { dataset in
-                    ConfigDetailRow(
-                        label: dataset.name,
-                        isConfigured: dataset.status == .configured,
-                        detail: dataset.exists ? (dataset.correctLocation ? nil : "Wrong location") : "Missing"
-                    )
-                }
-
-                // ZSH configuration
-                if let config = viewModel.setupState.userConfig {
-                    Text("ZSH Configuration")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .padding(.top, 8)
-
-                    ConfigDetailRow(label: "/usr/local/etc/zshrc", isConfigured: config.zshrcConfigured)
-                    ConfigDetailRow(label: "/usr/share/skel/dot.zshrc", isConfigured: config.zshrcConfigured)
+                    Toggle(isOn: Binding(
+                        get: { viewModel.setupState.userConfig?.sudoInstalled == true },
+                        set: { newValue in
+                            if newValue {
+                                Task {
+                                    await viewModel.setupSudo()
+                                }
+                            }
+                        }
+                    )) {
+                        Text("sudo-users")
+                    }
+                    .disabled(viewModel.isLoading)
                 }
             }
 
@@ -2783,8 +3003,9 @@ struct DomainPhase: View {
             }
 
             // Buttons based on role and state
-            if viewModel.selectedNetworkRole == .none && !localConfigured {
-                // Standalone - Initialize button
+            // Initialize button only for Gershwin standalone (Traditional Unix doesn't need setup)
+            if viewModel.selectedNetworkRole == .none && !localConfigured && !isTraditionalUnixStandalone {
+                // Gershwin Standalone - Initialize button
                 Divider()
                 Button(action: {
                     Task {
@@ -2802,7 +3023,10 @@ struct DomainPhase: View {
                 Button(action: {
                     Task {
                         guard await viewModel.setupZFSDatasets() else { return }
-                        guard await viewModel.setupUserConfig() else { return }
+                        // Gershwin needs full user config, Traditional Unix has no required packages
+                        if !isTraditionalUnix {
+                            guard await viewModel.setupUserConfig() else { return }
+                        }
                         await viewModel.setupNetworkDomain()
                     }
                 }) {
@@ -2816,7 +3040,10 @@ struct DomainPhase: View {
                 Button(action: {
                     Task {
                         guard await viewModel.setupZFSDatasets() else { return }
-                        guard await viewModel.setupUserConfig() else { return }
+                        // Gershwin needs full user config, Traditional Unix has no required packages
+                        if !isTraditionalUnix {
+                            guard await viewModel.setupUserConfig() else { return }
+                        }
                         await viewModel.setupNetworkDomain()
                     }
                 }) {
@@ -3277,6 +3504,14 @@ struct UserManagementPhase: View {
     @State private var userToDelete: LocalUser?
     @State private var removeHomeDirectory = false
 
+    // Use "wheel" for Traditional Unix standalone, "sudo" otherwise
+    private var privilegeLabel: String {
+        if viewModel.selectedHomeDirectoryStyle == .unix && viewModel.selectedNetworkRole == .none {
+            return "wheel"
+        }
+        return "sudo"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Manage local user accounts:")
@@ -3304,6 +3539,7 @@ struct UserManagementPhase: View {
                         ForEach(viewModel.setupState.localUsers) { user in
                             UserRow(
                                 user: user,
+                                privilegeLabel: privilegeLabel,
                                 onFinger: {
                                     userToFinger = user
                                 },
@@ -4975,6 +5211,7 @@ struct EditGroupSheet: View {
 
 struct UserRow: View {
     let user: LocalUser
+    let privilegeLabel: String  // "wheel" for Traditional Unix, "sudo" for Gershwin/domain
     let onFinger: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
@@ -4988,7 +5225,7 @@ struct UserRow: View {
                         .fontWeight(.medium)
 
                     if user.hasSudoAccess {
-                        Text("sudo")
+                        Text(privilegeLabel)
                             .font(.caption2)
                             .fontWeight(.medium)
                             .padding(.horizontal, 6)
@@ -5103,6 +5340,19 @@ struct CreateUserSheet: View {
         !viewModel.isLoading
     }
 
+    // Use "wheel" terminology for Traditional Unix standalone
+    private var isTraditionalUnixStandalone: Bool {
+        viewModel.selectedHomeDirectoryStyle == .unix && viewModel.selectedNetworkRole == .none
+    }
+
+    private var accessToggleLabel: String {
+        isTraditionalUnixStandalone ? "Allow wheel access" : "Allow sudo access"
+    }
+
+    private var accessToggleDescription: String {
+        isTraditionalUnixStandalone ? "Adds user to wheel group" : "Grants sudo/administrative privileges"
+    }
+
     var body: some View {
         VStack(spacing: 20) {
             Text("Create New Local User")
@@ -5157,9 +5407,9 @@ struct CreateUserSheet: View {
 
                 Toggle(isOn: $addToWheel) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Allow sudo access")
+                        Text(accessToggleLabel)
                             .font(.body)
-                        Text("Grants sudo/administrative privileges")
+                        Text(accessToggleDescription)
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -5231,6 +5481,19 @@ struct EditUserSheet: View {
         hasSudoAccess != user.hasSudoAccess
     }
 
+    // Use "wheel" terminology for Traditional Unix standalone
+    private var isTraditionalUnixStandalone: Bool {
+        viewModel.selectedHomeDirectoryStyle == .unix && viewModel.selectedNetworkRole == .none
+    }
+
+    private var accessToggleLabel: String {
+        isTraditionalUnixStandalone ? "Allow wheel access" : "Allow sudo access"
+    }
+
+    private var accessToggleDescription: String {
+        isTraditionalUnixStandalone ? "Adds user to wheel group" : "Grants sudo/administrative privileges"
+    }
+
     var body: some View {
         VStack(spacing: 20) {
             Text("Edit User")
@@ -5275,9 +5538,9 @@ struct EditUserSheet: View {
 
                 Toggle(isOn: $hasSudoAccess) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Allow sudo access")
+                        Text(accessToggleLabel)
                             .font(.body)
-                        Text("Grants sudo/administrative privileges")
+                        Text(accessToggleDescription)
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -5645,6 +5908,13 @@ struct CreateNetworkUserSheet: View {
                             .foregroundColor(.secondary)
                     }
                 }
+                .disabled(viewModel.setupState.userConfig?.sudoInstalled != true)
+
+                if viewModel.setupState.userConfig?.sudoInstalled != true {
+                    Text("Enable sudo-users in Netgroups to allow sudo access")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
             }
             .padding()
 
@@ -5765,6 +6035,13 @@ struct EditNetworkUserSheet: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
+                }
+                .disabled(viewModel.setupState.userConfig?.sudoInstalled != true)
+
+                if viewModel.setupState.userConfig?.sudoInstalled != true {
+                    Text("Enable sudo-users in Netgroups to allow sudo access")
+                        .font(.caption)
+                        .foregroundColor(.orange)
                 }
             }
             .padding()
