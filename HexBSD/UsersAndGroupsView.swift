@@ -1193,6 +1193,9 @@ SAVEHIST=10000
         print("DEBUG CLIENT: sysrc nfs_client_enable result: \(sysrc4)")
         let sysrc5 = try await sshManager.executeCommand("sysrc rpc_lockd_enable=\"YES\"")
         print("DEBUG CLIENT: sysrc rpc_lockd_enable result: \(sysrc5)")
+        // Enable nfsuserd for NFSv4 ID mapping (shows correct user/group names)
+        let sysrc6 = try await sshManager.executeCommand("sysrc nfsuserd_enable=\"YES\"")
+        print("DEBUG CLIENT: sysrc nfsuserd_enable result: \(sysrc6)")
 
         // Enable NIS compat mode for passwd and group lookups
         // This uses the traditional FreeBSD approach with +: entries in passwd/group files
@@ -1294,6 +1297,9 @@ SAVEHIST=10000
         print("DEBUG CLIENT: nfsclient start result: \(nfsclientResult)")
         let lockdResult = try await sshManager.executeCommand("service lockd onestart 2>&1 || true")
         print("DEBUG CLIENT: lockd start result: \(lockdResult)")
+        // Start nfsuserd for NFSv4 ID mapping
+        let nfsuserdResult = try await sshManager.executeCommand("service nfsuserd onestart 2>&1 || true")
+        print("DEBUG CLIENT: nfsuserd start result: \(nfsuserdResult)")
 
         // Mount the network shares
         if setupState.homeDirectoryStyle == .gnustep {
@@ -1411,6 +1417,8 @@ SAVEHIST=10000
             networkConfigStep = "Disabling NFS client..."
             _ = try await sshManager.executeCommand("sysrc -x nfs_client_enable 2>/dev/null || true")
             _ = try await sshManager.executeCommand("sysrc -x rpc_lockd_enable 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("sysrc -x nfsuserd_enable 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("service nfsuserd stop 2>&1 || true")
 
             // Restore nsswitch.conf to default (compat mode, which doesn't use NIS without +: entries)
             networkConfigStep = "Restoring nsswitch.conf..."
