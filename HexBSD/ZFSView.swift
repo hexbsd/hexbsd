@@ -132,36 +132,42 @@ struct ZFSScrubStatus: Identifiable {
 
 struct ZFSContentView: View {
     @StateObject private var viewModel = ZFSViewModel()
-    @State private var selectedView: ZFSViewType = .pools
     @State private var showError = false
-
-    enum ZFSViewType: String, CaseIterable {
-        case pools = "Pools"
-        case datasets = "Datasets"
-    }
+    @State private var showBootEnvironments = false
+    @State private var showPools = false
 
     var body: some View {
         VStack(spacing: 0) {
-            // Segmented control for view selection
-            Picker("View", selection: $selectedView) {
-                ForEach(ZFSViewType.allCases, id: \.self) { type in
-                    Text(type.rawValue).tag(type)
+            // Toolbar with Boot Environments and Pools buttons
+            HStack {
+                Button(action: {
+                    showBootEnvironments = true
+                }) {
+                    Label("Boot Environments", systemImage: "arrow.triangle.branch")
                 }
+                .buttonStyle(.bordered)
+
+                Button(action: {
+                    showPools = true
+                }) {
+                    Label("Pools", systemImage: "cylinder.fill")
+                }
+                .buttonStyle(.bordered)
+
+                Spacer()
             }
-            .pickerStyle(.segmented)
             .padding()
 
             Divider()
 
-            // Content based on selected view
-            Group {
-                switch selectedView {
-                case .pools:
-                    PoolsView(viewModel: viewModel)
-                case .datasets:
-                    DatasetsView(viewModel: viewModel)
-                }
-            }
+            // Datasets view is the main content
+            DatasetsView(viewModel: viewModel)
+        }
+        .sheet(isPresented: $showBootEnvironments) {
+            BootEnvironmentsSheet()
+        }
+        .sheet(isPresented: $showPools) {
+            PoolsSheet(viewModel: viewModel)
         }
         .alert("ZFS Error", isPresented: $showError) {
             Button("OK") {
@@ -183,7 +189,121 @@ struct ZFSContentView: View {
     }
 }
 
-// MARK: - Pools View
+// MARK: - Boot Environments Sheet
+
+struct BootEnvironmentsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Text("Boot Environments")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+
+                Spacer()
+
+                Button("Done") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+            .padding()
+
+            Divider()
+
+            // Boot environments content
+            BootEnvironmentsSection()
+                .padding()
+
+            Spacer()
+        }
+        .frame(width: 700, height: 500)
+    }
+}
+
+// MARK: - Pools Sheet
+
+struct PoolsSheet: View {
+    @ObservedObject var viewModel: ZFSViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Text("ZFS Pools")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+
+                Spacer()
+
+                Button(action: {
+                    Task {
+                        await viewModel.refreshPools()
+                        await viewModel.refreshScrubStatus()
+                    }
+                }) {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+
+                Button("Done") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+            .padding()
+
+            Divider()
+
+            // Pools content
+            if viewModel.isLoadingPools {
+                VStack(spacing: 20) {
+                    ProgressView()
+                        .scaleEffect(1.5)
+                    Text("Loading pools...")
+                        .font(.headline)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if viewModel.pools.isEmpty {
+                VStack(spacing: 20) {
+                    Image(systemName: "cylinder")
+                        .font(.system(size: 72))
+                        .foregroundColor(.secondary)
+                    Text("No ZFS Pools")
+                        .font(.title2)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 12) {
+                        ForEach(viewModel.pools, id: \.name) { pool in
+                            PoolCard(
+                                pool: pool,
+                                scrubStatus: viewModel.scrubStatuses.first(where: { $0.poolName == pool.name }),
+                                viewModel: viewModel
+                            )
+                        }
+                    }
+                    .padding()
+                }
+            }
+        }
+        .frame(width: 600, height: 500)
+        .onAppear {
+            Task {
+                await viewModel.refreshPools()
+                await viewModel.refreshScrubStatus()
+            }
+        }
+    }
+}
+
+// MARK: - Pools View (Legacy - can be removed later)
 
 struct PoolsView: View {
     @ObservedObject var viewModel: ZFSViewModel
@@ -699,6 +819,7 @@ class DatasetNode: Identifiable, ObservableObject {
 
 struct DatasetsView: View {
     @ObservedObject var viewModel: ZFSViewModel
+    @EnvironmentObject var appState: AppState
     @State private var selectedDataset: ZFSDataset?
     @State private var showCreateSnapshot = false
     @State private var showCloneDataset = false
@@ -1040,9 +1161,7 @@ struct DatasetsView: View {
                         .buttonStyle(.bordered)
 
                         Button(action: {
-                            Task {
-                                await viewModel.deleteSnapshot(snapshot: dataset.name)
-                            }
+                            confirmDeleteSnapshot(dataset)
                         }) {
                             Label("Delete", systemImage: "trash")
                         }
@@ -1502,7 +1621,29 @@ struct DatasetsView: View {
         isLoadingTarget = false
     }
 
+    private func confirmDeleteSnapshot(_ snapshot: ZFSDataset) {
+        appState.isShowingDeleteConfirmation = true
+
+        let alert = NSAlert()
+        alert.messageText = "Delete Snapshot?"
+        alert.informativeText = "Are you sure you want to delete '\(snapshot.name)'?\n\nThis will permanently delete the snapshot. This action cannot be undone."
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+
+        let response = alert.runModal()
+        appState.isShowingDeleteConfirmation = false
+
+        if response == .alertFirstButtonReturn {
+            Task {
+                await viewModel.deleteSnapshot(snapshot: snapshot.name)
+            }
+        }
+    }
+
     private func confirmDeleteDataset(_ dataset: ZFSDataset) {
+        appState.isShowingDeleteConfirmation = true
+
         let alert = NSAlert()
         alert.messageText = "Delete Dataset?"
         alert.informativeText = "Are you sure you want to delete '\(dataset.name)'?\n\nThis will permanently delete the dataset and all its contents. This action cannot be undone."
@@ -1511,6 +1652,8 @@ struct DatasetsView: View {
         alert.addButton(withTitle: "Cancel")
 
         let response = alert.runModal()
+        appState.isShowingDeleteConfirmation = false
+
         if response == .alertFirstButtonReturn {
             Task {
                 await viewModel.destroyDataset(name: dataset.name)
@@ -2653,18 +2796,6 @@ class ZFSViewModel: ObservableObject {
     }
 
     func deleteSnapshot(snapshot: String) async {
-        // Confirm deletion
-        let alert = NSAlert()
-        alert.messageText = "Delete snapshot?"
-        alert.informativeText = "This will permanently delete the snapshot \(snapshot)."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Delete")
-        alert.addButton(withTitle: "Cancel")
-
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            return
-        }
-
         error = nil
 
         do {

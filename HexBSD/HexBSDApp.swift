@@ -8,8 +8,14 @@
 import SwiftUI
 import SwiftData
 
+// App-wide state for critical UI states like delete confirmations
+class AppState: ObservableObject {
+    @Published var isShowingDeleteConfirmation = false
+}
+
 @main
 struct HexBSDApp: App {
+    @StateObject private var appState = AppState()
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
             Item.self,
@@ -25,7 +31,17 @@ struct HexBSDApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ZStack {
+                ContentView()
+                    .environmentObject(appState)
+
+                // Red overlay when delete confirmation is showing
+                if appState.isShowingDeleteConfirmation {
+                    Color.red.opacity(0.3)
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
+                }
+            }
         }
         .modelContainer(sharedModelContainer)
         .commands {
