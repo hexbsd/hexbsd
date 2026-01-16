@@ -347,6 +347,280 @@ struct PoolsSheet: View {
     }
 }
 
+// MARK: - Replication Key Setup Sheet
+
+struct ReplicationKeySetupSheet: View {
+    let server: SavedServer
+    let onComplete: () -> Void
+    let onCancel: () -> Void
+
+    @State private var keyExists = false
+    @State private var keyAuthorized = false
+    @State private var isChecking = true
+    @State private var isCreatingKey = false
+    @State private var isAddingToRemote = false
+    @State private var publicKey = ""
+    @State private var errorMessage: String?
+    @State private var statusMessage = "Checking replication key status..."
+
+    private let replicationKeyPath = NSHomeDirectory() + "/.ssh/id_replication"
+    private let replicationPubKeyPath = NSHomeDirectory() + "/.ssh/id_replication.pub"
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Replication Key Setup")
+                .font(.title2)
+                .fontWeight(.semibold)
+                .padding(.top, 20)
+                .padding(.bottom, 16)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 20) {
+                // Server info
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Target Server")
+                        .font(.headline)
+                    Text("\(server.username)@\(server.host)")
+                        .font(.body)
+                        .foregroundColor(.primary)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .cornerRadius(6)
+                }
+
+                Divider()
+
+                // Status section
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Setup Status")
+                        .font(.headline)
+
+                    // Step 1: Local key
+                    HStack(spacing: 12) {
+                        if isCreatingKey {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                        } else {
+                            Image(systemName: keyExists ? "checkmark.circle.fill" : "circle")
+                                .foregroundColor(keyExists ? .green : .secondary)
+                        }
+                        VStack(alignment: .leading) {
+                            Text("Replication SSH Key")
+                                .font(.subheadline)
+                            Text(keyExists ? "Key exists at ~/.ssh/id_replication" : "Key not found")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        if !keyExists && !isCreatingKey {
+                            Button("Create Key") {
+                                createReplicationKey()
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+
+                    // Step 2: Remote authorization
+                    HStack(spacing: 12) {
+                        if isAddingToRemote {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                        } else {
+                            Image(systemName: keyAuthorized ? "checkmark.circle.fill" : "circle")
+                                .foregroundColor(keyAuthorized ? .green : .secondary)
+                        }
+                        VStack(alignment: .leading) {
+                            Text("Key Authorized on Remote")
+                                .font(.subheadline)
+                            Text(keyAuthorized ? "Key is in remote authorized_keys" : "Key not yet authorized")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        if keyExists && !keyAuthorized && !isAddingToRemote {
+                            Button("Add to Remote") {
+                                addKeyToRemote()
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                }
+
+                if let error = errorMessage {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                        .padding(8)
+                        .background(Color.red.opacity(0.1))
+                        .cornerRadius(6)
+                }
+
+                if !publicKey.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Public Key")
+                            .font(.headline)
+                        Text(publicKey)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .padding(8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(nsColor: .controlBackgroundColor))
+                            .cornerRadius(6)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            .padding()
+
+            Spacer()
+
+            Divider()
+
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Button("Continue") {
+                    onComplete()
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(!keyExists || !keyAuthorized)
+            }
+            .padding()
+        }
+        .frame(width: 550, height: 500)
+        .onAppear {
+            checkKeyStatus()
+        }
+    }
+
+    private func checkKeyStatus() {
+        isChecking = true
+        keyExists = FileManager.default.fileExists(atPath: replicationKeyPath)
+
+        if keyExists {
+            // Read public key
+            if let pubKeyData = FileManager.default.contents(atPath: replicationPubKeyPath),
+               let pubKey = String(data: pubKeyData, encoding: .utf8) {
+                publicKey = pubKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+
+            // Check if key is authorized on remote
+            Task {
+                await checkRemoteAuthorization()
+            }
+        } else {
+            isChecking = false
+        }
+    }
+
+    private func createReplicationKey() {
+        isCreatingKey = true
+        errorMessage = nil
+
+        Task {
+            do {
+                // Create .ssh directory if needed
+                let sshDir = NSHomeDirectory() + "/.ssh"
+                try FileManager.default.createDirectory(atPath: sshDir, withIntermediateDirectories: true)
+
+                // Generate key using ssh-keygen
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
+                process.arguments = ["-t", "ed25519", "-f", replicationKeyPath, "-N", "", "-C", "HexBSD-replication"]
+
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = pipe
+
+                try process.run()
+                process.waitUntilExit()
+
+                await MainActor.run {
+                    if process.terminationStatus == 0 {
+                        keyExists = true
+                        // Read the public key
+                        if let pubKeyData = FileManager.default.contents(atPath: replicationPubKeyPath),
+                           let pubKey = String(data: pubKeyData, encoding: .utf8) {
+                            publicKey = pubKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                        }
+                    } else {
+                        errorMessage = "Failed to create SSH key"
+                    }
+                    isCreatingKey = false
+                }
+            } catch {
+                await MainActor.run {
+                    errorMessage = "Error creating key: \(error.localizedDescription)"
+                    isCreatingKey = false
+                }
+            }
+        }
+    }
+
+    private func checkRemoteAuthorization() async {
+        // Connect to server and check if our key is in authorized_keys
+        do {
+            let manager = SSHConnectionManager()
+            let keyURL = URL(fileURLWithPath: server.keyPath)
+            let authMethod = SSHAuthMethod(username: server.username, privateKeyURL: keyURL)
+
+            try await manager.connect(host: server.host, port: server.port, authMethod: authMethod)
+
+            // Check if our public key is in authorized_keys
+            let checkCommand = "grep -F '\(publicKey.components(separatedBy: " ").dropLast().joined(separator: " "))' ~/.ssh/authorized_keys 2>/dev/null && echo 'FOUND' || echo 'NOT_FOUND'"
+            let result = try await manager.executeCommand(checkCommand)
+
+            await MainActor.run {
+                keyAuthorized = result.contains("FOUND")
+                isChecking = false
+            }
+        } catch {
+            await MainActor.run {
+                keyAuthorized = false
+                isChecking = false
+            }
+        }
+    }
+
+    private func addKeyToRemote() {
+        isAddingToRemote = true
+        errorMessage = nil
+
+        Task {
+            do {
+                let manager = SSHConnectionManager()
+                let keyURL = URL(fileURLWithPath: server.keyPath)
+                let authMethod = SSHAuthMethod(username: server.username, privateKeyURL: keyURL)
+
+                try await manager.connect(host: server.host, port: server.port, authMethod: authMethod)
+
+                // Add key to authorized_keys
+                let escapedKey = publicKey.replacingOccurrences(of: "'", with: "'\\''")
+                let addCommand = "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '\(escapedKey)' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+                _ = try await manager.executeCommand(addCommand)
+
+                await MainActor.run {
+                    keyAuthorized = true
+                    isAddingToRemote = false
+                }
+            } catch {
+                await MainActor.run {
+                    errorMessage = "Failed to add key to remote: \(error.localizedDescription)"
+                    isAddingToRemote = false
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Pools View (Legacy - can be removed later)
 
 struct PoolsView: View {
@@ -882,6 +1156,7 @@ struct DatasetsView: View {
     @State private var isLoadingTarget = false
     @State private var expandedTargetDatasets: Set<String> = []
     @State private var draggedDataset: ZFSDataset?
+    @State private var pendingReplicationServer: SavedServer? = nil
 
     private var datasetsCount: Int {
         viewModel.datasets.filter { !$0.isSnapshot }.count
@@ -1169,6 +1444,22 @@ struct DatasetsView: View {
                     }
                 )
             }
+        }
+        .sheet(item: $pendingReplicationServer) { server in
+            ReplicationKeySetupSheet(
+                server: server,
+                onComplete: {
+                    pendingReplicationServer = nil
+                    // Now connect with the key set up
+                    Task {
+                        await connectToTargetServer(server)
+                    }
+                },
+                onCancel: {
+                    pendingReplicationServer = nil
+                    selectedReplicationServer = nil
+                }
+            )
         }
     }
 
@@ -1633,7 +1924,8 @@ struct DatasetsView: View {
     private func loadSavedServers() {
         if let data = UserDefaults.standard.data(forKey: "savedServers"),
            let decoded = try? JSONDecoder().decode([SavedServer].self, from: data) {
-            savedServers = decoded
+            // Filter out the currently connected server
+            savedServers = decoded.filter { $0.host != SSHConnectionManager.shared.serverAddress }
         }
     }
 
@@ -1645,9 +1937,18 @@ struct DatasetsView: View {
             return
         }
 
-        // Connect to target server and load datasets
-        Task {
-            await connectToTargetServer(server)
+        // Check if replication key exists and is set up
+        let replicationKeyPath = NSHomeDirectory() + "/.ssh/id_replication"
+        let replicationKeyExists = FileManager.default.fileExists(atPath: replicationKeyPath)
+
+        if !replicationKeyExists {
+            // No replication key - show setup dialog
+            pendingReplicationServer = server
+        } else {
+            // Key exists - connect directly
+            Task {
+                await connectToTargetServer(server)
+            }
         }
     }
 
