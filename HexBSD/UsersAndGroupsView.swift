@@ -305,6 +305,18 @@ class UsersAndGroupsViewModel: ObservableObject {
         return nil
     }
 
+    var hasNetworkUsers: Bool {
+        setupState.networkUsers.contains(where: { $0.id >= 1001 })
+    }
+
+    var canRemoveDomain: Bool {
+        !hasNetworkUsers
+    }
+
+    var removeDomainDisabledReason: String {
+        "Remove all network users before removing the domain"
+    }
+
     private let sshManager = SSHConnectionManager.shared
 
     func loadSetupState(updateNetworkRole: Bool = true) async {
@@ -3054,40 +3066,56 @@ struct DomainPhase: View {
             } else if isConfiguredAsClient {
                 // Client is joined - show leave button
                 Divider()
-                Button(action: {
-                    Task {
-                        await viewModel.leaveNetworkDomain()
+                VStack(alignment: .leading, spacing: 4) {
+                    Button(action: {
+                        Task {
+                            await viewModel.leaveNetworkDomain()
+                        }
+                    }) {
+                        Label("Leave Domain", systemImage: "network.slash")
                     }
-                }) {
-                    Label("Leave Domain", systemImage: "network.slash")
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                    .disabled(viewModel.isLoading || !viewModel.canRemoveDomain)
+
+                    if !viewModel.canRemoveDomain {
+                        Text(viewModel.removeDomainDisabledReason)
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
                 }
-                .buttonStyle(.bordered)
-                .tint(.red)
-                .disabled(viewModel.isLoading)
             } else if isConfiguredAsServer {
                 // Server is configured - show remove domain button
                 Divider()
-                Button(action: {
-                    viewModel.showingRemoveDomainConfirmation = true
-                }) {
-                    Label("Remove Domain", systemImage: "server.rack")
-                }
-                .buttonStyle(.bordered)
-                .tint(.red)
-                .disabled(viewModel.isLoading)
-                .confirmationDialog(
-                    "Remove Network Domain?",
-                    isPresented: $viewModel.showingRemoveDomainConfirmation,
-                    titleVisibility: .visible
-                ) {
-                    Button("Remove Domain", role: .destructive) {
-                        Task {
-                            await viewModel.removeNetworkDomain()
-                        }
+                VStack(alignment: .leading, spacing: 4) {
+                    Button(action: {
+                        viewModel.showingRemoveDomainConfirmation = true
+                    }) {
+                        Label("Remove Domain", systemImage: "server.rack")
                     }
-                    Button("Cancel", role: .cancel) {}
-                } message: {
-                    Text("This will stop all NIS/NFS services, remove network user data, and restore this system to standalone mode. This action cannot be undone.")
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                    .disabled(viewModel.isLoading || !viewModel.canRemoveDomain)
+                    .confirmationDialog(
+                        "Remove Network Domain?",
+                        isPresented: $viewModel.showingRemoveDomainConfirmation,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Remove Domain", role: .destructive) {
+                            Task {
+                                await viewModel.removeNetworkDomain()
+                            }
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("This will stop all NIS/NFS services, remove network user data, and restore this system to standalone mode. This action cannot be undone.")
+                    }
+
+                    if !viewModel.canRemoveDomain {
+                        Text(viewModel.removeDomainDisabledReason)
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
                 }
             }
 
