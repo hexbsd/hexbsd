@@ -248,8 +248,9 @@ struct UsersAndGroupsState {
             // GNUstep needs /System, /Local, and /Network
             return zfsDatasets
         case .unix:
-            // Unix style doesn't need /Local (uses /home which FreeBSD manages)
-            return zfsDatasets.filter { $0.name != "/Local" }
+            // Traditional Unix doesn't need any special ZFS datasets
+            // It uses /home which FreeBSD manages natively
+            return []
         }
     }
 
@@ -588,24 +589,26 @@ class UsersAndGroupsViewModel: ObservableObject {
                 throw NSError(domain: "UsersAndGroups", code: 1, userInfo: [NSLocalizedDescriptionKey: "Boot environment not detected"])
             }
 
-            // Create /System dataset in boot environment
-            let systemDataset = setupState.zfsDatasets.first { $0.name == "/System" }
-            if let system = systemDataset, !system.exists {
-                _ = try await sshManager.executeCommand("zfs create -o mountpoint=/System \(bootEnv)/System")
-            }
-
-            // Create /Local dataset in zpool root (only for GNUstep style)
+            // GNUstep style requires /System, /Local, and /Network datasets
+            // Traditional Unix doesn't need any of these
             if setupState.homeDirectoryStyle == .gnustep {
+                // Create /System dataset in boot environment
+                let systemDataset = setupState.zfsDatasets.first { $0.name == "/System" }
+                if let system = systemDataset, !system.exists {
+                    _ = try await sshManager.executeCommand("zfs create -o mountpoint=/System \(bootEnv)/System")
+                }
+
+                // Create /Local dataset in zpool root
                 let localDataset = setupState.zfsDatasets.first { $0.name == "/Local" }
                 if let local = localDataset, !local.exists {
                     _ = try await sshManager.executeCommand("zfs create -o mountpoint=/Local \(zpoolRoot)/Local")
                 }
-            }
 
-            // Create /Network dataset in zpool root for all roles
-            let networkDataset = setupState.zfsDatasets.first { $0.name == "/Network" }
-            if let network = networkDataset, !network.exists {
-                _ = try await sshManager.executeCommand("zfs create -o mountpoint=/Network \(zpoolRoot)/Network")
+                // Create /Network dataset in zpool root
+                let networkDataset = setupState.zfsDatasets.first { $0.name == "/Network" }
+                if let network = networkDataset, !network.exists {
+                    _ = try await sshManager.executeCommand("zfs create -o mountpoint=/Network \(zpoolRoot)/Network")
+                }
             }
 
             // Reload state (don't update network role - preserve user's selection during setup)
@@ -947,10 +950,17 @@ SAVEHIST=10000
 
         // Create directories for network shares
         networkConfigStep = "Creating network directories..."
-        let networkUsersPath = setupState.homeDirectoryStyle.networkUsersPath
-        print("DEBUG NIS Server: Creating \(networkUsersPath) and /Network/Applications directories...")
-        result = try await sshManager.executeCommand("mkdir -p \(networkUsersPath) /Network/Applications")
-        print("DEBUG NIS Server: mkdir result: \(result)")
+        if setupState.homeDirectoryStyle == .gnustep {
+            // GNUstep: Create /Network/Users and /Network/Applications
+            print("DEBUG NIS Server: Creating /Network/Users and /Network/Applications directories...")
+            result = try await sshManager.executeCommand("mkdir -p /Network/Users /Network/Applications")
+            print("DEBUG NIS Server: mkdir result: \(result)")
+        } else {
+            // Traditional Unix: Create /home
+            print("DEBUG NIS Server: Creating /home directory...")
+            result = try await sshManager.executeCommand("mkdir -p /home")
+            print("DEBUG NIS Server: mkdir result: \(result)")
+        }
 
         // Ensure /etc/exports exists with NFSv4 root line (required for NFSv4)
         networkConfigStep = "Configuring NFS exports..."
@@ -971,8 +981,6 @@ SAVEHIST=10000
         } else {
             // Traditional Unix: Share /home for network user home directories
             print("DEBUG NIS Server: Configuring NFS export for /home...")
-            // First ensure /home exists and is a directory (not symlink)
-            _ = try await sshManager.executeCommand("mkdir -p /home")
             // Add /home to /etc/exports for NFS sharing
             let exportsContent = try await sshManager.executeCommand("cat /etc/exports 2>/dev/null || echo ''")
             if !exportsContent.contains("/home") {
