@@ -91,10 +91,12 @@ enum HomeDirectoryStyle: String, CaseIterable {
         }
     }
 
-    var description: String {
+    func description(forRole role: NetworkRole) -> String {
         switch self {
-        case .gnustep: return "/Local/Users and /Network/Users"
-        case .unix: return "/home"
+        case .gnustep:
+            return role == .none ? "/Local/Users" : "/Network/Users"
+        case .unix:
+            return "/home"
         }
     }
 
@@ -3003,7 +3005,7 @@ struct DomainPhase: View {
                         ForEach(HomeDirectoryStyle.allCases, id: \.self) { style in
                             HStack {
                                 Image(systemName: style.icon)
-                                Text("\(style.displayName) (\(style.description))")
+                                Text("\(style.displayName) (\(style.description(forRole: viewModel.selectedNetworkRole)))")
                             }
                             .tag(style)
                         }
