@@ -80,6 +80,46 @@ enum NetworkRole {
     case client
 }
 
+enum HomeDirectoryStyle: String, CaseIterable {
+    case unix = "unix"
+    case gnustep = "gnustep"
+
+    var displayName: String {
+        switch self {
+        case .unix: return "Traditional Unix"
+        case .gnustep: return "Gershwin (GNUstep)"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .gnustep: return "/Local/Users and /Network/Users"
+        case .unix: return "/home"
+        }
+    }
+
+    var localUsersPath: String {
+        switch self {
+        case .gnustep: return "/Local/Users"
+        case .unix: return "/home"
+        }
+    }
+
+    var networkUsersPath: String {
+        switch self {
+        case .gnustep: return "/Network/Users"
+        case .unix: return "/home"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .gnustep: return "folder.badge.gearshape"
+        case .unix: return "house"
+        }
+    }
+}
+
 struct NetworkDomainStatus {
     let role: NetworkRole
     let nisConfigured: Bool
@@ -165,14 +205,28 @@ struct UsersAndGroupsState {
     var networkUsers: [LocalUser] = []
     var netgroups: [Netgroup] = []
     var activeSessions: [UserSession] = []
+    var homeDirectoryStyle: HomeDirectoryStyle = .unix
+
+    // Returns only the datasets relevant for the current home directory style
+    var relevantZFSDatasets: [ZFSDatasetStatus] {
+        switch homeDirectoryStyle {
+        case .gnustep:
+            // GNUstep needs /System, /Local, and /Network
+            return zfsDatasets
+        case .unix:
+            // Unix style doesn't need /Local (uses /home which FreeBSD manages)
+            return zfsDatasets.filter { $0.name != "/Local" }
+        }
+    }
 
     var overallProgress: Double {
         var completed = 0
         var total = 0
 
-        // ZFS datasets (dynamic based on number of datasets)
-        total += zfsDatasets.count
-        completed += zfsDatasets.filter { $0.status == .configured }.count
+        // ZFS datasets (only count relevant ones based on style)
+        let datasets = relevantZFSDatasets
+        total += datasets.count
+        completed += datasets.filter { $0.status == .configured }.count
 
         // User config (1 item)
         total += 1
@@ -213,6 +267,37 @@ class UsersAndGroupsViewModel: ObservableObject {
     @Published var isConfiguringNetwork = false
     @Published var networkConfigStep = ""
 
+    // Home Directory Style
+    @Published var selectedHomeDirectoryStyle: HomeDirectoryStyle = .unix
+
+    // Computed property to check if home directory style can be changed
+    var isHomeDirectoryStyleLocked: Bool {
+        // Locked if domain is configured (server or client)
+        if let networkDomain = setupState.networkDomain,
+           networkDomain.role != .none {
+            return true
+        }
+        // Locked if any non-system users exist (UID >= 1001)
+        if setupState.localUsers.contains(where: { $0.id >= 1001 }) {
+            return true
+        }
+        return false
+    }
+
+    var homeDirectoryStyleLockReason: String? {
+        if let networkDomain = setupState.networkDomain {
+            if networkDomain.role == .server {
+                return "Cannot change after domain is created"
+            } else if networkDomain.role == .client {
+                return "Cannot change after joining a domain"
+            }
+        }
+        if setupState.localUsers.contains(where: { $0.id >= 1001 }) {
+            return "Cannot change after users are created"
+        }
+        return nil
+    }
+
     private let sshManager = SSHConnectionManager.shared
 
     func loadSetupState(updateNetworkRole: Bool = true) async {
@@ -224,18 +309,21 @@ class UsersAndGroupsViewModel: ObservableObject {
             async let zfsState = detectZFSDatasets()
             async let userState = detectUserConfig()
             async let networkState = detectNetworkDomain()
+            async let homeStyleState = detectHomeDirectoryStyle()
 
-            let (zfs, user, network) = try await (zfsState, userState, networkState)
+            let (zfs, user, network, homeStyle) = try await (zfsState, userState, networkState, homeStyleState)
 
             setupState.zfsDatasets = zfs.datasets
             setupState.bootEnvironment = zfs.bootEnvironment
             setupState.zpoolRoot = zfs.zpoolRoot
             setupState.userConfig = user
             setupState.networkDomain = network
+            setupState.homeDirectoryStyle = homeStyle
 
             // Only set initial network role based on detection if requested (initial load)
             if updateNetworkRole {
                 selectedNetworkRole = network.role
+                selectedHomeDirectoryStyle = homeStyle
             }
 
         } catch {
@@ -410,6 +498,24 @@ class UsersAndGroupsViewModel: ObservableObject {
         )
     }
 
+    private func detectHomeDirectoryStyle() async throws -> HomeDirectoryStyle {
+        // Check sysrc for hexbsd_home_style setting
+        let styleOutput = try await sshManager.executeCommand("sysrc -n hexbsd_home_style 2>/dev/null || echo 'unix'")
+        let style = styleOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        return HomeDirectoryStyle(rawValue: style) ?? .unix
+    }
+
+    func saveHomeDirectoryStyle() async {
+        guard !isHomeDirectoryStyleLocked else { return }
+
+        do {
+            _ = try await sshManager.executeCommand("sysrc hexbsd_home_style=\(selectedHomeDirectoryStyle.rawValue)")
+            setupState.homeDirectoryStyle = selectedHomeDirectoryStyle
+        } catch {
+            self.error = "Failed to save home directory style: \(error.localizedDescription)"
+        }
+    }
+
     // MARK: - Setup Actions
 
     @discardableResult
@@ -429,10 +535,12 @@ class UsersAndGroupsViewModel: ObservableObject {
                 _ = try await sshManager.executeCommand("zfs create -o mountpoint=/System \(bootEnv)/System")
             }
 
-            // Create /Local dataset in zpool root
-            let localDataset = setupState.zfsDatasets.first { $0.name == "/Local" }
-            if let local = localDataset, !local.exists {
-                _ = try await sshManager.executeCommand("zfs create -o mountpoint=/Local \(zpoolRoot)/Local")
+            // Create /Local dataset in zpool root (only for GNUstep style)
+            if setupState.homeDirectoryStyle == .gnustep {
+                let localDataset = setupState.zfsDatasets.first { $0.name == "/Local" }
+                if let local = localDataset, !local.exists {
+                    _ = try await sshManager.executeCommand("zfs create -o mountpoint=/Local \(zpoolRoot)/Local")
+                }
             }
 
             // Create /Network dataset in zpool root for all roles
@@ -741,8 +849,9 @@ SAVEHIST=10000
 
         // Create directories for network shares
         networkConfigStep = "Creating network directories..."
-        print("DEBUG NIS Server: Creating /Network/Users and /Network/Applications directories...")
-        result = try await sshManager.executeCommand("mkdir -p /Network/Users /Network/Applications")
+        let networkUsersPath = setupState.homeDirectoryStyle.networkUsersPath
+        print("DEBUG NIS Server: Creating \(networkUsersPath) and /Network/Applications directories...")
+        result = try await sshManager.executeCommand("mkdir -p \(networkUsersPath) /Network/Applications")
         print("DEBUG NIS Server: mkdir result: \(result)")
 
         // Ensure /etc/exports exists (mountd requires it even if empty)
@@ -1245,7 +1354,7 @@ SAVEHIST=10000
             ✓ nsswitch.conf restored to default
 
             This system is now configured as a standalone machine.
-            Network users and their home directories in /Network/Users remain intact.
+            Network users and their home directories in \(setupState.homeDirectoryStyle.networkUsersPath) remain intact.
             """
             showingConfirmation = true
 
@@ -1379,8 +1488,8 @@ SAVEHIST=10000
         error = nil
 
         do {
-            // Hardcoded settings for local users
-            let homePrefix = "/Local/Users"
+            // Use home directory path based on configured style
+            let homePrefix = setupState.homeDirectoryStyle.localUsersPath
             let shell = "/usr/local/bin/zsh"
 
             // Use pw command to create user non-interactively
@@ -1874,8 +1983,8 @@ SAVEHIST=10000
                 throw NSError(domain: "UsersAndGroups", code: 6, userInfo: [NSLocalizedDescriptionKey: "NIS not initialized. Please run 'ypinit -m' first."])
             }
 
-            // Hardcoded settings for network users
-            let homePrefix = "/Network/Users"
+            // Use home directory path based on configured style
+            let homePrefix = setupState.homeDirectoryStyle.networkUsersPath
             let shell = "/usr/local/bin/zsh"
 
             // Get the next available UID (starting from 1001 for network users)
@@ -2180,9 +2289,18 @@ struct UsersAndGroupsContentView: View {
     @StateObject private var viewModel = UsersAndGroupsViewModel()
 
     private var isSystemSetupComplete: Bool {
-        let zfsConfigured = viewModel.setupState.zfsDatasets.allSatisfy { $0.status == .configured }
+        let zfsConfigured = viewModel.setupState.relevantZFSDatasets.allSatisfy { $0.status == .configured }
         let userConfigured = viewModel.setupState.userConfig?.status == .configured
         let networkRole = viewModel.selectedNetworkRole
+
+        // If users already exist with UID >= 1001 and home in /home, system is already set up
+        // Skip setup wizard and show standalone user management
+        let hasExistingUnixUsers = viewModel.setupState.localUsers.contains { user in
+            user.id >= 1001 && user.homeDirectory.hasPrefix("/home")
+        }
+        if hasExistingUnixUsers && networkRole == .none {
+            return true
+        }
 
         // For Standalone, check ZFS + user config
         if networkRole == .none {
@@ -2195,15 +2313,23 @@ struct UsersAndGroupsContentView: View {
     }
 
     private func domainStatus() -> SetupStatus {
-        let zfsConfigured = viewModel.setupState.zfsDatasets.allSatisfy { $0.status == .configured }
+        let zfsConfigured = viewModel.setupState.relevantZFSDatasets.allSatisfy { $0.status == .configured }
         let userConfigured = viewModel.setupState.userConfig?.status == .configured
         let networkRole = viewModel.selectedNetworkRole
+
+        // If users already exist with UID >= 1001 and home in /home, system is already set up
+        let hasExistingUnixUsers = viewModel.setupState.localUsers.contains { user in
+            user.id >= 1001 && user.homeDirectory.hasPrefix("/home")
+        }
+        if hasExistingUnixUsers && networkRole == .none {
+            return .configured
+        }
 
         // For Standalone, check ZFS + user config
         if networkRole == .none {
             if zfsConfigured && userConfigured {
                 return .configured
-            } else if viewModel.setupState.zfsDatasets.isEmpty && viewModel.setupState.userConfig == nil {
+            } else if viewModel.setupState.relevantZFSDatasets.isEmpty && viewModel.setupState.userConfig == nil {
                 return .pending
             } else {
                 return .partiallyConfigured
@@ -2214,7 +2340,7 @@ struct UsersAndGroupsContentView: View {
         let networkConfigured = viewModel.setupState.networkDomain?.status == .configured
         if zfsConfigured && userConfigured && networkConfigured {
             return .configured
-        } else if viewModel.setupState.zfsDatasets.isEmpty && viewModel.setupState.userConfig == nil {
+        } else if viewModel.setupState.relevantZFSDatasets.isEmpty && viewModel.setupState.userConfig == nil {
             return .pending
         } else {
             return .partiallyConfigured
@@ -2260,10 +2386,11 @@ struct UsersAndGroupsContentView: View {
         .task {
             await viewModel.loadSetupState()
 
-            // Load appropriate user list based on network role
-            if viewModel.setupState.networkDomain?.role == .none {
-                await viewModel.loadLocalUsers()
-            } else if viewModel.setupState.networkDomain?.role == .server {
+            // Always load local users first to detect existing Unix users
+            await viewModel.loadLocalUsers()
+
+            // Also load network users if server role
+            if viewModel.setupState.networkDomain?.role == .server {
                 await viewModel.loadNetworkUsers()
             }
         }
@@ -2473,7 +2600,8 @@ struct DomainPhase: View {
 
     private var userConfigConfigured: Bool {
         guard let config = viewModel.setupState.userConfig else { return false }
-        let zfsConfigured = viewModel.setupState.zfsDatasets.allSatisfy { $0.status == .configured }
+        // Only check relevant datasets based on home directory style
+        let zfsConfigured = viewModel.setupState.relevantZFSDatasets.allSatisfy { $0.status == .configured }
         return zfsConfigured && config.status == .configured
     }
 
@@ -2514,6 +2642,38 @@ struct DomainPhase: View {
                                 await viewModel.loadNetworkUsers()
                             }
                         }
+                    }
+                }
+
+                Divider()
+
+                // Home Directory Style picker
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Home Directory Style:")
+                        .font(.headline)
+
+                    Picker("Style", selection: $viewModel.selectedHomeDirectoryStyle) {
+                        ForEach(HomeDirectoryStyle.allCases, id: \.self) { style in
+                            HStack {
+                                Image(systemName: style.icon)
+                                Text("\(style.displayName) (\(style.description))")
+                            }
+                            .tag(style)
+                        }
+                    }
+                    .pickerStyle(.radioGroup)
+                    .disabled(viewModel.isHomeDirectoryStyleLocked)
+                    .onChange(of: viewModel.selectedHomeDirectoryStyle) { oldValue, newValue in
+                        Task {
+                            await viewModel.saveHomeDirectoryStyle()
+                            await viewModel.loadSetupState(updateNetworkRole: false)
+                        }
+                    }
+
+                    if let reason = viewModel.homeDirectoryStyleLockReason {
+                        Label(reason, systemImage: "lock.fill")
+                            .font(.caption)
+                            .foregroundColor(.orange)
                     }
                 }
 
@@ -2589,7 +2749,7 @@ struct DomainPhase: View {
                     .fontWeight(.medium)
                     .padding(.top, 4)
 
-                ForEach(viewModel.setupState.zfsDatasets, id: \.name) { dataset in
+                ForEach(viewModel.setupState.relevantZFSDatasets, id: \.name) { dataset in
                     ConfigDetailRow(
                         label: dataset.name,
                         isConfigured: dataset.status == .configured,
@@ -5011,7 +5171,7 @@ struct CreateUserSheet: View {
                 Image(systemName: "info.circle")
                     .foregroundColor(.blue)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Home directory will be created automatically in /Local/Users")
+                    Text("Home directory will be created automatically in \(viewModel.setupState.homeDirectoryStyle.localUsersPath)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -5190,7 +5350,7 @@ struct NetworkUserManagementPhase: View {
                         Text("Network users are shared across all NIS clients")
                             .font(.caption)
                             .fontWeight(.semibold)
-                        Text("Home directories should be in /Network/Users for NFS access")
+                        Text("Home directories should be in \(viewModel.setupState.homeDirectoryStyle.networkUsersPath) for NFS access")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -5495,7 +5655,7 @@ struct CreateNetworkUserSheet: View {
                     Text("Network user will be added to NIS database")
                         .font(.caption)
                         .fontWeight(.semibold)
-                    Text("Home directory will be created in /Network/Users and NIS maps will be rebuilt.")
+                    Text("Home directory will be created in \(viewModel.setupState.homeDirectoryStyle.networkUsersPath) and NIS maps will be rebuilt.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
