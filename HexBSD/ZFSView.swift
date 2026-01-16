@@ -99,6 +99,50 @@ struct ZFSDataset: Identifiable, Hashable {
             return "cylinder"
         }
     }
+
+    /// Indicates if this dataset is protected from deletion (system-critical)
+    var isProtected: Bool {
+        // Pool root datasets (no slash in name)
+        if !name.contains("/") {
+            return true
+        }
+
+        // Currently mounted as root filesystem
+        if mountpoint == "/" {
+            return true
+        }
+
+        // Boot environment container (e.g., zroot/ROOT)
+        if name.hasSuffix("/ROOT") {
+            return true
+        }
+
+        // Critical system datasets
+        let criticalPaths = ["/var", "/tmp", "/usr", "/home"]
+        if criticalPaths.contains(mountpoint) {
+            return true
+        }
+
+        return false
+    }
+
+    /// Reason why the dataset is protected (for tooltip/display)
+    var protectionReason: String? {
+        if !name.contains("/") {
+            return "Pool root dataset"
+        }
+        if mountpoint == "/" {
+            return "Active root filesystem"
+        }
+        if name.hasSuffix("/ROOT") {
+            return "Boot environments container"
+        }
+        let criticalPaths = ["/var", "/tmp", "/usr", "/home"]
+        if criticalPaths.contains(mountpoint) {
+            return "Critical system dataset"
+        }
+        return nil
+    }
 }
 
 struct ZFSScrubStatus: Identifiable {
@@ -889,6 +933,16 @@ struct DatasetsView: View {
             node.children.sort { $0.dataset.name < $1.dataset.name }
         }
 
+        // Auto-expand protected datasets so users can see unprotected children
+        for node in nodes.values {
+            if node.dataset.isProtected && node.hasChildren {
+                if !expandedDatasets.contains(node.dataset.name) {
+                    expandedDatasets.insert(node.dataset.name)
+                    node.isExpanded = true
+                }
+            }
+        }
+
         // Group snapshots by parent dataset and add as a collapsible "Snapshots" node
         let snapshots = viewModel.datasets.filter { $0.isSnapshot }.sorted { $0.name < $1.name }
         var snapshotsByParent: [String: [ZFSDataset]] = [:]
@@ -1203,6 +1257,8 @@ struct DatasetsView: View {
                             Label("Delete", systemImage: "trash")
                         }
                         .buttonStyle(.bordered)
+                        .disabled(dataset.isProtected)
+                        .help(dataset.protectionReason ?? "Delete this dataset")
 
                         Button(action: {
                             cloneDestination = ""
@@ -1778,7 +1834,7 @@ struct DatasetNodeView: View {
                             .frame(width: 16)
                     } else {
                         Image(systemName: node.dataset.icon)
-                            .foregroundColor(node.dataset.isSnapshot ? .orange : .blue)
+                            .foregroundColor(node.dataset.isProtected ? .gray : (node.dataset.isSnapshot ? .orange : .blue))
                             .frame(width: 16)
                     }
 
@@ -1794,6 +1850,7 @@ struct DatasetNodeView: View {
                         } else {
                             Text(lastPathComponent(node.dataset.name))
                                 .font(.body)
+                                .foregroundColor(node.dataset.isProtected ? .secondary : .primary)
 
                             if node.dataset.isSnapshot {
                                 Text("snapshot")
@@ -1802,6 +1859,16 @@ struct DatasetNodeView: View {
                                     .padding(.vertical, 1)
                                     .background(Color.orange.opacity(0.2))
                                     .cornerRadius(3)
+                            }
+
+                            if node.dataset.isProtected {
+                                Text("protected")
+                                    .font(.caption2)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background(Color.gray.opacity(0.2))
+                                    .cornerRadius(3)
+                                    .help(node.dataset.protectionReason ?? "System dataset")
                             }
                         }
                     }
