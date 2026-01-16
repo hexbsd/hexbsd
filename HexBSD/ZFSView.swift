@@ -894,6 +894,9 @@ struct DatasetsView: View {
                     onCreate: {
                         Task {
                             await viewModel.createSnapshot(dataset: dataset.name, snapshotName: snapshotName)
+                            // Expand parent dataset and snapshots group to show new snapshot
+                            expandedDatasets.insert(dataset.name)
+                            expandedDatasets.insert("\(dataset.name)/@snapshots")
                             showCreateSnapshot = false
                         }
                     },
@@ -928,6 +931,8 @@ struct DatasetsView: View {
                     onCreate: { name, properties in
                         Task {
                             await viewModel.createDataset(name: name, type: "filesystem", properties: properties)
+                            // Expand parent dataset to show new child
+                            expandedDatasets.insert(dataset.name)
                             showCreateDataset = false
                         }
                     },
@@ -944,6 +949,8 @@ struct DatasetsView: View {
                     onCreate: { name, properties in
                         Task {
                             await viewModel.createDataset(name: name, type: "volume", properties: properties)
+                            // Expand parent dataset to show new ZVOL
+                            expandedDatasets.insert(dataset.name)
                             showCreateZvol = false
                         }
                     },
