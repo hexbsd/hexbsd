@@ -4740,7 +4740,7 @@ extension SSHConnectionManager {
     /// List all ZFS datasets with their properties
     func listZFSDatasets() async throws -> [ZFSDataset] {
         // Execute zfs list to get dataset information with all properties we need
-        let output = try await executeCommand("zfs list -H -o name,used,avail,refer,mountpoint,compression,compressratio,quota,reservation,type,sharenfs")
+        let output = try await executeCommand("zfs list -H -t all -o name,used,avail,refer,mountpoint,compression,compressratio,quota,reservation,type,sharenfs")
 
         var datasets: [ZFSDataset] = []
 

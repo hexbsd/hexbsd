@@ -655,12 +655,45 @@ class DatasetNode: Identifiable, ObservableObject {
     @Published var children: [DatasetNode] = []
     @Published var isExpanded: Bool = false
 
+    // For grouping snapshots under a single collapsible node
+    var isSnapshotsGroup: Bool = false
+    var snapshotCount: Int = 0
+
     var hasChildren: Bool {
         !children.isEmpty
     }
 
     init(dataset: ZFSDataset) {
         self.dataset = dataset
+    }
+
+    // Create a synthetic "Snapshots" group node
+    static func snapshotsGroup(parentName: String, snapshots: [ZFSDataset]) -> DatasetNode {
+        // Create a placeholder dataset for the group
+        let groupDataset = ZFSDataset(
+            name: "\(parentName)/@snapshots",
+            used: "-",
+            available: "-",
+            referenced: "-",
+            mountpoint: "-",
+            compression: "-",
+            compressRatio: "-",
+            quota: "-",
+            reservation: "-",
+            type: "snapshots_group",
+            sharenfs: "-"
+        )
+        let node = DatasetNode(dataset: groupDataset)
+        node.isSnapshotsGroup = true
+        node.snapshotCount = snapshots.count
+        node.isExpanded = false  // Collapsed by default
+
+        // Add individual snapshots as children of this group
+        for snapshot in snapshots {
+            node.children.append(DatasetNode(dataset: snapshot))
+        }
+
+        return node
     }
 }
 
@@ -734,13 +767,20 @@ struct DatasetsView: View {
             node.children.sort { $0.dataset.name < $1.dataset.name }
         }
 
-        // Add snapshots as children of their parent datasets
+        // Group snapshots by parent dataset and add as a collapsible "Snapshots" node
         let snapshots = viewModel.datasets.filter { $0.isSnapshot }.sorted { $0.name < $1.name }
+        var snapshotsByParent: [String: [ZFSDataset]] = [:]
         for snapshot in snapshots {
             let parentName = snapshot.name.components(separatedBy: "@")[0]
-            if let parent = nodes[parentName] {
-                let snapshotNode = DatasetNode(dataset: snapshot)
-                parent.children.append(snapshotNode)
+            snapshotsByParent[parentName, default: []].append(snapshot)
+        }
+
+        for (parentName, parentSnapshots) in snapshotsByParent {
+            if let parent = nodes[parentName], !parentSnapshots.isEmpty {
+                let snapshotsGroupNode = DatasetNode.snapshotsGroup(parentName: parentName, snapshots: parentSnapshots)
+                // Sync expanded state with expandedDatasets
+                snapshotsGroupNode.isExpanded = expandedDatasets.contains(snapshotsGroupNode.dataset.name)
+                parent.children.insert(snapshotsGroupNode, at: 0)  // Insert at beginning
             }
         }
 
@@ -1558,22 +1598,37 @@ struct DatasetNodeView: View {
                     }
 
                     // Dataset icon
-                    Image(systemName: node.dataset.icon)
-                        .foregroundColor(node.dataset.isSnapshot ? .orange : .blue)
-                        .frame(width: 16)
+                    if node.isSnapshotsGroup {
+                        Image(systemName: "camera.fill")
+                            .foregroundColor(.orange)
+                            .frame(width: 16)
+                    } else {
+                        Image(systemName: node.dataset.icon)
+                            .foregroundColor(node.dataset.isSnapshot ? .orange : .blue)
+                            .frame(width: 16)
+                    }
 
                     // Dataset name
                     HStack(spacing: 4) {
-                        Text(lastPathComponent(node.dataset.name))
-                            .font(.body)
+                        if node.isSnapshotsGroup {
+                            Text("Snapshots")
+                                .font(.body)
+                                .foregroundColor(.secondary)
+                            Text("(\(node.snapshotCount))")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text(lastPathComponent(node.dataset.name))
+                                .font(.body)
 
-                        if node.dataset.isSnapshot {
-                            Text("snapshot")
-                                .font(.caption2)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(Color.orange.opacity(0.2))
-                                .cornerRadius(3)
+                            if node.dataset.isSnapshot {
+                                Text("snapshot")
+                                    .font(.caption2)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background(Color.orange.opacity(0.2))
+                                    .cornerRadius(3)
+                            }
                         }
                     }
                 }
@@ -1581,27 +1636,27 @@ struct DatasetNodeView: View {
                 .padding(.leading, 8)
 
                 // Used column
-                Text(node.dataset.used)
+                Text(node.isSnapshotsGroup ? "" : node.dataset.used)
                     .font(.body)
                     .frame(width: 100, alignment: .leading)
 
                 // Available column
-                Text(node.dataset.available)
+                Text(node.isSnapshotsGroup ? "" : node.dataset.available)
                     .font(.body)
                     .frame(width: 100, alignment: .leading)
 
                 // Compression column
-                Text(node.dataset.compression != "-" ? "\(node.dataset.compression) (\(node.dataset.compressRatio))" : "-")
+                Text(node.isSnapshotsGroup ? "" : (node.dataset.compression != "-" ? "\(node.dataset.compression) (\(node.dataset.compressRatio))" : "-"))
                     .font(.body)
                     .frame(width: 120, alignment: .leading)
 
                 // Quota column
-                Text(node.dataset.quota)
+                Text(node.isSnapshotsGroup ? "" : node.dataset.quota)
                     .font(.body)
                     .frame(width: 100, alignment: .leading)
 
                 // Mountpoint column
-                Text(node.dataset.mountpoint)
+                Text(node.isSnapshotsGroup ? "" : node.dataset.mountpoint)
                     .font(.body)
                     .lineLimit(1)
                     .frame(minWidth: 150, alignment: .leading)
@@ -1610,9 +1665,21 @@ struct DatasetNodeView: View {
             }
             .padding(.vertical, 4)
             .contentShape(Rectangle())
-            .background(selectedDataset?.id == node.dataset.id ? Color.accentColor.opacity(0.2) : Color.clear)
+            .background(selectedDataset?.id == node.dataset.id && !node.isSnapshotsGroup ? Color.accentColor.opacity(0.2) : Color.clear)
             .onTapGesture {
-                selectedDataset = node.dataset
+                if node.isSnapshotsGroup {
+                    // Toggle expansion instead of selection for snapshots group
+                    withAnimation {
+                        if expandedDatasets.contains(node.dataset.name) {
+                            expandedDatasets.remove(node.dataset.name)
+                        } else {
+                            expandedDatasets.insert(node.dataset.name)
+                        }
+                        node.isExpanded.toggle()
+                    }
+                } else {
+                    selectedDataset = node.dataset
+                }
             }
 
             // Children (if expanded)
