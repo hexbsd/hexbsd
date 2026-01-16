@@ -942,6 +942,8 @@ SAVEHIST=10000
         print("DEBUG NIS Server: sysrc rpc_lockd_enable result: \(result)")
         result = try await sshManager.executeCommand("sysrc nfsv4_server_enable=\"YES\"")
         print("DEBUG NIS Server: sysrc nfsv4_server_enable result: \(result)")
+        result = try await sshManager.executeCommand("sysrc nfsuserd_enable=\"YES\"")
+        print("DEBUG NIS Server: sysrc nfsuserd_enable result: \(result)")
 
         // Create directories for network shares
         networkConfigStep = "Creating network directories..."
@@ -950,16 +952,34 @@ SAVEHIST=10000
         result = try await sshManager.executeCommand("mkdir -p \(networkUsersPath) /Network/Applications")
         print("DEBUG NIS Server: mkdir result: \(result)")
 
-        // Ensure /etc/exports exists (mountd requires it even if empty)
+        // Ensure /etc/exports exists with NFSv4 root line (required for NFSv4)
         networkConfigStep = "Configuring NFS exports..."
-        print("DEBUG NIS Server: Ensuring /etc/exports exists...")
-        result = try await sshManager.executeCommand("touch /etc/exports")
-        print("DEBUG NIS Server: touch /etc/exports result: \(result)")
+        print("DEBUG NIS Server: Configuring /etc/exports with NFSv4 root...")
+        let exportsExists = try await sshManager.executeCommand("cat /etc/exports 2>/dev/null || echo ''")
+        if !exportsExists.contains("V4:") {
+            // Add V4 root line for NFSv4 support
+            result = try await sshManager.executeCommand("echo 'V4: /' >> /etc/exports")
+            print("DEBUG NIS Server: Added V4 root line to /etc/exports: \(result)")
+        }
 
         // Configure ZFS NFS sharing using sharenfs property
-        print("DEBUG NIS Server: Configuring ZFS sharenfs property on zroot/Network...")
-        result = try await sshManager.executeCommand("zfs set sharenfs='-maproot=root -alldirs' zroot/Network")
-        print("DEBUG NIS Server: Set sharenfs on zroot/Network: \(result)")
+        if setupState.homeDirectoryStyle == .gnustep {
+            // GNUstep: Share /Network (contains /Network/Users and /Network/Applications)
+            print("DEBUG NIS Server: Configuring ZFS sharenfs property on zroot/Network...")
+            result = try await sshManager.executeCommand("zfs set sharenfs='-maproot=root -alldirs' zroot/Network")
+            print("DEBUG NIS Server: Set sharenfs on zroot/Network: \(result)")
+        } else {
+            // Traditional Unix: Share /home for network user home directories
+            print("DEBUG NIS Server: Configuring NFS export for /home...")
+            // First ensure /home exists and is a directory (not symlink)
+            _ = try await sshManager.executeCommand("mkdir -p /home")
+            // Add /home to /etc/exports for NFS sharing
+            let exportsContent = try await sshManager.executeCommand("cat /etc/exports 2>/dev/null || echo ''")
+            if !exportsContent.contains("/home") {
+                result = try await sshManager.executeCommand("echo '/home -alldirs -maproot=root' >> /etc/exports")
+                print("DEBUG NIS Server: Added /home to /etc/exports: \(result)")
+            }
+        }
 
         // Set up NIS database directory
         networkConfigStep = "Setting up NIS database..."
@@ -1122,6 +1142,10 @@ SAVEHIST=10000
         print("DEBUG NIS Server: Enabling domain firewall rules...")
         try await sshManager.enableDomainFirewallRules(role: "server")
 
+        let nfsShareInfo = setupState.homeDirectoryStyle == .gnustep
+            ? "✓ /Network shared via ZFS sharenfs"
+            : "✓ /home shared via /etc/exports"
+
         confirmationMessage = """
         NIS/NFS server configured and started successfully!
 
@@ -1130,7 +1154,7 @@ SAVEHIST=10000
         ✓ NIS server configured and started
         ✓ NIS client configured (server binds to itself)
         ✓ NFS server configured and started
-        ✓ /Network shared via ZFS sharenfs
+        \(nfsShareInfo)
 
         Service status:
         ypserv: \(ypservStatus.contains("running") ? "running" : "check status")
@@ -1204,27 +1228,49 @@ SAVEHIST=10000
         _ = try await sshManager.executeCommand("echo '+sudo-users ALL=(ALL) ALL' > /usr/local/etc/sudoers.d/network-users")
         _ = try await sshManager.executeCommand("chmod 440 /usr/local/etc/sudoers.d/network-users")
 
-        // Create mount point directory for /Network
-        networkConfigStep = "Creating mount point..."
-        print("DEBUG CLIENT: Creating /Network mount point...")
-        _ = try await sshManager.executeCommand("mkdir -p /Network")
+        // Create mount point directories and configure fstab based on home directory style
+        networkConfigStep = "Creating mount points..."
+        let nfsOptions = "rw,\(selectedNFSVersion.mountOption)"
 
-        // Configure /etc/fstab for /Network
-        networkConfigStep = "Configuring /etc/fstab..."
-        print("DEBUG CLIENT: Configuring /etc/fstab...")
-        let fstabContent = try await sshManager.executeCommand("cat /etc/fstab 2>/dev/null || echo ''")
-        print("DEBUG CLIENT: Current fstab content:\n\(fstabContent)")
+        if setupState.homeDirectoryStyle == .gnustep {
+            // GNUstep: Mount /Network from server (contains /Network/Users and /Network/Applications)
+            print("DEBUG CLIENT: Creating /Network mount point...")
+            _ = try await sshManager.executeCommand("mkdir -p /Network")
 
-        if !fstabContent.contains("/Network") {
-            let nfsOptions = "rw,\(selectedNFSVersion.mountOption)"
-            let fstabEntry = "\(nisServerAddress):/Network\t/Network\tnfs\t\(nfsOptions)\t0\t0"
-            print("DEBUG CLIENT: Adding fstab entry: \(fstabEntry)")
-            _ = try await sshManager.executeCommand("echo '\(fstabEntry)' >> /etc/fstab")
-            // Save NFS version preference
-            _ = try await sshManager.executeCommand("sysrc hexbsd_nfs_version=\"\(selectedNFSVersion.rawValue)\"")
+            networkConfigStep = "Configuring /etc/fstab..."
+            print("DEBUG CLIENT: Configuring /etc/fstab for /Network...")
+            let fstabContent = try await sshManager.executeCommand("cat /etc/fstab 2>/dev/null || echo ''")
+            print("DEBUG CLIENT: Current fstab content:\n\(fstabContent)")
+
+            if !fstabContent.contains("/Network") {
+                let fstabEntry = "\(nisServerAddress):/Network\t/Network\tnfs\t\(nfsOptions)\t0\t0"
+                print("DEBUG CLIENT: Adding fstab entry: \(fstabEntry)")
+                _ = try await sshManager.executeCommand("echo '\(fstabEntry)' >> /etc/fstab")
+            } else {
+                print("DEBUG CLIENT: /Network entry already exists in fstab")
+            }
         } else {
-            print("DEBUG CLIENT: /Network entry already exists in fstab")
+            // Traditional Unix: Mount /home from server for network user home directories
+            print("DEBUG CLIENT: Creating /home mount point...")
+            _ = try await sshManager.executeCommand("mkdir -p /home")
+
+            networkConfigStep = "Configuring /etc/fstab..."
+            print("DEBUG CLIENT: Configuring /etc/fstab for /home...")
+            let fstabContent = try await sshManager.executeCommand("cat /etc/fstab 2>/dev/null || echo ''")
+            print("DEBUG CLIENT: Current fstab content:\n\(fstabContent)")
+
+            // Add /home mount
+            if !fstabContent.contains(":/home") {
+                let homeEntry = "\(nisServerAddress):/home\t/home\tnfs\t\(nfsOptions)\t0\t0"
+                print("DEBUG CLIENT: Adding fstab entry for /home: \(homeEntry)")
+                _ = try await sshManager.executeCommand("echo '\(homeEntry)' >> /etc/fstab")
+            } else {
+                print("DEBUG CLIENT: /home entry already exists in fstab")
+            }
         }
+
+        // Save NFS version preference
+        _ = try await sshManager.executeCommand("sysrc hexbsd_nfs_version=\"\(selectedNFSVersion.rawValue)\"")
 
         // Start NIS client service
         networkConfigStep = "Starting NIS client service..."
@@ -1249,11 +1295,19 @@ SAVEHIST=10000
         let lockdResult = try await sshManager.executeCommand("service lockd onestart 2>&1 || true")
         print("DEBUG CLIENT: lockd start result: \(lockdResult)")
 
-        // Mount the network share
-        networkConfigStep = "Mounting /Network..."
-        print("DEBUG CLIENT: Mounting /Network...")
-        let mountResult = try await sshManager.executeCommand("mount /Network 2>&1 || true")
-        print("DEBUG CLIENT: mount /Network result: \(mountResult)")
+        // Mount the network shares
+        if setupState.homeDirectoryStyle == .gnustep {
+            networkConfigStep = "Mounting /Network..."
+            print("DEBUG CLIENT: Mounting /Network...")
+            let mountResult = try await sshManager.executeCommand("mount /Network 2>&1 || true")
+            print("DEBUG CLIENT: mount /Network result: \(mountResult)")
+        } else {
+            // Traditional Unix: Mount /home only
+            networkConfigStep = "Mounting /home..."
+            print("DEBUG CLIENT: Mounting /home...")
+            let homeResult = try await sshManager.executeCommand("mount /home 2>&1 || true")
+            print("DEBUG CLIENT: mount /home result: \(homeResult)")
+        }
 
         // Verify NIS connectivity
         networkConfigStep = "Verifying NIS connectivity..."
@@ -1279,12 +1333,16 @@ SAVEHIST=10000
             }
         }
 
+        let mountInfo = setupState.homeDirectoryStyle == .gnustep
+            ? "✓ /Network mounted from \(nisServerAddress)"
+            : "✓ /home mounted from \(nisServerAddress)"
+
         let configSteps = """
         Configuration completed:
         ✓ NIS domain: \(nisDomainName)
         ✓ NIS server: \(nisServerAddress)
         ✓ Services started (ypbind, nfsclient, lockd)
-        ✓ /Network mounted from \(nisServerAddress)
+        \(mountInfo)
         """
 
         print("DEBUG CLIENT: NIS client setup completed successfully!")
@@ -1325,13 +1383,23 @@ SAVEHIST=10000
             _ = try await sshManager.executeCommand("service lockd stop 2>&1 || true")
             _ = try await sshManager.executeCommand("service nfsclient stop 2>&1 || true")
 
-            // Unmount /Network
-            networkConfigStep = "Unmounting /Network..."
-            _ = try await sshManager.executeCommand("umount /Network 2>&1 || true")
+            // Unmount NFS shares based on home directory style
+            if setupState.homeDirectoryStyle == .gnustep {
+                networkConfigStep = "Unmounting /Network..."
+                _ = try await sshManager.executeCommand("umount /Network 2>&1 || true")
 
-            // Remove /Network from /etc/fstab
-            networkConfigStep = "Removing /Network from fstab..."
-            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/\\/Network/d' /etc/fstab")
+                // Remove /Network from /etc/fstab
+                networkConfigStep = "Removing /Network from fstab..."
+                _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/:\\/Network/d' /etc/fstab")
+            } else {
+                // Traditional Unix: Unmount /home only
+                networkConfigStep = "Unmounting /home..."
+                _ = try await sshManager.executeCommand("umount /home 2>&1 || true")
+
+                // Remove /home from /etc/fstab
+                networkConfigStep = "Removing /home from fstab..."
+                _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/:\\/home/d' /etc/fstab")
+            }
 
             // Disable NIS client in rc.conf
             networkConfigStep = "Disabling NIS client..."
@@ -1361,9 +1429,11 @@ SAVEHIST=10000
             // Remove sudoers network-users config
             _ = try await sshManager.executeCommand("rm -f /usr/local/etc/sudoers.d/network-users 2>/dev/null || true")
 
-            // Remount /Network ZFS dataset
-            networkConfigStep = "Remounting /Network ZFS dataset..."
-            _ = try await sshManager.executeCommand("zfs mount /Network 2>&1 || true")
+            // Remount /Network ZFS dataset (GNUstep only)
+            if setupState.homeDirectoryStyle == .gnustep {
+                networkConfigStep = "Remounting /Network ZFS dataset..."
+                _ = try await sshManager.executeCommand("zfs mount /Network 2>&1 || true")
+            }
 
             // Remove domain firewall rules if firewall is active
             networkConfigStep = "Removing firewall rules..."
@@ -1374,14 +1444,17 @@ SAVEHIST=10000
             // Reload state
             await loadSetupState()
 
+            let unmountInfo = setupState.homeDirectoryStyle == .gnustep
+                ? "✓ /Network NFS unmounted and removed from fstab\n✓ /Network ZFS dataset remounted"
+                : "✓ /home NFS unmounted and removed from fstab"
+
             confirmationMessage = """
             Successfully left the network domain.
 
             Configuration removed:
             ✓ NIS client disabled
             ✓ NFS client disabled
-            ✓ /Network NFS unmounted and removed from fstab
-            ✓ /Network ZFS dataset remounted
+            \(unmountInfo)
             ✓ nsswitch.conf restored to default
 
             This system is now configured as a standalone machine.
@@ -1419,9 +1492,11 @@ SAVEHIST=10000
             _ = try await sshManager.executeCommand("service lockd stop 2>&1 || true")
             _ = try await sshManager.executeCommand("service statd stop 2>&1 || true")
 
-            // Remove ZFS NFS sharing
+            // Remove NFS sharing
             networkConfigStep = "Removing NFS shares..."
             _ = try await sshManager.executeCommand("zfs set sharenfs=off zroot/Network 2>&1 || true")
+            // Remove /home from /etc/exports (for Traditional Unix)
+            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/^\\/home/d' /etc/exports 2>/dev/null || true")
 
             // Disable NIS server in rc.conf
             networkConfigStep = "Disabling NIS server..."
@@ -1434,9 +1509,12 @@ SAVEHIST=10000
             // Disable NFS server in rc.conf
             networkConfigStep = "Disabling NFS server..."
             _ = try await sshManager.executeCommand("sysrc -x nfs_server_enable 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("sysrc -x nfsv4_server_enable 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("sysrc -x nfsuserd_enable 2>/dev/null || true")
             _ = try await sshManager.executeCommand("sysrc -x mountd_enable 2>/dev/null || true")
             _ = try await sshManager.executeCommand("sysrc -x rpc_lockd_enable 2>/dev/null || true")
             _ = try await sshManager.executeCommand("sysrc -x rpc_statd_enable 2>/dev/null || true")
+            _ = try await sshManager.executeCommand("service nfsuserd stop 2>&1 || true")
 
             // Remove NIS compat entries from passwd/group files
             networkConfigStep = "Removing NIS compat entries..."
