@@ -703,6 +703,7 @@ struct DatasetsView: View {
     @State private var showCreateSnapshot = false
     @State private var showCloneDataset = false
     @State private var showCreateDataset = false
+    @State private var showCreateZvol = false
     @State private var showModifyProperties = false
     @State private var snapshotName = ""
     @State private var cloneDestination = ""
@@ -924,14 +925,30 @@ struct DatasetsView: View {
             if let dataset = selectedDataset {
                 CreateDatasetSheet(
                     parentDataset: dataset.name,
-                    onCreate: { name, type, properties in
+                    onCreate: { name, properties in
                         Task {
-                            await viewModel.createDataset(name: name, type: type, properties: properties)
+                            await viewModel.createDataset(name: name, type: "filesystem", properties: properties)
                             showCreateDataset = false
                         }
                     },
                     onCancel: {
                         showCreateDataset = false
+                    }
+                )
+            }
+        }
+        .sheet(isPresented: $showCreateZvol) {
+            if let dataset = selectedDataset {
+                CreateZvolSheet(
+                    parentDataset: dataset.name,
+                    onCreate: { name, properties in
+                        Task {
+                            await viewModel.createDataset(name: name, type: "volume", properties: properties)
+                            showCreateZvol = false
+                        }
+                    },
+                    onCancel: {
+                        showCreateZvol = false
                     }
                 )
             }
@@ -1031,6 +1048,13 @@ struct DatasetsView: View {
                             Label("New Dataset", systemImage: "plus")
                         }
                         .buttonStyle(.borderedProminent)
+
+                        Button(action: {
+                            showCreateZvol = true
+                        }) {
+                            Label("New ZVOL", systemImage: "externaldrive.fill")
+                        }
+                        .buttonStyle(.bordered)
 
                         Button(action: {
                             snapshotName = ""
@@ -2718,12 +2742,15 @@ class ZFSViewModel: ObservableObject {
     }
 
     func createDataset(name: String, type: String, properties: [String: String]) async {
+        print("DEBUG: ViewModel.createDataset called - name: \(name), type: \(type), properties: \(properties)")
         error = nil
 
         do {
             try await sshManager.createZFSDataset(name: name, type: type, properties: properties)
+            print("DEBUG: Dataset created successfully, refreshing...")
             await refreshDatasets()
         } catch {
+            print("DEBUG: ViewModel.createDataset error: \(error)")
             self.error = "Failed to create dataset: \(error.localizedDescription)"
         }
     }
@@ -2756,11 +2783,10 @@ class ZFSViewModel: ObservableObject {
 
 struct CreateDatasetSheet: View {
     let parentDataset: String
-    let onCreate: (String, String, [String: String]) -> Void
+    let onCreate: (String, [String: String]) -> Void
     let onCancel: () -> Void
 
     @State private var datasetName = ""
-    @State private var datasetType = "filesystem"
     @State private var compression = "lz4"
     @State private var quota = ""
     @State private var mountpoint = ""
@@ -2805,15 +2831,168 @@ struct CreateDatasetSheet: View {
                             .foregroundColor(.secondary)
                     }
 
-                    // Type
+                    Divider()
+
+                    Text("Properties")
+                        .font(.headline)
+
+                    // Compression
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Type")
-                            .font(.headline)
-                        Picker("Type", selection: $datasetType) {
-                            Text("Filesystem").tag("filesystem")
-                            Text("Volume").tag("volume")
+                        Text("Compression")
+                            .font(.subheadline)
+                        Picker("Compression", selection: $compression) {
+                            Text("Off").tag("off")
+                            Text("LZ4 (Recommended)").tag("lz4")
+                            Text("GZIP").tag("gzip")
+                            Text("ZLE").tag("zle")
                         }
-                        .pickerStyle(.radioGroup)
+                        .frame(width: 250)
+                    }
+
+                    // Record size
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Record Size")
+                            .font(.subheadline)
+                        Picker("Record Size", selection: $recordsize) {
+                            Text("128K (Default)").tag("128K")
+                            Text("64K").tag("64K")
+                            Text("256K").tag("256K")
+                            Text("512K").tag("512K")
+                            Text("1M").tag("1M")
+                        }
+                        .frame(width: 250)
+                    }
+
+                    // Quota
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Quota (Optional)")
+                            .font(.subheadline)
+                        TextField("e.g., 100G", text: $quota)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 200)
+                        Text("Leave empty for no quota")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    // Mountpoint
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Mountpoint (Optional)")
+                            .font(.subheadline)
+                        TextField("Leave empty for default", text: $mountpoint)
+                            .textFieldStyle(.roundedBorder)
+                        Text("Custom mount location (default: /pool/dataset)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding()
+            }
+            .frame(height: 400)
+
+            Divider()
+
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Button("Create Dataset") {
+                    var properties: [String: String] = [:]
+                    properties["compression"] = compression
+                    properties["recordsize"] = recordsize
+
+                    if !mountpoint.isEmpty {
+                        properties["mountpoint"] = mountpoint
+                    }
+
+                    if !quota.isEmpty {
+                        properties["quota"] = quota
+                    }
+
+                    let fullName = "\(parentDataset)/\(datasetName)"
+                    onCreate(fullName, properties)
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(datasetName.isEmpty)
+            }
+            .padding()
+        }
+        .frame(width: 540)
+    }
+}
+
+// MARK: - Create ZVOL Sheet
+
+struct CreateZvolSheet: View {
+    let parentDataset: String
+    let onCreate: (String, [String: String]) -> Void
+    let onCancel: () -> Void
+
+    @State private var zvolName = ""
+    @State private var volumeSize = ""
+    @State private var compression = "lz4"
+    @State private var volblocksize = "8K"
+    @State private var sparse = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Create New ZVOL")
+                .font(.title2)
+                .fontWeight(.semibold)
+                .padding(.top, 20)
+                .padding(.bottom, 16)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    // Parent dataset (read-only)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Parent Dataset")
+                            .font(.headline)
+                        Text(parentDataset)
+                            .font(.body)
+                            .foregroundColor(.primary)
+                            .padding(8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(nsColor: .controlBackgroundColor))
+                            .cornerRadius(6)
+                        Text("New ZVOL will be created under this parent")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    // ZVOL name
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("ZVOL Name")
+                            .font(.headline)
+                        TextField("e.g., disk0", text: $zvolName)
+                            .textFieldStyle(.roundedBorder)
+                        Text("Enter just the name for the new ZVOL")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    // Volume Size (required)
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Volume Size")
+                                .font(.headline)
+                            Text("(Required)")
+                                .font(.caption)
+                                .foregroundColor(.orange)
+                        }
+                        TextField("e.g., 10G", text: $volumeSize)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 200)
+                        Text("Size with suffix: K, M, G, T (e.g., 10G, 500M)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
 
                     Divider()
@@ -2834,45 +3013,31 @@ struct CreateDatasetSheet: View {
                         .frame(width: 250)
                     }
 
-                    // Record size (for filesystems)
-                    if datasetType == "filesystem" {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Record Size")
-                                .font(.subheadline)
-                            Picker("Record Size", selection: $recordsize) {
-                                Text("128K (Default)").tag("128K")
-                                Text("64K").tag("64K")
-                                Text("256K").tag("256K")
-                                Text("512K").tag("512K")
-                                Text("1M").tag("1M")
-                            }
-                            .frame(width: 250)
-                        }
-                    }
-
-                    // Quota
+                    // Block Size
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Quota (Optional)")
+                        Text("Block Size")
                             .font(.subheadline)
-                        TextField("e.g., 100G", text: $quota)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 200)
-                        Text("Leave empty for no quota")
+                        Picker("Block Size", selection: $volblocksize) {
+                            Text("8K (Default)").tag("8K")
+                            Text("4K").tag("4K")
+                            Text("16K").tag("16K")
+                            Text("32K").tag("32K")
+                            Text("64K").tag("64K")
+                            Text("128K").tag("128K")
+                        }
+                        .frame(width: 250)
+                        Text("Smaller blocks = better random I/O, larger = better sequential")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
 
-                    // Mountpoint
-                    if datasetType == "filesystem" {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Mountpoint (Optional)")
-                                .font(.subheadline)
-                            TextField("Leave empty for default", text: $mountpoint)
-                                .textFieldStyle(.roundedBorder)
-                            Text("Custom mount location (default: /pool/dataset)")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
+                    // Sparse option
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Sparse Volume (Thin Provisioning)", isOn: $sparse)
+                            .font(.subheadline)
+                        Text("Sparse volumes don't reserve space until data is written")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
                 }
                 .padding()
@@ -2889,28 +3054,22 @@ struct CreateDatasetSheet: View {
 
                 Spacer()
 
-                Button("Create Dataset") {
+                Button("Create ZVOL") {
                     var properties: [String: String] = [:]
+                    properties["volsize"] = volumeSize
                     properties["compression"] = compression
+                    properties["volblocksize"] = volblocksize
 
-                    if datasetType == "filesystem" {
-                        properties["recordsize"] = recordsize
-                        if !mountpoint.isEmpty {
-                            properties["mountpoint"] = mountpoint
-                        }
+                    if sparse {
+                        properties["refreservation"] = "none"
                     }
 
-                    if !quota.isEmpty {
-                        properties["quota"] = quota
-                    }
-
-                    // Combine parent dataset and new name
-                    let fullName = "\(parentDataset)/\(datasetName)"
-                    onCreate(fullName, datasetType, properties)
+                    let fullName = "\(parentDataset)/\(zvolName)"
+                    onCreate(fullName, properties)
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
-                .disabled(datasetName.isEmpty)
+                .disabled(zvolName.isEmpty || volumeSize.isEmpty)
             }
             .padding()
         }

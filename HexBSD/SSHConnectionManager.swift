@@ -4790,11 +4790,15 @@ extension SSHConnectionManager {
 
     /// Create a new ZFS dataset
     func createZFSDataset(name: String, type: String = "filesystem", properties: [String: String] = [:]) async throws {
+        print("DEBUG: createZFSDataset called - name: \(name), type: \(type), properties: \(properties)")
+
         var command = "zfs create"
 
-        // Add properties
-        for (key, value) in properties {
-            command += " -o \(key)=\(value)"
+        // Add properties for filesystem
+        if type != "volume" {
+            for (key, value) in properties {
+                command += " -o \(key)=\(value)"
+            }
         }
 
         // Add -V for volumes (zvol)
@@ -4807,12 +4811,30 @@ extension SSHConnectionManager {
                     command += " -o \(key)=\(value)"
                 }
             } else {
+                print("DEBUG: Volume size missing!")
                 throw NSError(domain: "ZFS", code: -1, userInfo: [NSLocalizedDescriptionKey: "Volume size (volsize) is required for volume creation"])
             }
         }
 
         command += " \(name)"
-        _ = try await executeCommand(command)
+        print("DEBUG: Final ZFS command: \(command)")
+
+        // Use executeCommandDetailed to handle ZFS warnings properly
+        // ZFS outputs warnings to stderr even on success
+        let result = try await executeCommandDetailed(command)
+        print("DEBUG: ZFS create stdout: \(result.stdout)")
+        print("DEBUG: ZFS create stderr: \(result.stderr)")
+
+        // Check if stderr contains actual errors (not just warnings)
+        let stderr = result.stderr.lowercased()
+        if stderr.contains("cannot create") || stderr.contains("failed") || stderr.contains("error:") || stderr.contains("no such") {
+            throw NSError(domain: "ZFS", code: -1, userInfo: [NSLocalizedDescriptionKey: result.stderr])
+        }
+
+        // If stderr only contains warnings, log them but don't fail
+        if !result.stderr.isEmpty {
+            print("DEBUG: ZFS warning (non-fatal): \(result.stderr)")
+        }
     }
 
     /// Destroy (delete) a ZFS dataset or volume
