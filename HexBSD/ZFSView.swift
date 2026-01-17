@@ -7,6 +7,7 @@
 
 import SwiftUI
 import AppKit
+import Network
 
 // MARK: - Data Models
 
@@ -621,6 +622,109 @@ struct ReplicationKeySetupSheet: View {
     }
 }
 
+// MARK: - Server-to-Server SSH Setup Sheet
+
+struct ServerToServerSSHSetupSheet: View {
+    let server: SavedServer
+    let status: String
+    let error: String?
+    let isSettingUp: Bool
+    let onSetup: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Server-to-Server SSH Setup")
+                .font(.title2)
+                .fontWeight(.semibold)
+                .padding(.top, 20)
+                .padding(.bottom, 16)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 20) {
+                // Explanation
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Replication Setup Required")
+                        .font(.headline)
+                    Text("For scheduled replication to work, the source server needs SSH access to **\(server.host)**.")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                    Text("This will:")
+                        .font(.subheadline)
+                        .padding(.top, 4)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("Create a replication SSH key on the source server", systemImage: "key.fill")
+                        Label("Add the key to \(server.host)'s authorized_keys", systemImage: "checkmark.shield.fill")
+                        Label("Update the source server's known_hosts", systemImage: "network")
+                    }
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                }
+                .padding()
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(8)
+
+                // Status area
+                if isSettingUp {
+                    HStack(spacing: 12) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(status)
+                            .font(.body)
+                            .foregroundColor(.blue)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.blue.opacity(0.1))
+                    .cornerRadius(8)
+                }
+
+                if let error = error {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.red)
+                        Text(error)
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.red.opacity(0.1))
+                    .cornerRadius(8)
+                }
+            }
+            .padding()
+
+            Spacer()
+
+            Divider()
+
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Button("Set Up SSH") {
+                    onSetup()
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(isSettingUp)
+            }
+            .padding()
+        }
+        .frame(width: 500, height: 450)
+        .onAppear {
+            // Automatically start setup when sheet appears
+            onSetup()
+        }
+    }
+}
+
 // MARK: - Replication Choice Sheet
 
 struct ReplicationChoiceSheet: View {
@@ -630,6 +734,163 @@ struct ReplicationChoiceSheet: View {
     let onOneTime: () -> Void
     let onSchedule: (String) -> Void
     let onCancel: () -> Void
+
+    @State private var isSettingUpSSH = false
+    @State private var sshSetupError: String?
+    @State private var sshSetupComplete = false
+    @State private var sshSetupStatus: String = ""
+
+    // Set up SSH between source and target servers for replication
+    // Uses id_replication key (consistent with HexBSD naming convention)
+    // Since the Mac app can connect to both servers, it can:
+    // 1. Check/create id_replication key on source server
+    // 2. Get source server's id_replication.pub
+    // 3. Add it to target server's authorized_keys
+    // 4. Update known_hosts on source server
+    @MainActor
+    private func setupSSHForReplication() async {
+        isSettingUpSSH = true
+        sshSetupError = nil
+        sshSetupStatus = "Checking replication key on source server..."
+
+        do {
+            let targetHost = targetServer.host
+            let targetUser = targetServer.username
+            let replicationKeyPath = "~/.ssh/id_replication"
+            let replicationPubKeyPath = "~/.ssh/id_replication.pub"
+
+            // Step 1: Check if source server has id_replication key
+            print("DEBUG: Checking for replication key at \(replicationKeyPath)")
+            let keyCheckResult = try await SSHConnectionManager.shared.executeCommand(
+                "test -f \(replicationKeyPath) && echo 'KEY_EXISTS' || echo 'NO_KEY'"
+            )
+            print("DEBUG: Key check result: \(keyCheckResult)")
+
+            var sourcePubKey: String
+
+            if keyCheckResult.contains("NO_KEY") {
+                // Create id_replication key on source server
+                print("DEBUG: Creating replication key...")
+                sshSetupStatus = "Creating replication key on source server..."
+                let createResult = try await SSHConnectionManager.shared.executeCommand(
+                    "mkdir -p ~/.ssh && chmod 700 ~/.ssh && ssh-keygen -t ed25519 -f \(replicationKeyPath) -N '' -C 'HexBSD-replication' -q && echo 'KEY_CREATED'"
+                )
+                print("DEBUG: Key creation result: \(createResult)")
+            }
+
+            // Get the public key
+            sshSetupStatus = "Reading replication public key..."
+            sourcePubKey = try await SSHConnectionManager.shared.executeCommand("cat \(replicationPubKeyPath)")
+            sourcePubKey = sourcePubKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            print("DEBUG: Public key: \(sourcePubKey.prefix(50))...")
+
+            if sourcePubKey.isEmpty {
+                throw NSError(domain: "SSHSetup", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to read replication public key"])
+            }
+
+            // Step 2: Update known_hosts on source server (add target's host key)
+            sshSetupStatus = "Updating known_hosts for \(targetHost)..."
+            print("DEBUG: Updating known_hosts for \(targetHost)")
+            let _ = try await SSHConnectionManager.shared.executeCommand(
+                "ssh-keygen -R \(targetHost) 2>/dev/null; ssh-keyscan -H \(targetHost) >> ~/.ssh/known_hosts 2>/dev/null"
+            )
+
+            // Step 3: Test if SSH connection works from source to target using the replication key
+            sshSetupStatus = "Testing SSH to \(targetHost)..."
+            print("DEBUG: Testing SSH connection to \(targetUser)@\(targetHost)")
+            let testResult = try await SSHConnectionManager.shared.executeCommand(
+                "ssh -i \(replicationKeyPath) -o BatchMode=yes -o ConnectTimeout=5 \(targetUser)@\(targetHost) 'echo SSH_OK' 2>&1; true"
+            )
+            print("DEBUG: SSH test result: \(testResult)")
+
+            if testResult.contains("SSH_OK") {
+                // Connection works, proceed
+                sshSetupStatus = "SSH connection verified!"
+                print("DEBUG: SSH connection verified!")
+            } else if testResult.contains("Permission denied") || testResult.contains("publickey") {
+                // Auth failure - need to add source's replication key to target's authorized_keys
+                print("DEBUG: Auth failed, adding key to target...")
+                sshSetupStatus = "Adding replication key to \(targetHost)..."
+                try await addPublicKeyToTarget(pubKey: sourcePubKey)
+
+                // Test again after setting up auth
+                sshSetupStatus = "Verifying SSH connection..."
+                let retestResult = try await SSHConnectionManager.shared.executeCommand(
+                    "ssh -i \(replicationKeyPath) -o BatchMode=yes -o ConnectTimeout=5 \(targetUser)@\(targetHost) 'echo SSH_OK' 2>&1; true"
+                )
+                print("DEBUG: Retest result: \(retestResult)")
+
+                if !retestResult.contains("SSH_OK") {
+                    throw NSError(domain: "SSHSetup", code: 2, userInfo: [NSLocalizedDescriptionKey: "SSH setup failed. Error: \(retestResult)"])
+                }
+
+                sshSetupStatus = "SSH key authorization complete!"
+            } else if testResult.contains("Could not resolve") || testResult.contains("No route to host") || testResult.contains("Connection refused") {
+                // Network/connectivity issue
+                throw NSError(domain: "SSHSetup", code: 4, userInfo: [NSLocalizedDescriptionKey: "Cannot reach \(targetHost). Check network connectivity."])
+            } else {
+                // Unknown error
+                throw NSError(domain: "SSHSetup", code: 5, userInfo: [NSLocalizedDescriptionKey: "SSH test failed: \(testResult)"])
+            }
+
+            sshSetupComplete = true
+
+            // Proceed to schedule after a brief delay to show success
+            try await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+            onSchedule(replicationCommand)
+
+        } catch {
+            print("DEBUG: SSH setup error: \(error)")
+            sshSetupError = error.localizedDescription
+            sshSetupStatus = ""
+        }
+
+        isSettingUpSSH = false
+    }
+
+    // Add source server's public key to target server's authorized_keys
+    // This works because the Mac app can connect to the target server directly
+    private func addPublicKeyToTarget(pubKey: String) async throws {
+        // Connect to the target server using the server's configured key (the one that works)
+        let targetManager = SSHConnectionManager()
+
+        sshSetupStatus = "Connecting to \(targetServer.host) to add SSH key..."
+
+        // Use the server's configured keyPath - this is what the user set up for this server
+        let keyPath = (targetServer.keyPath as NSString).expandingTildeInPath
+        print("DEBUG: Connecting to \(targetServer.host) using configured key: \(keyPath)")
+
+        let authMethod = SSHAuthMethod(
+            username: targetServer.username,
+            privateKeyURL: URL(fileURLWithPath: keyPath)
+        )
+
+        try await targetManager.connect(
+            host: targetServer.host,
+            port: targetServer.port,
+            authMethod: authMethod
+        )
+
+        // First check if the key is already in authorized_keys
+        sshSetupStatus = "Checking authorized_keys on \(targetServer.host)..."
+        let existingKeys = try await targetManager.executeCommand("cat ~/.ssh/authorized_keys 2>/dev/null || echo ''")
+
+        if existingKeys.contains(pubKey) {
+            print("DEBUG: Key already exists in authorized_keys")
+            sshSetupStatus = "Key already authorized on \(targetServer.host)"
+        } else {
+            print("DEBUG: Adding key to authorized_keys")
+            sshSetupStatus = "Adding SSH key to \(targetServer.host)..."
+
+            // Add the public key to authorized_keys on the target
+            // Use sort -u to avoid duplicates
+            let _ = try await targetManager.executeCommand(
+                "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '\(pubKey)' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && sort -u ~/.ssh/authorized_keys -o ~/.ssh/authorized_keys"
+            )
+        }
+
+        await targetManager.disconnect()
+    }
 
     private var sourceBaseName: String {
         sourceDataset.name.components(separatedBy: "@")[0]
@@ -655,8 +916,9 @@ struct ReplicationChoiceSheet: View {
         // 2. Finds the previous auto- snapshot if any
         // 3. Does incremental send if previous exists, otherwise full send
         // NOTE: % must be escaped as \% in crontab (% means newline in cron)
+        // Uses id_replication key for server-to-server SSH
         return """
-SNAP="\(dataset)@auto-$(date +\\%Y\\%m\\%d-\\%H\\%M\\%S)" && zfs snapshot "$SNAP" && PREV=$(zfs list -t snapshot -o name -S creation \(dataset) 2>/dev/null | grep '@auto-' | sed -n '2p') && if [ -n "$PREV" ]; then zfs send -i "$PREV" "$SNAP" | ssh -o StrictHostKeyChecking=no \(target) 'zfs receive -F \(dest)'; else zfs send "$SNAP" | ssh -o StrictHostKeyChecking=no \(target) 'zfs receive -F \(dest)'; fi
+SNAP="\(dataset)@auto-$(date +\\%Y\\%m\\%d-\\%H\\%M\\%S)" && zfs snapshot "$SNAP" && PREV=$(zfs list -t snapshot -o name -S creation \(dataset) 2>/dev/null | grep '@auto-' | sed -n '2p') && if [ -n "$PREV" ]; then zfs send -i "$PREV" "$SNAP" | ssh -i ~/.ssh/id_replication -o StrictHostKeyChecking=no \(target) 'zfs receive -F \(dest)'; else zfs send "$SNAP" | ssh -i ~/.ssh/id_replication -o StrictHostKeyChecking=no \(target) 'zfs receive -F \(dest)'; fi
 """
     }
 
@@ -735,18 +997,34 @@ SNAP="\(dataset)@auto-$(date +\\%Y\\%m\\%d-\\%H\\%M\\%S)" && zfs snapshot "$SNAP
                     .buttonStyle(.plain)
 
                     // Scheduled option
-                    Button(action: { onSchedule(replicationCommand) }) {
+                    Button(action: {
+                        Task {
+                            await setupSSHForReplication()
+                        }
+                    }) {
                         HStack {
-                            Image(systemName: "clock.fill")
-                                .font(.title2)
-                                .foregroundColor(.orange)
+                            if isSettingUpSSH {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .frame(width: 24, height: 24)
+                            } else {
+                                Image(systemName: sshSetupComplete ? "checkmark.circle.fill" : "clock.fill")
+                                    .font(.title2)
+                                    .foregroundColor(sshSetupComplete ? .green : .orange)
+                            }
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Schedule Recurring Replication")
                                     .font(.headline)
                                     .foregroundColor(.primary)
-                                Text("Set up automatic backups (hourly, daily, etc.)")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
+                                if isSettingUpSSH {
+                                    Text(sshSetupStatus)
+                                        .font(.caption)
+                                        .foregroundColor(.blue)
+                                } else {
+                                    Text("Set up automatic backups (hourly, daily, etc.)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
                             }
                             Spacer()
                             Image(systemName: "chevron.right")
@@ -757,6 +1035,19 @@ SNAP="\(dataset)@auto-$(date +\\%Y\\%m\\%d-\\%H\\%M\\%S)" && zfs snapshot "$SNAP
                         .cornerRadius(8)
                     }
                     .buttonStyle(.plain)
+                    .disabled(isSettingUpSSH)
+
+                    // Show error if SSH setup failed
+                    if let error = sshSetupError {
+                        HStack {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(.red)
+                            Text(error)
+                                .font(.caption)
+                                .foregroundColor(.red)
+                        }
+                        .padding(.horizontal)
+                    }
                 }
             }
             .padding()
@@ -774,7 +1065,7 @@ SNAP="\(dataset)@auto-$(date +\\%Y\\%m\\%d-\\%H\\%M\\%S)" && zfs snapshot "$SNAP
             }
             .padding()
         }
-        .frame(width: 500, height: 550)
+        .frame(width: 500, height: 580)
     }
 }
 
@@ -1543,6 +1834,12 @@ struct DatasetsView: View {
     @State private var pendingReplicationServer: SavedServer? = nil
     @State private var pendingReplicationInfo: PendingReplication? = nil
     @State private var pendingScheduledReplication: ScheduledReplicationInfo? = nil
+    @State private var pendingServerToServerSetup: SavedServer? = nil
+    @State private var serverToServerSetupStatus: String = ""
+    @State private var serverToServerSetupError: String? = nil
+    @State private var isSettingUpServerToServer = false
+    @State private var onlineServers: Set<String> = []  // Server IDs that are online
+    @State private var isCheckingServers = false
 
     struct PendingReplication: Identifiable {
         let id = UUID()
@@ -1711,13 +2008,45 @@ struct DatasetsView: View {
 
                     Picker("", selection: $selectedReplicationServer) {
                         Text("None").tag(nil as String?)
-                        ForEach(savedServers, id: \.id) { server in
+                        // Only show online servers
+                        ForEach(savedServers.filter { onlineServers.contains($0.id.uuidString) }, id: \.id) { server in
                             Text(server.name).tag(server.id.uuidString as String?)
                         }
                     }
                     .frame(width: 200)
                     .onChange(of: selectedReplicationServer) { oldValue, newValue in
                         handleServerSelection(newValue)
+                    }
+
+                    // Show setup progress, checking status, or offline count
+                    if isSettingUpServerToServer {
+                        HStack(spacing: 4) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text(serverToServerSetupStatus)
+                                .font(.caption)
+                                .foregroundColor(.blue)
+                        }
+                    } else if let error = serverToServerSetupError {
+                        HStack(spacing: 4) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(.orange)
+                                .font(.caption)
+                            Text(error)
+                                .font(.caption)
+                                .foregroundColor(.orange)
+                                .lineLimit(1)
+                        }
+                    } else if isCheckingServers {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        let offlineCount = savedServers.count - onlineServers.count
+                        if offlineCount > 0 {
+                            Text("\(offlineCount) offline")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
             }
@@ -1842,22 +2171,6 @@ struct DatasetsView: View {
                     }
                 )
             }
-        }
-        .sheet(item: $pendingReplicationServer) { server in
-            ReplicationKeySetupSheet(
-                server: server,
-                onComplete: {
-                    pendingReplicationServer = nil
-                    // Now connect with the key set up
-                    Task {
-                        await connectToTargetServer(server)
-                    }
-                },
-                onCancel: {
-                    pendingReplicationServer = nil
-                    selectedReplicationServer = nil
-                }
-            )
         }
         .sheet(item: $pendingReplicationInfo) { info in
             ReplicationChoiceSheet(
@@ -2379,6 +2692,80 @@ struct DatasetsView: View {
            let decoded = try? JSONDecoder().decode([SavedServer].self, from: data) {
             // Filter out the currently connected server
             savedServers = decoded.filter { $0.host != SSHConnectionManager.shared.serverAddress }
+
+            // Check which servers are online
+            Task {
+                await checkServersOnline()
+            }
+        }
+    }
+
+    // Check connectivity to each saved server (quick TCP check to port 22)
+    private func checkServersOnline() async {
+        isCheckingServers = true
+        var online: Set<String> = []
+
+        await withTaskGroup(of: (String, Bool).self) { group in
+            for server in savedServers {
+                group.addTask {
+                    let isOnline = await self.checkHostReachable(host: server.host, port: server.port)
+                    return (server.id.uuidString, isOnline)
+                }
+            }
+
+            for await (serverId, isOnline) in group {
+                if isOnline {
+                    online.insert(serverId)
+                }
+            }
+        }
+
+        await MainActor.run {
+            onlineServers = online
+            isCheckingServers = false
+        }
+    }
+
+    // Quick TCP connectivity check
+    private func checkHostReachable(host: String, port: Int) async -> Bool {
+        return await withCheckedContinuation { continuation in
+            var hasResumed = false
+            let lock = NSLock()
+
+            func resumeOnce(with result: Bool) {
+                lock.lock()
+                defer { lock.unlock() }
+                if !hasResumed {
+                    hasResumed = true
+                    continuation.resume(returning: result)
+                }
+            }
+
+            let socket = NWConnection(
+                host: NWEndpoint.Host(host),
+                port: NWEndpoint.Port(integerLiteral: UInt16(port)),
+                using: .tcp
+            )
+
+            socket.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    socket.cancel()
+                    resumeOnce(with: true)
+                case .failed, .cancelled:
+                    resumeOnce(with: false)
+                default:
+                    break
+                }
+            }
+
+            socket.start(queue: .global())
+
+            // Timeout after 2 seconds
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                socket.cancel()
+                resumeOnce(with: false)
+            }
         }
     }
 
@@ -2390,19 +2777,272 @@ struct DatasetsView: View {
             return
         }
 
-        // Check if replication key exists and is set up
-        let replicationKeyPath = NSHomeDirectory() + "/.ssh/id_replication"
-        let replicationKeyExists = FileManager.default.fileExists(atPath: replicationKeyPath)
-
-        if !replicationKeyExists {
-            // No replication key - show setup dialog
-            pendingReplicationServer = server
-        } else {
-            // Key exists - connect directly
-            Task {
-                await connectToTargetServer(server)
-            }
+        // Do all SSH setup automatically, then connect
+        Task {
+            await setupAndConnectToTarget(server)
         }
+    }
+
+    // Unified function to set up all SSH requirements and connect to target
+    @MainActor
+    private func setupAndConnectToTarget(_ server: SavedServer) async {
+        isSettingUpServerToServer = true
+        serverToServerSetupError = nil
+        serverToServerSetupStatus = "Setting up replication..."
+
+        do {
+            let targetHost = server.host
+            let targetUser = server.username
+            let replicationKeyPath = "~/.ssh/id_replication"
+            let replicationPubKeyPath = "~/.ssh/id_replication.pub"
+
+            // Step 1: Ensure source server has id_replication key
+            serverToServerSetupStatus = "Checking replication key..."
+            let keyCheckResult = try await SSHConnectionManager.shared.executeCommand(
+                "test -f \(replicationKeyPath) && echo 'KEY_EXISTS' || echo 'NO_KEY'"
+            )
+
+            var sourcePubKey: String
+
+            if keyCheckResult.contains("NO_KEY") {
+                serverToServerSetupStatus = "Creating replication key..."
+                let _ = try await SSHConnectionManager.shared.executeCommand(
+                    "mkdir -p ~/.ssh && chmod 700 ~/.ssh && ssh-keygen -t ed25519 -f \(replicationKeyPath) -N '' -C 'HexBSD-replication' -q"
+                )
+            }
+
+            // Get the public key
+            sourcePubKey = try await SSHConnectionManager.shared.executeCommand("cat \(replicationPubKeyPath)")
+            sourcePubKey = sourcePubKey.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if sourcePubKey.isEmpty {
+                throw NSError(domain: "SSHSetup", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to read replication public key"])
+            }
+
+            // Step 2: Test SSH from source to target (with StrictHostKeyChecking=no to handle host key changes)
+            serverToServerSetupStatus = "Testing connection to \(targetHost)..."
+            let testResult = try await SSHConnectionManager.shared.executeCommand(
+                "ssh -i \(replicationKeyPath) -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 \(targetUser)@\(targetHost) 'echo SSH_OK' 2>&1; true"
+            )
+
+            if !testResult.contains("SSH_OK") {
+                // Auth failed - add source key to target's authorized_keys
+                if testResult.contains("Permission denied") || testResult.contains("publickey") {
+                    serverToServerSetupStatus = "Authorizing key on \(targetHost)..."
+                    try await addSourceKeyToTarget(pubKey: sourcePubKey, server: server)
+
+                    // Verify it works now
+                    let retestResult = try await SSHConnectionManager.shared.executeCommand(
+                        "ssh -i \(replicationKeyPath) -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 \(targetUser)@\(targetHost) 'echo SSH_OK' 2>&1; true"
+                    )
+
+                    if !retestResult.contains("SSH_OK") {
+                        throw NSError(domain: "SSHSetup", code: 2, userInfo: [NSLocalizedDescriptionKey: "SSH setup failed: \(retestResult)"])
+                    }
+                } else {
+                    throw NSError(domain: "SSHSetup", code: 3, userInfo: [NSLocalizedDescriptionKey: "Cannot connect: \(testResult)"])
+                }
+            }
+
+            // All good - connect and load target data
+            serverToServerSetupStatus = "Loading datasets..."
+            serverToServerSetupError = nil
+            await connectToTargetServer(server)
+
+        } catch {
+            serverToServerSetupError = error.localizedDescription
+        }
+
+        isSettingUpServerToServer = false
+        serverToServerSetupStatus = ""
+    }
+
+    // Check and set up server-to-server SSH (source → target) - DEPRECATED, use setupAndConnectToTarget
+    @MainActor
+    private func checkAndSetupServerToServerSSH(_ server: SavedServer) async {
+        isSettingUpServerToServer = true
+        serverToServerSetupError = nil
+        serverToServerSetupStatus = "Checking server-to-server SSH setup..."
+
+        do {
+            let targetHost = server.host
+            let targetUser = server.username
+            let replicationKeyPath = "~/.ssh/id_replication"
+            let replicationPubKeyPath = "~/.ssh/id_replication.pub"
+
+            // Step 1: Check if source server has id_replication key
+            print("DEBUG: Checking for replication key on source server...")
+            serverToServerSetupStatus = "Checking replication key on source server..."
+            let keyCheckResult = try await SSHConnectionManager.shared.executeCommand(
+                "test -f \(replicationKeyPath) && echo 'KEY_EXISTS' || echo 'NO_KEY'"
+            )
+            print("DEBUG: Key check result: \(keyCheckResult)")
+
+            var sourcePubKey: String
+
+            if keyCheckResult.contains("NO_KEY") {
+                // Create id_replication key on source server
+                print("DEBUG: Creating replication key on source server...")
+                serverToServerSetupStatus = "Creating replication key on source server..."
+                let createResult = try await SSHConnectionManager.shared.executeCommand(
+                    "mkdir -p ~/.ssh && chmod 700 ~/.ssh && ssh-keygen -t ed25519 -f \(replicationKeyPath) -N '' -C 'HexBSD-replication' -q && echo 'KEY_CREATED'"
+                )
+                print("DEBUG: Key creation result: \(createResult)")
+            }
+
+            // Get the public key
+            serverToServerSetupStatus = "Reading replication public key..."
+            sourcePubKey = try await SSHConnectionManager.shared.executeCommand("cat \(replicationPubKeyPath)")
+            sourcePubKey = sourcePubKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            print("DEBUG: Source public key: \(sourcePubKey.prefix(50))...")
+
+            if sourcePubKey.isEmpty {
+                throw NSError(domain: "SSHSetup", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to read replication public key from source server"])
+            }
+
+            // Step 2: Update known_hosts on source server
+            // Remove old entries for hostname, FQDN, and IP, then add fresh ones
+            serverToServerSetupStatus = "Updating known_hosts for \(targetHost)..."
+            print("DEBUG: Updating known_hosts for \(targetHost)...")
+            let _ = try await SSHConnectionManager.shared.executeCommand(
+                """
+                # Get IP and FQDN for the host
+                HOST_IP=$(getent hosts \(targetHost) 2>/dev/null | awk '{print $1}' | head -1)
+                HOST_FQDN=$(getent hosts \(targetHost) 2>/dev/null | awk '{print $2}' | head -1)
+                # Remove all possible entries
+                ssh-keygen -R \(targetHost) 2>/dev/null
+                [ -n "$HOST_IP" ] && ssh-keygen -R "$HOST_IP" 2>/dev/null
+                [ -n "$HOST_FQDN" ] && ssh-keygen -R "$HOST_FQDN" 2>/dev/null
+                # Add fresh host keys
+                ssh-keyscan -H \(targetHost) >> ~/.ssh/known_hosts 2>/dev/null
+                [ -n "$HOST_IP" ] && ssh-keyscan -H "$HOST_IP" >> ~/.ssh/known_hosts 2>/dev/null
+                true
+                """
+            )
+
+            // Step 3: Test SSH connection from source to target
+            // Note: We append "; true" to ensure command returns 0 even if SSH fails,
+            // so we can check the output for specific error messages
+            serverToServerSetupStatus = "Testing SSH to \(targetHost)..."
+            print("DEBUG: Testing SSH from source to \(targetUser)@\(targetHost)...")
+            let testResult = try await SSHConnectionManager.shared.executeCommand(
+                "ssh -i \(replicationKeyPath) -o BatchMode=yes -o ConnectTimeout=5 \(targetUser)@\(targetHost) 'echo SSH_OK' 2>&1; true"
+            )
+            print("DEBUG: SSH test result: \(testResult)")
+
+            if testResult.contains("SSH_OK") {
+                serverToServerSetupStatus = "Server-to-server SSH verified!"
+                print("DEBUG: Server-to-server SSH verified!")
+            } else if testResult.contains("Host key verification failed") || testResult.contains("REMOTE HOST IDENTIFICATION HAS CHANGED") {
+                // Host key changed (e.g., VM rolled back) - use StrictHostKeyChecking=no to accept new key
+                print("DEBUG: Host key mismatch, accepting new host key...")
+                serverToServerSetupStatus = "Host key changed, accepting new key..."
+
+                // Use StrictHostKeyChecking=no to accept the new key and update known_hosts automatically
+                // This is safe here because we're explicitly handling a known host key change scenario
+                serverToServerSetupStatus = "Retrying SSH connection with new host key..."
+                let retestResult = try await SSHConnectionManager.shared.executeCommand(
+                    "ssh -i \(replicationKeyPath) -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 \(targetUser)@\(targetHost) 'echo SSH_OK' 2>&1; true"
+                )
+                print("DEBUG: Retest with StrictHostKeyChecking=no: \(retestResult)")
+
+                if retestResult.contains("SSH_OK") {
+                    serverToServerSetupStatus = "Host key updated, connection verified!"
+                } else if retestResult.contains("Permission denied") || retestResult.contains("publickey") {
+                    // Now it's an auth issue - add the key
+                    print("DEBUG: Auth failed after host key fix, adding key to target...")
+                    serverToServerSetupStatus = "Adding replication key to \(targetHost)..."
+                    try await addSourceKeyToTarget(pubKey: sourcePubKey, server: server)
+
+                    // Final verification - use StrictHostKeyChecking=no since we just handled a host key change
+                    serverToServerSetupStatus = "Verifying SSH connection..."
+                    print("DEBUG: Final verification SSH from source to target...")
+                    let finalResult = try await SSHConnectionManager.shared.executeCommand(
+                        "ssh -i \(replicationKeyPath) -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 \(targetUser)@\(targetHost) 'echo SSH_OK' 2>&1; true"
+                    )
+                    print("DEBUG: Final verification result: \(finalResult)")
+                    if !finalResult.contains("SSH_OK") {
+                        throw NSError(domain: "SSHSetup", code: 2, userInfo: [NSLocalizedDescriptionKey: "SSH setup failed: \(finalResult)"])
+                    }
+                    print("DEBUG: SSH setup complete!")
+                    serverToServerSetupStatus = "SSH key authorization complete!"
+                } else {
+                    throw NSError(domain: "SSHSetup", code: 5, userInfo: [NSLocalizedDescriptionKey: "SSH still failing: \(retestResult)"])
+                }
+            } else if testResult.contains("Permission denied") || testResult.contains("publickey") {
+                // Auth failure - need to add source's key to target's authorized_keys
+                print("DEBUG: Auth failed, adding key to target...")
+                serverToServerSetupStatus = "Adding replication key to \(targetHost)..."
+                try await addSourceKeyToTarget(pubKey: sourcePubKey, server: server)
+
+                // Verify it works now
+                serverToServerSetupStatus = "Verifying SSH connection..."
+                let retestResult = try await SSHConnectionManager.shared.executeCommand(
+                    "ssh -i \(replicationKeyPath) -o BatchMode=yes -o ConnectTimeout=5 \(targetUser)@\(targetHost) 'echo SSH_OK' 2>&1; true"
+                )
+                print("DEBUG: Retest result: \(retestResult)")
+
+                if !retestResult.contains("SSH_OK") {
+                    throw NSError(domain: "SSHSetup", code: 2, userInfo: [NSLocalizedDescriptionKey: "SSH setup failed: \(retestResult)"])
+                }
+                serverToServerSetupStatus = "SSH key authorization complete!"
+            } else if testResult.contains("Could not resolve") || testResult.contains("No route to host") || testResult.contains("Connection refused") {
+                throw NSError(domain: "SSHSetup", code: 4, userInfo: [NSLocalizedDescriptionKey: "Cannot reach \(targetHost) from source server. Check network connectivity."])
+            } else {
+                throw NSError(domain: "SSHSetup", code: 5, userInfo: [NSLocalizedDescriptionKey: "SSH test failed: \(testResult)"])
+            }
+
+            // All good - now connect and load target data
+            serverToServerSetupStatus = "Connecting to target..."
+            pendingServerToServerSetup = nil
+            await connectToTargetServer(server)
+
+        } catch {
+            print("DEBUG: Server-to-server SSH setup error: \(error)")
+            serverToServerSetupError = error.localizedDescription
+        }
+
+        isSettingUpServerToServer = false
+    }
+
+    // Add source server's public key to target server's authorized_keys
+    private func addSourceKeyToTarget(pubKey: String, server: SavedServer) async throws {
+        // Connect to target from Mac using the server's configured key (the one that works)
+        let targetManager = SSHConnectionManager()
+
+        serverToServerSetupStatus = "Connecting to \(server.host) to add SSH key..."
+
+        // Use the server's configured keyPath - this is what the user set up for this server
+        let keyPath = (server.keyPath as NSString).expandingTildeInPath
+        print("DEBUG: Connecting to \(server.host) using configured key: \(keyPath)")
+
+        let authMethod = SSHAuthMethod(
+            username: server.username,
+            privateKeyURL: URL(fileURLWithPath: keyPath)
+        )
+
+        try await targetManager.connect(
+            host: server.host,
+            port: server.port,
+            authMethod: authMethod
+        )
+
+        // First check if the key is already in authorized_keys
+        serverToServerSetupStatus = "Checking authorized_keys on \(server.host)..."
+        let existingKeys = try await targetManager.executeCommand("cat ~/.ssh/authorized_keys 2>/dev/null || echo ''")
+
+        if existingKeys.contains(pubKey) {
+            print("DEBUG: Key already exists in authorized_keys")
+            serverToServerSetupStatus = "Key already authorized on \(server.host)"
+        } else {
+            print("DEBUG: Adding key to authorized_keys")
+            serverToServerSetupStatus = "Adding SSH key to \(server.host)..."
+            let _ = try await targetManager.executeCommand(
+                "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '\(pubKey)' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && sort -u ~/.ssh/authorized_keys -o ~/.ssh/authorized_keys"
+            )
+        }
+
+        await targetManager.disconnect()
     }
 
     private func connectToTargetServer(_ server: SavedServer) async {
