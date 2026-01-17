@@ -2014,6 +2014,12 @@ struct DatasetsView: View {
                         }
                     }
                     .frame(width: 200)
+                    .simultaneousGesture(TapGesture().onEnded {
+                        // Recheck which servers are online when picker is clicked
+                        Task {
+                            await checkServersOnline()
+                        }
+                    })
                     .onChange(of: selectedReplicationServer) { oldValue, newValue in
                         handleServerSelection(newValue)
                     }
@@ -2207,6 +2213,11 @@ struct DatasetsView: View {
                                 command: command,
                                 user: user
                             )
+                            // Navigate to Tasks page after successful scheduling
+                            await MainActor.run {
+                                pendingScheduledReplication = nil
+                                NotificationCenter.default.post(name: .navigateToTasks, object: nil)
+                            }
                         } catch {
                             await MainActor.run {
                                 viewModel.error = "Failed to schedule task: \(error.localizedDescription)"

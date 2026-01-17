@@ -78,6 +78,7 @@ struct TasksContentView: View {
     @State private var showAddTask = false
     @State private var selectedTask: CronTask?
     @State private var showError = false
+    @State private var refreshTimer: Timer?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -252,6 +253,16 @@ struct TasksContentView: View {
             Task {
                 await viewModel.loadTasks()
             }
+            // Auto-refresh every 60 seconds
+            refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in
+                Task {
+                    await viewModel.loadTasks()
+                }
+            }
+        }
+        .onDisappear {
+            refreshTimer?.invalidate()
+            refreshTimer = nil
         }
     }
 

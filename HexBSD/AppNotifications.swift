@@ -18,4 +18,7 @@ extension Notification.Name {
     /// Posted when sidebar navigation should be locked/unlocked (during long-running operations)
     /// UserInfo contains: "locked" (Bool)
     static let sidebarNavigationLock = Notification.Name("sidebarNavigationLock")
+
+    /// Posted when navigation to Tasks page is requested
+    static let navigateToTasks = Notification.Name("navigateToTasks")
 }

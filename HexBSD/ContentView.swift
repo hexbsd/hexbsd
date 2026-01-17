@@ -805,6 +805,12 @@ struct ContentView: View {
                 isNavigationLocked = locked
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .navigateToTasks)) { _ in
+            // Switch to tasks section after scheduling a task
+            if sshManager.isConnected {
+                selectedSection = .tasks
+            }
+        }
     }
 
     func loadSavedServers() {
