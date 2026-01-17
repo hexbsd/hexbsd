@@ -437,16 +437,6 @@ struct PackagesContentView: View {
 
                         Button(action: {
                             Task {
-                                await viewModel.refresh()
-                            }
-                        }) {
-                            Label("Refresh", systemImage: "arrow.clockwise")
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(viewModel.isLoading || viewModel.isUpgrading || viewModel.isSwitchingRepository || viewModel.isPackageOperation)
-
-                        Button(action: {
-                            Task {
                                 await viewModel.cleanCache()
                             }
                         }) {

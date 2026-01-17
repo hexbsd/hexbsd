@@ -190,15 +190,6 @@ struct ServicesContentView: View {
                 TextField("Search...", text: $searchText)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 150)
-
-                Button(action: {
-                    Task {
-                        await viewModel.refresh()
-                    }
-                }) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
             }
             .padding()
 

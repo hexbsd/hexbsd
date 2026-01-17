@@ -102,14 +102,6 @@ struct TasksContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
 
-                Button(action: {
-                    Task {
-                        await viewModel.refresh()
-                    }
-                }) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
             }
             .padding()
 

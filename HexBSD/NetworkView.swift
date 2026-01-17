@@ -405,14 +405,6 @@ struct InterfacesTabView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 150)
 
-                Button(action: {
-                    Task {
-                        await viewModel.refresh()
-                    }
-                }) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
             }
             .padding()
 
@@ -1044,14 +1036,6 @@ struct BridgesTabView: View {
                 }
                 .buttonStyle(.bordered)
 
-                Button(action: {
-                    Task {
-                        await viewModel.refresh()
-                    }
-                }) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
             }
             .padding()
 
@@ -1568,14 +1552,6 @@ struct RoutingTabView: View {
                 }
                 .buttonStyle(.bordered)
 
-                Button(action: {
-                    Task {
-                        await viewModel.refresh()
-                    }
-                }) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
             }
             .padding()
 
@@ -1790,14 +1766,6 @@ struct SwitchesTabView: View {
 
                 Spacer()
 
-                Button(action: {
-                    Task {
-                        await viewModel.refresh()
-                    }
-                }) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
             }
             .padding()
 

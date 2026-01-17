@@ -311,17 +311,6 @@ struct PoolsSheet: View {
                         .controlSize(.small)
                 }
 
-                Button(action: {
-                    Task {
-                        await viewModel.refreshPools()
-                        await viewModel.refreshScrubStatus()
-                        await loadAvailableDisks()
-                    }
-                }) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
-
                 Button("Done") {
                     dismiss()
                 }
@@ -1500,15 +1489,6 @@ struct PoolsView: View {
                         .controlSize(.small)
                 }
 
-                Button(action: {
-                    Task {
-                        await viewModel.refreshPools()
-                        await loadAvailableDisks()
-                    }
-                }) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
             }
             .padding()
 
