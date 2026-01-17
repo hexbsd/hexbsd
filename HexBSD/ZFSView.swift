@@ -2167,6 +2167,7 @@ struct DatasetsView: View {
     @State private var hasCheckedServers = false  // True after initial check completes
     @State private var showServerPicker = false
     @State private var serverCheckTimer: Timer?
+    @State private var showProtectedDatasets = false  // Toggle to show/hide protected datasets
 
     struct PendingReplication: Identifiable {
         let id = UUID()
@@ -2181,7 +2182,21 @@ struct DatasetsView: View {
     }
 
     private var datasetsCount: Int {
-        viewModel.datasets.filter { !$0.isSnapshot }.count
+        let allDatasets = viewModel.datasets.filter { !$0.isSnapshot }
+        if showProtectedDatasets { return allDatasets.count }
+        let protectedNames = Set(allDatasets.filter { $0.isProtected }.map { $0.name })
+        let rootDatasetNames = Set(allDatasets.filter { !$0.name.contains("/") }.map { $0.name })
+        return allDatasets.filter { dataset in
+            if !dataset.name.contains("/") { return true }
+            if dataset.isProtected { return false }
+            var path = dataset.name
+            while let lastSlash = path.lastIndex(of: "/") {
+                path = String(path[..<lastSlash])
+                if rootDatasetNames.contains(path) { break }
+                if protectedNames.contains(path) { return false }
+            }
+            return true
+        }.count
     }
 
     private var snapshotsCount: Int {
@@ -2194,7 +2209,25 @@ struct DatasetsView: View {
         var rootNodes: [DatasetNode] = []
 
         // Create nodes for all datasets (not snapshots)
-        let datasets = viewModel.datasets.filter { !$0.isSnapshot }.sorted { $0.name < $1.name }
+        // When showProtectedDatasets is false: show root datasets + unprotected datasets not under protected parents
+        let allDatasets = viewModel.datasets.filter { !$0.isSnapshot }.sorted { $0.name < $1.name }
+        let protectedNames = Set(allDatasets.filter { $0.isProtected }.map { $0.name })
+        let rootDatasetNames = Set(allDatasets.filter { !$0.name.contains("/") }.map { $0.name })
+        let datasets = showProtectedDatasets ? allDatasets : allDatasets.filter { dataset in
+            // Always show root datasets (pool level)
+            if !dataset.name.contains("/") { return true }
+            // Exclude if this dataset is protected (except roots handled above)
+            if dataset.isProtected { return false }
+            // Exclude if any ancestor (other than root) is protected
+            var path = dataset.name
+            while let lastSlash = path.lastIndex(of: "/") {
+                path = String(path[..<lastSlash])
+                // Skip if this is the root dataset
+                if rootDatasetNames.contains(path) { break }
+                if protectedNames.contains(path) { return false }
+            }
+            return true
+        }
 
         for dataset in datasets {
             let node = DatasetNode(dataset: dataset)
@@ -2231,12 +2264,14 @@ struct DatasetsView: View {
             node.children.sort { $0.dataset.name < $1.dataset.name }
         }
 
-        // Auto-expand protected datasets so users can see unprotected children
-        for node in nodes.values {
-            if node.dataset.isProtected && node.hasChildren {
-                if !expandedDatasets.contains(node.dataset.name) {
-                    expandedDatasets.insert(node.dataset.name)
-                    node.isExpanded = true
+        // Auto-expand protected datasets so users can see unprotected children (only when showing protected)
+        if showProtectedDatasets {
+            for node in nodes.values {
+                if node.dataset.isProtected && node.hasChildren {
+                    if !expandedDatasets.contains(node.dataset.name) {
+                        expandedDatasets.insert(node.dataset.name)
+                        node.isExpanded = true
+                    }
                 }
             }
         }
@@ -2324,6 +2359,10 @@ struct DatasetsView: View {
                 Text("\(datasetsCount) dataset(s), \(snapshotsCount) snapshot(s)")
                     .font(.headline)
                     .foregroundColor(.secondary)
+
+                Toggle("Show protected", isOn: $showProtectedDatasets)
+                    .toggleStyle(.checkbox)
+                    .font(.subheadline)
 
                 Spacer()
 
