@@ -1274,7 +1274,7 @@ struct FirewallServicesView: View {
                 List {
                     // Common services
                     ForEach(allowedServices) { service in
-                        ServiceRow(service: service, protocols: protocolString(for: service.port), isAllowed: true) {
+                        ServiceRow(service: service, protocols: protocolString(for: service.port), isAllowed: true, isProtected: viewModel.isPortProtected(service.port)) {
                             Task {
                                 await disableService(service)
                             }
@@ -1283,7 +1283,7 @@ struct FirewallServicesView: View {
 
                     // Custom ports
                     ForEach(customAllowedPorts) { rule in
-                        CustomPortRow(rule: rule, protocols: protocolString(for: rule.port ?? 0)) {
+                        CustomPortRow(rule: rule, protocols: protocolString(for: rule.port ?? 0), isProtected: viewModel.isPortProtected(rule.port ?? 0)) {
                             Task {
                                 await viewModel.deleteRule(rule)
                             }
@@ -1318,6 +1318,7 @@ struct FirewallServicesView: View {
 struct CustomPortRow: View {
     let rule: FirewallRule
     let protocols: String
+    let isProtected: Bool
     let onRemove: () -> Void
 
     var body: some View {
@@ -1337,6 +1338,12 @@ struct CustomPortRow: View {
 
             Spacer()
 
+            if isProtected {
+                Image(systemName: "lock.fill")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
             Text(String(rule.port ?? 0) + " " + protocols)
                 .font(.caption)
                 .foregroundColor(.secondary)
@@ -1345,13 +1352,15 @@ struct CustomPortRow: View {
                 .background(Color(nsColor: .controlBackgroundColor))
                 .cornerRadius(4)
 
-            Button(action: onRemove) {
-                Image(systemName: "minus.circle.fill")
-                    .foregroundColor(.red)
-                    .font(.title2)
+            if !isProtected {
+                Button(action: onRemove) {
+                    Image(systemName: "minus.circle.fill")
+                        .foregroundColor(.red)
+                        .font(.title2)
+                }
+                .buttonStyle(.plain)
+                .help("Block this port")
             }
-            .buttonStyle(.plain)
-            .help("Block this port")
         }
         .padding(.vertical, 4)
     }
@@ -1363,6 +1372,7 @@ struct ServiceRow: View {
     let service: FirewallService
     let protocols: String
     let isAllowed: Bool
+    let isProtected: Bool
     let onToggle: () -> Void
 
     var body: some View {
@@ -1382,6 +1392,12 @@ struct ServiceRow: View {
 
             Spacer()
 
+            if isProtected {
+                Image(systemName: "lock.fill")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
             Text(String(service.port) + " " + protocols)
                 .font(.caption)
                 .foregroundColor(.secondary)
@@ -1390,13 +1406,15 @@ struct ServiceRow: View {
                 .background(Color(nsColor: .controlBackgroundColor))
                 .cornerRadius(4)
 
-            Button(action: onToggle) {
-                Image(systemName: "minus.circle.fill")
-                    .foregroundColor(.red)
-                    .font(.title2)
+            if !isProtected {
+                Button(action: onToggle) {
+                    Image(systemName: "minus.circle.fill")
+                        .foregroundColor(.red)
+                        .font(.title2)
+                }
+                .buttonStyle(.plain)
+                .help("Block this service")
             }
-            .buttonStyle(.plain)
-            .help("Block this service")
         }
         .padding(.vertical, 4)
     }
@@ -1650,8 +1668,28 @@ class FirewallViewModel: ObservableObject {
     @Published var rules: [FirewallRule] = []
     @Published var isLoading = false
     @Published var error: String?
+    @Published var domainRole: String? = nil
 
     private let sshManager = SSHConnectionManager.shared
+
+    // Ports that are always protected
+    private let alwaysProtectedPorts: Set<Int> = [22]  // SSH
+
+    // Ports protected when domain server role is enabled
+    private let domainServerPorts: Set<Int> = [111, 811, 616, 649, 802, 709, 2049]
+
+    // Returns the set of ports that cannot be removed
+    var protectedPorts: Set<Int> {
+        var ports = alwaysProtectedPorts
+        if domainRole == "server" {
+            ports = ports.union(domainServerPorts)
+        }
+        return ports
+    }
+
+    func isPortProtected(_ port: Int) -> Bool {
+        protectedPorts.contains(port)
+    }
 
     func checkStatus() async {
         isLoading = true
@@ -1661,6 +1699,9 @@ class FirewallViewModel: ObservableObject {
             let result = try await sshManager.getFirewallStatus()
             status = result.status
             rules = result.rules
+
+            // Check domain role
+            domainRole = try await sshManager.getDomainRole()
         } catch {
             self.error = "Failed to check firewall status: \(error.localizedDescription)"
             status = .unknown
