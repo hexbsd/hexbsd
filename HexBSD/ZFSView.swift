@@ -185,15 +185,26 @@ struct ZFSScrubStatus: Identifiable {
 
 // MARK: - Main View
 
+// Shared state for ZFS toolbar controls
+class ZFSToolbarState: ObservableObject {
+    @Published var showProtectedDatasets = false
+    @Published var selectedReplicationServer: String? = nil
+    @Published var savedServers: [SavedServer] = []
+    @Published var showServerPicker = false
+    @Published var onlineServers: Set<String> = []
+    @Published var hasCheckedServers = false
+}
+
 struct ZFSContentView: View {
     @StateObject private var viewModel = ZFSViewModel()
+    @StateObject private var toolbarState = ZFSToolbarState()
     @State private var showError = false
     @State private var showBootEnvironments = false
     @State private var showPools = false
 
     var body: some View {
         VStack(spacing: 0) {
-            // Toolbar with Boot Environments and Pools buttons
+            // Toolbar with Boot Environments, Pools, Show Protected, and Replicate to
             HStack {
                 Button(action: {
                     showBootEnvironments = true
@@ -209,7 +220,45 @@ struct ZFSContentView: View {
                 }
                 .buttonStyle(.bordered)
 
+                Toggle("Show protected", isOn: $toolbarState.showProtectedDatasets)
+                    .toggleStyle(.checkbox)
+                    .font(.subheadline)
+
                 Spacer()
+
+                // Replication server picker
+                HStack(spacing: 8) {
+                    Text("Replicate to:")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+
+                    Button(action: {
+                        toolbarState.showServerPicker = true
+                    }) {
+                        HStack {
+                            if let serverId = toolbarState.selectedReplicationServer,
+                               let server = toolbarState.savedServers.first(where: { $0.id.uuidString == serverId }) {
+                                Text(server.name)
+                            } else {
+                                Text("Select Server...")
+                                    .foregroundColor(.secondary)
+                            }
+                            Image(systemName: "chevron.down")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(width: 150)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color(NSColor.controlBackgroundColor))
+                        .cornerRadius(6)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color(NSColor.separatorColor), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
             }
             .padding()
 
@@ -217,6 +266,7 @@ struct ZFSContentView: View {
 
             // Datasets view is the main content
             DatasetsView(viewModel: viewModel)
+                .environmentObject(toolbarState)
         }
         .sheet(isPresented: $showBootEnvironments) {
             BootEnvironmentsSheet()
@@ -2137,6 +2187,7 @@ class DatasetNode: Identifiable, ObservableObject {
 struct DatasetsView: View {
     @ObservedObject var viewModel: ZFSViewModel
     @EnvironmentObject var appState: AppState
+    @EnvironmentObject var toolbarState: ZFSToolbarState
     @State private var selectedDataset: ZFSDataset?
     @State private var showCreateSnapshot = false
     @State private var showCloneDataset = false
@@ -2148,8 +2199,6 @@ struct DatasetsView: View {
     @State private var cloneDestination = ""
     @State private var expandedDatasets: Set<String> = []
     @State private var selectedSnapshots: Set<String> = []  // Multi-select for snapshots
-    @State private var selectedReplicationServer: String? = nil
-    @State private var savedServers: [SavedServer] = []
     @State private var targetManager: SSHConnectionManager?
     @State private var targetDatasets: [ZFSDataset] = []
     @State private var targetPools: [ZFSPool] = []
@@ -2163,11 +2212,33 @@ struct DatasetsView: View {
     @State private var serverToServerSetupStatus: String = ""
     @State private var serverToServerSetupError: String? = nil
     @State private var isSettingUpServerToServer = false
-    @State private var onlineServers: Set<String> = []  // Server IDs that are online
-    @State private var hasCheckedServers = false  // True after initial check completes
-    @State private var showServerPicker = false
     @State private var serverCheckTimer: Timer?
-    @State private var showProtectedDatasets = false  // Toggle to show/hide protected datasets
+
+    // Convenience accessors for toolbar state
+    private var selectedReplicationServer: String? {
+        get { toolbarState.selectedReplicationServer }
+        nonmutating set { toolbarState.selectedReplicationServer = newValue }
+    }
+    private var savedServers: [SavedServer] {
+        get { toolbarState.savedServers }
+        nonmutating set { toolbarState.savedServers = newValue }
+    }
+    private var showServerPicker: Bool {
+        get { toolbarState.showServerPicker }
+        nonmutating set { toolbarState.showServerPicker = newValue }
+    }
+    private var onlineServers: Set<String> {
+        get { toolbarState.onlineServers }
+        nonmutating set { toolbarState.onlineServers = newValue }
+    }
+    private var hasCheckedServers: Bool {
+        get { toolbarState.hasCheckedServers }
+        nonmutating set { toolbarState.hasCheckedServers = newValue }
+    }
+    private var showProtectedDatasets: Bool {
+        get { toolbarState.showProtectedDatasets }
+        nonmutating set { toolbarState.showProtectedDatasets = newValue }
+    }
 
     struct PendingReplication: Identifiable {
         let id = UUID()
@@ -2179,28 +2250,6 @@ struct DatasetsView: View {
     struct ScheduledReplicationInfo: Identifiable {
         let id = UUID()
         let command: String
-    }
-
-    private var datasetsCount: Int {
-        let allDatasets = viewModel.datasets.filter { !$0.isSnapshot }
-        if showProtectedDatasets { return allDatasets.count }
-        let protectedNames = Set(allDatasets.filter { $0.isProtected }.map { $0.name })
-        let rootDatasetNames = Set(allDatasets.filter { !$0.name.contains("/") }.map { $0.name })
-        return allDatasets.filter { dataset in
-            if !dataset.name.contains("/") { return true }
-            if dataset.isProtected { return false }
-            var path = dataset.name
-            while let lastSlash = path.lastIndex(of: "/") {
-                path = String(path[..<lastSlash])
-                if rootDatasetNames.contains(path) { break }
-                if protectedNames.contains(path) { return false }
-            }
-            return true
-        }.count
-    }
-
-    private var snapshotsCount: Int {
-        viewModel.datasets.filter { $0.isSnapshot }.count
     }
 
     // Build hierarchical tree from flat dataset list
@@ -2377,180 +2426,92 @@ struct DatasetsView: View {
         return rootNodes.sorted { $0.dataset.name < $1.dataset.name }
     }
 
-    private var targetSnapshotsCount: Int {
-        targetDatasets.filter { $0.isSnapshot }.count
-    }
-
-    private var targetDatasetsCount: Int {
-        let allDatasets = targetDatasets.filter { !$0.isSnapshot }
-        if showProtectedDatasets { return allDatasets.count }
-        let protectedNames = Set(allDatasets.filter { $0.isProtected }.map { $0.name })
-        let rootDatasetNames = Set(allDatasets.filter { !$0.name.contains("/") }.map { $0.name })
-        return allDatasets.filter { dataset in
-            if !dataset.name.contains("/") { return true }
-            if dataset.isProtected { return false }
-            var path = dataset.name
-            while let lastSlash = path.lastIndex(of: "/") {
-                path = String(path[..<lastSlash])
-                if rootDatasetNames.contains(path) { break }
-                if protectedNames.contains(path) { return false }
-            }
-            return true
-        }.count
-    }
-
     var body: some View {
         VStack(spacing: 0) {
-            // Toolbar with replication server picker
-            HStack {
-                Text("\(datasetsCount) dataset(s), \(snapshotsCount) snapshot(s)")
-                    .font(.headline)
-                    .foregroundColor(.secondary)
-
-                Toggle("Show protected", isOn: $showProtectedDatasets)
-                    .toggleStyle(.checkbox)
-                    .font(.subheadline)
-
-                Spacer()
-
-                // Replication server picker
-                HStack(spacing: 8) {
-                    Text("Replicate to:")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-
-                    Button(action: {
-                        showServerPicker = true
-                        // Check all servers when dropdown is clicked
-                        Task {
-                            await checkServersOnline()
-                        }
-                    }) {
-                        HStack {
-                            if let serverId = selectedReplicationServer,
-                               let server = savedServers.first(where: { $0.id.uuidString == serverId }) {
-                                Text(server.name)
-                            } else {
-                                Text("Select Server...")
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.down")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        .frame(width: 180)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color(NSColor.controlBackgroundColor))
-                        .cornerRadius(6)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color(NSColor.separatorColor), lineWidth: 1)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .popover(isPresented: $showServerPicker, arrowEdge: .bottom) {
-                        VStack(alignment: .leading, spacing: 0) {
-                            // None option
-                            Button(action: {
-                                selectedReplicationServer = nil
-                                showServerPicker = false
-                                handleServerSelection(nil)
-                            }) {
-                                HStack {
-                                    Text("None")
-                                    Spacer()
-                                    if selectedReplicationServer == nil {
-                                        Image(systemName: "checkmark")
-                                            .foregroundColor(.accentColor)
-                                    }
-                                }
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-
-                            Divider()
-                                .padding(.vertical, 4)
-
-                            // Server list
-                            ForEach(savedServers, id: \.id) { server in
-                                let isOnline = onlineServers.contains(server.id.uuidString)
-                                Button(action: {
-                                    if hasCheckedServers && isOnline {
-                                        selectedReplicationServer = server.id.uuidString
-                                        showServerPicker = false
-                                        handleServerSelection(server.id.uuidString)
-                                    }
-                                }) {
-                                    HStack {
-                                        if !hasCheckedServers {
-                                            ProgressView()
-                                                .controlSize(.small)
-                                                .frame(width: 10, height: 10)
-                                        } else {
-                                            Circle()
-                                                .fill(isOnline ? Color.green : Color.red)
-                                                .frame(width: 8, height: 8)
-                                        }
-                                        Text(server.name)
-                                            .foregroundColor(hasCheckedServers && isOnline ? .primary : .secondary)
-                                        Spacer()
-                                        if selectedReplicationServer == server.id.uuidString {
-                                            Image(systemName: "checkmark")
-                                                .foregroundColor(.accentColor)
-                                        }
-                                        if hasCheckedServers && !isOnline {
-                                            Text("offline")
-                                                .font(.caption2)
-                                                .foregroundColor(.secondary)
-                                        }
-                                    }
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
-                                    .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(!hasCheckedServers || !isOnline)
-                            }
-                        }
-                        .frame(minWidth: 200)
-                        .padding(.vertical, 8)
-                    }
-
-                    // Show setup progress or error
-                    if isSettingUpServerToServer {
-                        HStack(spacing: 4) {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text(serverToServerSetupStatus)
-                                .font(.caption)
-                                .foregroundColor(.blue)
-                        }
-                    } else if let error = serverToServerSetupError {
-                        HStack(spacing: 4) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundColor(.orange)
-                                .font(.caption)
-                            Text(error)
-                                .font(.caption)
-                                .foregroundColor(.orange)
-                                .lineLimit(1)
-                        }
-                    }
-                }
-            }
-            .padding()
-
-            Divider()
-
             // Show split view if server selected, otherwise normal view
             if selectedReplicationServer != nil {
                 replicationSplitView
             } else {
                 datasetManagementView
+            }
+        }
+        .popover(isPresented: Binding(
+            get: { toolbarState.showServerPicker },
+            set: { toolbarState.showServerPicker = $0 }
+        ), arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 0) {
+                // None option
+                Button(action: {
+                    selectedReplicationServer = nil
+                    showServerPicker = false
+                    handleServerSelection(nil)
+                }) {
+                    HStack {
+                        Text("None")
+                        Spacer()
+                        if selectedReplicationServer == nil {
+                            Image(systemName: "checkmark")
+                                .foregroundColor(.accentColor)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Divider()
+                    .padding(.vertical, 4)
+
+                // Server list
+                ForEach(savedServers, id: \.id) { server in
+                    let isOnline = onlineServers.contains(server.id.uuidString)
+                    Button(action: {
+                        if hasCheckedServers && isOnline {
+                            selectedReplicationServer = server.id.uuidString
+                            showServerPicker = false
+                            handleServerSelection(server.id.uuidString)
+                        }
+                    }) {
+                        HStack {
+                            if !hasCheckedServers {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .frame(width: 10, height: 10)
+                            } else {
+                                Circle()
+                                    .fill(isOnline ? Color.green : Color.red)
+                                    .frame(width: 8, height: 8)
+                            }
+                            Text(server.name)
+                                .foregroundColor(hasCheckedServers && isOnline ? .primary : .secondary)
+                            Spacer()
+                            if selectedReplicationServer == server.id.uuidString {
+                                Image(systemName: "checkmark")
+                                    .foregroundColor(.accentColor)
+                            }
+                            if hasCheckedServers && !isOnline {
+                                Text("offline")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!hasCheckedServers || !isOnline)
+                }
+            }
+            .frame(minWidth: 200)
+            .padding(.vertical, 8)
+        }
+        .onChange(of: showServerPicker) { oldValue, newValue in
+            if newValue {
+                Task {
+                    await checkServersOnline()
+                }
             }
         }
         .onAppear {
