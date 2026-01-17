@@ -1823,6 +1823,7 @@ struct DatasetsView: View {
     @State private var snapshotName = ""
     @State private var cloneDestination = ""
     @State private var expandedDatasets: Set<String> = []
+    @State private var selectedSnapshots: Set<String> = []  // Multi-select for snapshots
     @State private var selectedReplicationServer: String? = nil
     @State private var savedServers: [SavedServer] = []
     @State private var targetManager: SSHConnectionManager?
@@ -2360,6 +2361,28 @@ struct DatasetsView: View {
 
             // Action toolbar
             HStack {
+                // Show selected snapshots count and delete button
+                if !selectedSnapshots.isEmpty {
+                    Text("\(selectedSnapshots.count) snapshot\(selectedSnapshots.count == 1 ? "" : "s") selected")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Button(action: {
+                        selectedSnapshots.removeAll()
+                    }) {
+                        Text("Clear")
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button(action: {
+                        confirmDeleteSelectedSnapshots()
+                    }) {
+                        Label("Delete Selected", systemImage: "trash")
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                }
+
                 Spacer()
 
                 if let dataset = selectedDataset {
@@ -2521,14 +2544,17 @@ struct DatasetsView: View {
 
                     Divider()
 
-                    List(selection: $selectedDataset) {
-                        ForEach(buildHierarchy()) { node in
-                            DatasetNodeView(
-                                node: node,
-                                level: 0,
-                                expandedDatasets: $expandedDatasets,
-                                selectedDataset: $selectedDataset
-                            )
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(buildHierarchy()) { node in
+                                DatasetNodeView(
+                                    node: node,
+                                    level: 0,
+                                    expandedDatasets: $expandedDatasets,
+                                    selectedDataset: $selectedDataset,
+                                    selectedSnapshots: $selectedSnapshots
+                                )
+                            }
                         }
                     }
                 }
@@ -3202,6 +3228,36 @@ struct DatasetsView: View {
         }
     }
 
+    private func confirmDeleteSelectedSnapshots() {
+        guard !selectedSnapshots.isEmpty else { return }
+
+        appState.isShowingDeleteConfirmation = true
+
+        let alert = NSAlert()
+        alert.messageText = "Delete \(selectedSnapshots.count) Snapshot\(selectedSnapshots.count == 1 ? "" : "s")?"
+        let snapshotList = selectedSnapshots.sorted().prefix(5).joined(separator: "\n")
+        let moreText = selectedSnapshots.count > 5 ? "\n...and \(selectedSnapshots.count - 5) more" : ""
+        alert.informativeText = "Are you sure you want to delete:\n\n\(snapshotList)\(moreText)\n\nThis action cannot be undone."
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "Delete \(selectedSnapshots.count) Snapshot\(selectedSnapshots.count == 1 ? "" : "s")")
+        alert.addButton(withTitle: "Cancel")
+
+        let response = alert.runModal()
+        appState.isShowingDeleteConfirmation = false
+
+        if response == .alertFirstButtonReturn {
+            let snapshotsToDelete = selectedSnapshots
+            Task {
+                for snapshotName in snapshotsToDelete {
+                    await viewModel.deleteSnapshot(snapshot: snapshotName)
+                }
+                await MainActor.run {
+                    selectedSnapshots.removeAll()
+                }
+            }
+        }
+    }
+
     private func confirmDeleteDataset(_ dataset: ZFSDataset) {
         appState.isShowingDeleteConfirmation = true
 
@@ -3293,6 +3349,8 @@ struct DatasetNodeView: View {
     let level: Int
     @Binding var expandedDatasets: Set<String>
     @Binding var selectedDataset: ZFSDataset?
+    @Binding var selectedSnapshots: Set<String>
+    var parentSnapshotsGroup: DatasetNode? = nil  // Reference to parent snapshots group for selecting all
 
     var body: some View {
         VStack(spacing: 0) {
@@ -3411,21 +3469,9 @@ struct DatasetNodeView: View {
             }
             .padding(.vertical, 4)
             .contentShape(Rectangle())
-            .background(selectedDataset?.id == node.dataset.id && !node.isSnapshotsGroup ? Color.accentColor.opacity(0.2) : Color.clear)
+            .background(rowBackground)
             .onTapGesture {
-                if node.isSnapshotsGroup {
-                    // Toggle expansion instead of selection for snapshots group
-                    withAnimation {
-                        if expandedDatasets.contains(node.dataset.name) {
-                            expandedDatasets.remove(node.dataset.name)
-                        } else {
-                            expandedDatasets.insert(node.dataset.name)
-                        }
-                        node.isExpanded.toggle()
-                    }
-                } else {
-                    selectedDataset = node.dataset
-                }
+                handleRowTap(commandKeyPressed: NSEvent.modifierFlags.contains(.command))
             }
 
             // Children (if expanded)
@@ -3435,10 +3481,72 @@ struct DatasetNodeView: View {
                         node: childNode,
                         level: level + 1,
                         expandedDatasets: $expandedDatasets,
-                        selectedDataset: $selectedDataset
+                        selectedDataset: $selectedDataset,
+                        selectedSnapshots: $selectedSnapshots,
+                        parentSnapshotsGroup: node.isSnapshotsGroup ? node : nil
                     )
                 }
             }
+        }
+    }
+
+    // Computed property for row background color
+    private var rowBackground: Color {
+        if node.isSnapshotsGroup {
+            // Snapshots group - highlight if any snapshots are selected
+            let groupSnapshotNames = Set(node.children.map { $0.dataset.name })
+            let hasSelectedSnapshots = !selectedSnapshots.intersection(groupSnapshotNames).isEmpty
+            return hasSelectedSnapshots ? Color.orange.opacity(0.1) : Color.clear
+        } else if node.dataset.isSnapshot {
+            // Individual snapshot - highlight if selected
+            return selectedSnapshots.contains(node.dataset.name) ? Color.accentColor.opacity(0.2) : Color.clear
+        } else {
+            // Regular dataset
+            return selectedDataset?.id == node.dataset.id ? Color.accentColor.opacity(0.2) : Color.clear
+        }
+    }
+
+    // Handle row tap with optional Command key for multi-select
+    private func handleRowTap(commandKeyPressed: Bool) {
+        if node.isSnapshotsGroup {
+            // Snapshots group - toggle expansion AND select/deselect all snapshots
+            withAnimation {
+                if expandedDatasets.contains(node.dataset.name) {
+                    expandedDatasets.remove(node.dataset.name)
+                } else {
+                    expandedDatasets.insert(node.dataset.name)
+                }
+                node.isExpanded.toggle()
+            }
+            // Toggle selection of all snapshots in this group
+            let groupSnapshotNames = Set(node.children.map { $0.dataset.name })
+            let allSelected = groupSnapshotNames.isSubset(of: selectedSnapshots)
+            if allSelected {
+                // Deselect all
+                selectedSnapshots.subtract(groupSnapshotNames)
+            } else {
+                // Select all
+                selectedSnapshots.formUnion(groupSnapshotNames)
+            }
+            selectedDataset = nil
+        } else if node.dataset.isSnapshot {
+            // Individual snapshot - multi-select support
+            if commandKeyPressed {
+                // Command+Click: toggle this snapshot in selection
+                if selectedSnapshots.contains(node.dataset.name) {
+                    selectedSnapshots.remove(node.dataset.name)
+                } else {
+                    selectedSnapshots.insert(node.dataset.name)
+                }
+            } else {
+                // Regular click: select only this snapshot
+                selectedSnapshots = [node.dataset.name]
+            }
+            selectedDataset = nil
+        } else {
+            // Regular dataset
+            selectedSnapshots.removeAll()
+            selectedDataset = node.dataset
         }
     }
 
