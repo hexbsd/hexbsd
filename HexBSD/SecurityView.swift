@@ -1284,7 +1284,7 @@ struct CustomPortRow: View {
                 .frame(width: 32)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(rule.comment.isEmpty ? "Port \(rule.port ?? 0)" : rule.comment)
+                Text(rule.comment.isEmpty ? "Port " + String(rule.port ?? 0) : rule.comment)
                     .font(.headline)
                 Text("Custom port")
                     .font(.caption)
@@ -1293,7 +1293,7 @@ struct CustomPortRow: View {
 
             Spacer()
 
-            Text("Port \(rule.port ?? 0)")
+            Text("Port " + String(rule.port ?? 0))
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 8)
@@ -1337,7 +1337,7 @@ struct ServiceRow: View {
 
             Spacer()
 
-            Text("Port \(service.port)")
+            Text("Port " + String(service.port))
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 8)
@@ -1531,7 +1531,7 @@ struct AddServiceSheet: View {
             let userRules = viewModel.rules.filter { $0.ruleNumber >= 1000 && $0.ruleNumber < 65000 }
             let nextRuleNum = (userRules.map { $0.ruleNumber }.max() ?? 999) + 1
 
-            let name = customName.isEmpty ? "Port \(port)" : customName
+            let name = customName.isEmpty ? "Port " + String(port) : customName
 
             try await viewModel.addRule(
                 ruleNumber: nextRuleNum,
@@ -1580,7 +1580,7 @@ struct AddServiceRow: View {
 
             Spacer()
 
-            Text("Port \(service.port)")
+            Text("Port " + String(service.port))
                 .font(.caption)
                 .foregroundColor(.secondary)
 
