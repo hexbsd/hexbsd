@@ -868,13 +868,14 @@ struct ScheduleReplicationTaskSheet: View {
                                 HStack {
                                     Text("Every:")
                                         .frame(width: 80, alignment: .trailing)
-                                    Picker("Minutes", selection: $minuteInterval) {
-                                        ForEach(1..<60, id: \.self) { min in
-                                            Text("\(min)").tag(min)
-                                        }
+                                    Stepper(value: $minuteInterval, in: 1...59) {
+                                        Text("\(minuteInterval)")
+                                            .frame(width: 30, alignment: .center)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
+                                            .background(Color(nsColor: .controlBackgroundColor))
+                                            .cornerRadius(4)
                                     }
-                                    .pickerStyle(.menu)
-                                    .frame(width: 80)
                                     Text("minute\(minuteInterval == 1 ? "" : "s")")
                                         .foregroundColor(.secondary)
                                 }
