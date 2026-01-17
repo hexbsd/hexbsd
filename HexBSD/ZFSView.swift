@@ -2302,7 +2302,25 @@ struct DatasetsView: View {
         var rootNodes: [DatasetNode] = []
 
         // Create nodes for all datasets (not snapshots)
-        let datasets = targetDatasets.filter { !$0.isSnapshot }.sorted { $0.name < $1.name }
+        // Apply same protected filtering logic as source datasets
+        let allDatasets = targetDatasets.filter { !$0.isSnapshot }.sorted { $0.name < $1.name }
+        let protectedNames = Set(allDatasets.filter { $0.isProtected }.map { $0.name })
+        let rootDatasetNames = Set(allDatasets.filter { !$0.name.contains("/") }.map { $0.name })
+        let datasets = showProtectedDatasets ? allDatasets : allDatasets.filter { dataset in
+            // Always show root datasets (pool level)
+            if !dataset.name.contains("/") { return true }
+            // Exclude if this dataset is protected (except roots handled above)
+            if dataset.isProtected { return false }
+            // Exclude if any ancestor (other than root) is protected
+            var path = dataset.name
+            while let lastSlash = path.lastIndex(of: "/") {
+                path = String(path[..<lastSlash])
+                // Skip if this is the root dataset
+                if rootDatasetNames.contains(path) { break }
+                if protectedNames.contains(path) { return false }
+            }
+            return true
+        }
 
         for dataset in datasets {
             let node = DatasetNode(dataset: dataset)
@@ -2339,7 +2357,7 @@ struct DatasetsView: View {
             node.children.sort { $0.dataset.name < $1.dataset.name }
         }
 
-        // Add snapshots as children of their parent datasets
+        // Add snapshots as children of their parent datasets (only for visible datasets)
         let snapshots = targetDatasets.filter { $0.isSnapshot }.sorted { $0.name < $1.name }
         for snapshot in snapshots {
             let parentName = snapshot.name.components(separatedBy: "@")[0]
