@@ -1159,20 +1159,63 @@ struct FirewallServicesView: View {
         Set(viewModel.rules.compactMap { $0.port })
     }
 
+    // Get protocols allowed for each port
+    var portProtocols: [Int: Set<String>] {
+        var result: [Int: Set<String>] = [:]
+        for rule in viewModel.rules {
+            if let port = rule.port {
+                let proto = rule.proto.lowercased()
+                if proto.contains("tcp") || proto.contains("udp") {
+                    if result[port] == nil {
+                        result[port] = []
+                    }
+                    if proto.contains("tcp") {
+                        result[port]?.insert("TCP")
+                    }
+                    if proto.contains("udp") {
+                        result[port]?.insert("UDP")
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    // Format protocol display string for a port
+    func protocolString(for port: Int) -> String {
+        guard let protos = portProtocols[port], !protos.isEmpty else {
+            return ""
+        }
+        if protos.contains("TCP") && protos.contains("UDP") {
+            return "TCP/UDP"
+        } else if protos.contains("TCP") {
+            return "TCP"
+        } else if protos.contains("UDP") {
+            return "UDP"
+        }
+        return ""
+    }
+
     // Services that are currently allowed
     var allowedServices: [FirewallService] {
         FirewallService.commonServices.filter { allowedPorts.contains($0.port) }
     }
 
-    // Custom ports (not in common services)
+    // Custom ports (not in common services) - deduplicated by port
     var customAllowedPorts: [FirewallRule] {
         let commonPorts = Set(FirewallService.commonServices.map { $0.port })
-        return viewModel.rules.filter { rule in
+        var seenPorts: Set<Int> = []
+        var result: [FirewallRule] = []
+
+        for rule in viewModel.rules {
             if let port = rule.port, !commonPorts.contains(port) && rule.options.contains("in") {
-                return true
+                if !seenPorts.contains(port) {
+                    seenPorts.insert(port)
+                    result.append(rule)
+                }
             }
-            return false
         }
+        return result
     }
 
     // Services that are not allowed (available to add)
@@ -1231,7 +1274,7 @@ struct FirewallServicesView: View {
                 List {
                     // Common services
                     ForEach(allowedServices) { service in
-                        ServiceRow(service: service, isAllowed: true) {
+                        ServiceRow(service: service, protocols: protocolString(for: service.port), isAllowed: true) {
                             Task {
                                 await disableService(service)
                             }
@@ -1240,7 +1283,7 @@ struct FirewallServicesView: View {
 
                     // Custom ports
                     ForEach(customAllowedPorts) { rule in
-                        CustomPortRow(rule: rule) {
+                        CustomPortRow(rule: rule, protocols: protocolString(for: rule.port ?? 0)) {
                             Task {
                                 await viewModel.deleteRule(rule)
                             }
@@ -1274,6 +1317,7 @@ struct FirewallServicesView: View {
 
 struct CustomPortRow: View {
     let rule: FirewallRule
+    let protocols: String
     let onRemove: () -> Void
 
     var body: some View {
@@ -1284,7 +1328,7 @@ struct CustomPortRow: View {
                 .frame(width: 32)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(rule.comment.isEmpty ? "Port " + String(rule.port ?? 0) : rule.comment)
+                Text(rule.comment.isEmpty ? String(rule.port ?? 0) : rule.comment)
                     .font(.headline)
                 Text("Custom port")
                     .font(.caption)
@@ -1293,7 +1337,7 @@ struct CustomPortRow: View {
 
             Spacer()
 
-            Text("Port " + String(rule.port ?? 0))
+            Text(String(rule.port ?? 0) + " " + protocols)
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 8)
@@ -1317,6 +1361,7 @@ struct CustomPortRow: View {
 
 struct ServiceRow: View {
     let service: FirewallService
+    let protocols: String
     let isAllowed: Bool
     let onToggle: () -> Void
 
@@ -1337,7 +1382,7 @@ struct ServiceRow: View {
 
             Spacer()
 
-            Text("Port " + String(service.port))
+            Text(String(service.port) + " " + protocols)
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 8)
@@ -1531,7 +1576,7 @@ struct AddServiceSheet: View {
             let userRules = viewModel.rules.filter { $0.ruleNumber >= 1000 && $0.ruleNumber < 65000 }
             let nextRuleNum = (userRules.map { $0.ruleNumber }.max() ?? 999) + 1
 
-            let name = customName.isEmpty ? "Port " + String(port) : customName
+            let name = customName.isEmpty ? String(port) : customName
 
             try await viewModel.addRule(
                 ruleNumber: nextRuleNum,
@@ -1580,7 +1625,7 @@ struct AddServiceRow: View {
 
             Spacer()
 
-            Text("Port " + String(service.port))
+            Text(String(service.port) + " " + service.proto.uppercased())
                 .font(.caption)
                 .foregroundColor(.secondary)
 
