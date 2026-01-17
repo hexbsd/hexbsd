@@ -973,6 +973,10 @@ struct FirewallService: Identifiable, Hashable {
         FirewallService(name: "RDP", icon: "desktopcomputer", port: 3389, proto: "tcp", description: "Windows Remote Desktop"),
         FirewallService(name: "Samba", icon: "externaldrive.connected.to.line.below", port: 445, proto: "tcp", description: "Windows File Sharing"),
         FirewallService(name: "NFS", icon: "externaldrive", port: 2049, proto: "tcp", description: "Network File System"),
+        FirewallService(name: "RPC Portmapper", icon: "arrow.triangle.branch", port: 111, proto: "udp", description: "RPC Service Discovery"),
+        FirewallService(name: "NIS Server", icon: "person.3", port: 811, proto: "udp", description: "Network Information Service"),
+        FirewallService(name: "NIS Bind", icon: "link", port: 616, proto: "udp", description: "NIS Client Binding"),
+        FirewallService(name: "NIS Password", icon: "key", port: 802, proto: "udp", description: "NIS Password Service"),
     ]
 }
 

@@ -2828,6 +2828,10 @@ ipfw -q add 00200 allow all from any to any out keep-state // outbound
         // Ports needed for domain services:
         // - 111 (RPC Portmapper) - required for NIS and NFS service discovery
         // - 2049 (NFS) - Network File System (server only)
+        // NIS/YP ports (server only):
+        // - 811 (ypserv) - NIS server daemon
+        // - 616/649 (ypbind) - NIS binding daemon
+        // - 802/709 (yppasswdd) - NIS password daemon
 
         // Add RPC Portmapper if not already allowed (needed for both server and client)
         if !existingPorts.contains(111) {
@@ -2844,12 +2848,60 @@ ipfw -q add 00200 allow all from any to any out keep-state // outbound
             nextRuleNum += 1
         }
 
-        // Server needs NFS port
-        if role == "server" && !existingPorts.contains(2049) {
-            print("DEBUG: Adding NFS (2049/tcp) firewall rule")
-            try await addFirewallRule(ruleNumber: nextRuleNum, action: "allow", proto: "tcp",
-                                      source: "any", destination: "any", port: 2049,
-                                      direction: "in", comment: "NFS-Domain")
+        // Server needs NFS and NIS ports
+        if role == "server" {
+            // NFS port
+            if !existingPorts.contains(2049) {
+                print("DEBUG: Adding NFS (2049/tcp) firewall rule")
+                try await addFirewallRule(ruleNumber: nextRuleNum, action: "allow", proto: "tcp",
+                                          source: "any", destination: "any", port: 2049,
+                                          direction: "in", comment: "NFS-Domain")
+                nextRuleNum += 1
+            }
+
+            // ypserv (NIS server) - port 811 TCP and UDP
+            if !existingPorts.contains(811) {
+                print("DEBUG: Adding ypserv (811/tcp) firewall rule")
+                try await addFirewallRule(ruleNumber: nextRuleNum, action: "allow", proto: "tcp",
+                                          source: "any", destination: "any", port: 811,
+                                          direction: "in", comment: "NIS-ypserv-Domain")
+                nextRuleNum += 1
+
+                try await addFirewallRule(ruleNumber: nextRuleNum, action: "allow", proto: "udp",
+                                          source: "any", destination: "any", port: 811,
+                                          direction: "in", comment: "NIS-ypserv-UDP-Domain")
+                nextRuleNum += 1
+            }
+
+            // ypbind - port 616 UDP, 649 TCP
+            if !existingPorts.contains(616) {
+                print("DEBUG: Adding ypbind (616/udp, 649/tcp) firewall rules")
+                try await addFirewallRule(ruleNumber: nextRuleNum, action: "allow", proto: "udp",
+                                          source: "any", destination: "any", port: 616,
+                                          direction: "in", comment: "NIS-ypbind-UDP-Domain")
+                nextRuleNum += 1
+            }
+            if !existingPorts.contains(649) {
+                try await addFirewallRule(ruleNumber: nextRuleNum, action: "allow", proto: "tcp",
+                                          source: "any", destination: "any", port: 649,
+                                          direction: "in", comment: "NIS-ypbind-TCP-Domain")
+                nextRuleNum += 1
+            }
+
+            // yppasswdd - port 802 UDP, 709 TCP (for password changes)
+            if !existingPorts.contains(802) {
+                print("DEBUG: Adding yppasswdd (802/udp, 709/tcp) firewall rules")
+                try await addFirewallRule(ruleNumber: nextRuleNum, action: "allow", proto: "udp",
+                                          source: "any", destination: "any", port: 802,
+                                          direction: "in", comment: "NIS-yppasswdd-UDP-Domain")
+                nextRuleNum += 1
+            }
+            if !existingPorts.contains(709) {
+                try await addFirewallRule(ruleNumber: nextRuleNum, action: "allow", proto: "tcp",
+                                          source: "any", destination: "any", port: 709,
+                                          direction: "in", comment: "NIS-yppasswdd-TCP-Domain")
+                nextRuleNum += 1
+            }
         }
 
         print("DEBUG: Domain firewall rules enabled for role: \(role)")
