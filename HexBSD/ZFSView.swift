@@ -37,6 +37,16 @@ struct ZFSPool: Identifiable, Hashable {
     }
 }
 
+struct AvailableDisk: Identifiable, Hashable {
+    let id = UUID()
+    let name: String        // e.g., "da0", "ada1"
+    let size: String        // e.g., "500G", "1T"
+    let description: String // e.g., "VBOX HARDDISK"
+    var isSelected: Bool = false
+    var hasPartitions: Bool = false  // True if disk has partition table
+    var partitionScheme: String = "" // e.g., "GPT", "MBR"
+}
+
 struct ZFSDataset: Identifiable, Hashable {
     let id = UUID()
     let name: String
@@ -273,6 +283,9 @@ struct BootEnvironmentsSheet: View {
 struct PoolsSheet: View {
     @ObservedObject var viewModel: ZFSViewModel
     @Environment(\.dismiss) private var dismiss
+    @State private var availableDisks: [AvailableDisk] = []
+    @State private var isLoadingDisks = false
+    @State private var showCreatePool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -284,10 +297,25 @@ struct PoolsSheet: View {
 
                 Spacer()
 
+                // New Pool button - disabled if no available disks
+                Button(action: {
+                    showCreatePool = true
+                }) {
+                    Label("New Pool", systemImage: "plus")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(availableDisks.isEmpty || isLoadingDisks)
+
+                if isLoadingDisks {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+
                 Button(action: {
                     Task {
                         await viewModel.refreshPools()
                         await viewModel.refreshScrubStatus()
+                        await loadAvailableDisks()
                     }
                 }) {
                     Label("Refresh", systemImage: "arrow.clockwise")
@@ -321,6 +349,11 @@ struct PoolsSheet: View {
                     Text("No ZFS Pools")
                         .font(.title2)
                         .foregroundColor(.secondary)
+                    if !availableDisks.isEmpty {
+                        Text("\(availableDisks.count) disk(s) available")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -343,6 +376,145 @@ struct PoolsSheet: View {
             Task {
                 await viewModel.refreshPools()
                 await viewModel.refreshScrubStatus()
+                await loadAvailableDisks()
+            }
+        }
+        .sheet(isPresented: $showCreatePool) {
+            CreatePoolSheet(
+                availableDisks: $availableDisks,
+                onCreate: { poolName, selectedDisks, raidType in
+                    Task {
+                        await viewModel.createPool(name: poolName, disks: selectedDisks, raidType: raidType)
+                        await loadAvailableDisks()
+                    }
+                },
+                onCancel: {
+                    showCreatePool = false
+                },
+                onWipe: { diskName in
+                    do {
+                        // Destroy all partitions on the disk
+                        let _ = try await SSHConnectionManager.shared.executeCommand("gpart destroy -F /dev/\(diskName) 2>/dev/null || true")
+                        // Also clear the first few sectors to remove any residual partition table
+                        let _ = try await SSHConnectionManager.shared.executeCommand("dd if=/dev/zero of=/dev/\(diskName) bs=512 count=2048 2>/dev/null || true")
+                        await loadAvailableDisks()
+                    } catch {
+                        // Ignore errors, disk list will be refreshed
+                        await loadAvailableDisks()
+                    }
+                }
+            )
+        }
+    }
+
+    private func loadAvailableDisks() async {
+        await MainActor.run {
+            isLoadingDisks = true
+        }
+
+        do {
+            // Get all disks in the system
+            let geomOutput = try await SSHConnectionManager.shared.executeCommand("geom disk list")
+
+            // Get disks currently used by ZFS - get both full paths and extract base disk names
+            let zpoolOutput = try await SSHConnectionManager.shared.executeCommand("zpool status 2>/dev/null | grep -E '^\\s+(ada|da|nvd|nda|vtbd|diskid)' | awk '{print $1}'")
+            var usedDisks = Set<String>()
+            for line in zpoolOutput.components(separatedBy: .newlines) {
+                let diskName = line.trimmingCharacters(in: .whitespaces)
+                if !diskName.isEmpty {
+                    usedDisks.insert(diskName)
+                    // Also add the base disk name without partition suffix (p1, p2, s1, etc.)
+                    let baseName = diskName.replacingOccurrences(of: "p[0-9]+$", with: "", options: .regularExpression)
+                        .replacingOccurrences(of: "s[0-9]+[a-z]?$", with: "", options: .regularExpression)
+                    usedDisks.insert(baseName)
+                }
+            }
+
+            // Get mounted disks
+            let mountOutput = try await SSHConnectionManager.shared.executeCommand("mount | grep '^/dev/' | awk '{print $1}' | sed 's|/dev/||'")
+            var mountedDisks = Set<String>()
+            for line in mountOutput.components(separatedBy: .newlines) {
+                let diskName = line.trimmingCharacters(in: .whitespaces)
+                if !diskName.isEmpty {
+                    mountedDisks.insert(diskName)
+                    // Also add the base disk name
+                    let baseName = diskName.replacingOccurrences(of: "p[0-9]+$", with: "", options: .regularExpression)
+                        .replacingOccurrences(of: "s[0-9]+[a-z]?$", with: "", options: .regularExpression)
+                    mountedDisks.insert(baseName)
+                }
+            }
+
+            // Get partition info for all disks
+            let gpartOutput = try await SSHConnectionManager.shared.executeCommand("gpart show 2>/dev/null || true")
+            var partitionedDisks: [String: String] = [:]  // diskName -> scheme (GPT, MBR, etc.)
+            for line in gpartOutput.components(separatedBy: .newlines) {
+                // Lines like "=>      40  41942960  da0  GPT  (20G)"
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("=>") {
+                    let parts = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+                    if parts.count >= 4 {
+                        let diskName = parts[3]
+                        let scheme = parts.count >= 5 ? parts[4] : "Unknown"
+                        partitionedDisks[diskName] = scheme
+                    }
+                }
+            }
+
+            // Parse geom output to get disk info
+            var disks: [AvailableDisk] = []
+            var currentDisk: (name: String, size: String, desc: String)? = nil
+
+            for line in geomOutput.components(separatedBy: .newlines) {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+                if trimmed.hasPrefix("Geom name:") {
+                    // Save previous disk if exists and not in use by ZFS or mounted
+                    if let disk = currentDisk {
+                        let baseName = disk.name.replacingOccurrences(of: "p[0-9]+$", with: "", options: .regularExpression)
+                        // Filter out optical drives (cd0, cd1, etc.)
+                        if !disk.name.hasPrefix("cd") &&
+                           !usedDisks.contains(disk.name) && !usedDisks.contains(baseName) &&
+                           !mountedDisks.contains(disk.name) && !mountedDisks.contains(baseName) {
+                            let hasPartitions = partitionedDisks[disk.name] != nil
+                            let scheme = partitionedDisks[disk.name] ?? ""
+                            disks.append(AvailableDisk(name: disk.name, size: disk.size, description: disk.desc, hasPartitions: hasPartitions, partitionScheme: scheme))
+                        }
+                    }
+                    let name = trimmed.replacingOccurrences(of: "Geom name: ", with: "")
+                    currentDisk = (name: name, size: "", desc: "")
+                } else if trimmed.hasPrefix("Mediasize:") {
+                    // Extract human-readable size (e.g., "Mediasize: 21474836480 (20G)")
+                    if let match = trimmed.range(of: "\\([^)]+\\)", options: .regularExpression) {
+                        let size = String(trimmed[match]).replacingOccurrences(of: "(", with: "").replacingOccurrences(of: ")", with: "")
+                        currentDisk?.size = size
+                    }
+                } else if trimmed.hasPrefix("descr:") {
+                    let desc = trimmed.replacingOccurrences(of: "descr: ", with: "")
+                    currentDisk?.desc = desc
+                }
+            }
+
+            // Don't forget the last disk
+            if let disk = currentDisk {
+                let baseName = disk.name.replacingOccurrences(of: "p[0-9]+$", with: "", options: .regularExpression)
+                // Filter out optical drives (cd0, cd1, etc.)
+                if !disk.name.hasPrefix("cd") &&
+                   !usedDisks.contains(disk.name) && !usedDisks.contains(baseName) &&
+                   !mountedDisks.contains(disk.name) && !mountedDisks.contains(baseName) {
+                    let hasPartitions = partitionedDisks[disk.name] != nil
+                    let scheme = partitionedDisks[disk.name] ?? ""
+                    disks.append(AvailableDisk(name: disk.name, size: disk.size, description: disk.desc, hasPartitions: hasPartitions, partitionScheme: scheme))
+                }
+            }
+
+            await MainActor.run {
+                availableDisks = disks
+                isLoadingDisks = false
+            }
+        } catch {
+            await MainActor.run {
+                availableDisks = []
+                isLoadingDisks = false
             }
         }
     }
@@ -1300,6 +1472,9 @@ struct ScheduleReplicationTaskSheet: View {
 
 struct PoolsView: View {
     @ObservedObject var viewModel: ZFSViewModel
+    @State private var availableDisks: [AvailableDisk] = []
+    @State private var isLoadingDisks = false
+    @State private var showCreatePool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1311,9 +1486,24 @@ struct PoolsView: View {
 
                 Spacer()
 
+                // Show plus button - disabled if no available disks
+                Button(action: {
+                    showCreatePool = true
+                }) {
+                    Label("New Pool", systemImage: "plus")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(availableDisks.isEmpty || isLoadingDisks)
+
+                if isLoadingDisks {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+
                 Button(action: {
                     Task {
                         await viewModel.refreshPools()
+                        await loadAvailableDisks()
                     }
                 }) {
                     Label("Refresh", systemImage: "arrow.clockwise")
@@ -1360,6 +1550,149 @@ struct PoolsView: View {
                     }
                     .padding()
                 }
+            }
+        }
+        .onAppear {
+            Task {
+                await loadAvailableDisks()
+            }
+        }
+        .sheet(isPresented: $showCreatePool) {
+            CreatePoolSheet(
+                availableDisks: $availableDisks,
+                onCreate: { poolName, selectedDisks, raidType in
+                    Task {
+                        await viewModel.createPool(name: poolName, disks: selectedDisks, raidType: raidType)
+                        await loadAvailableDisks()
+                    }
+                },
+                onCancel: {
+                    showCreatePool = false
+                },
+                onWipe: { diskName in
+                    do {
+                        // Destroy all partitions on the disk
+                        let _ = try await SSHConnectionManager.shared.executeCommand("gpart destroy -F /dev/\(diskName) 2>/dev/null || true")
+                        // Also clear the first few sectors to remove any residual partition table
+                        let _ = try await SSHConnectionManager.shared.executeCommand("dd if=/dev/zero of=/dev/\(diskName) bs=512 count=2048 2>/dev/null || true")
+                        await loadAvailableDisks()
+                    } catch {
+                        // Ignore errors, disk list will be refreshed
+                        await loadAvailableDisks()
+                    }
+                }
+            )
+        }
+    }
+
+    private func loadAvailableDisks() async {
+        await MainActor.run {
+            isLoadingDisks = true
+        }
+
+        do {
+            // Get all disks in the system
+            let geomOutput = try await SSHConnectionManager.shared.executeCommand("geom disk list")
+
+            // Get disks currently used by ZFS - get both full paths and extract base disk names
+            let zpoolOutput = try await SSHConnectionManager.shared.executeCommand("zpool status 2>/dev/null | grep -E '^\\s+(ada|da|nvd|nda|vtbd|diskid)' | awk '{print $1}'")
+            var usedDisks = Set<String>()
+            for line in zpoolOutput.components(separatedBy: .newlines) {
+                let diskName = line.trimmingCharacters(in: .whitespaces)
+                if !diskName.isEmpty {
+                    usedDisks.insert(diskName)
+                    // Also add the base disk name without partition suffix (p1, p2, s1, etc.)
+                    let baseName = diskName.replacingOccurrences(of: "p[0-9]+$", with: "", options: .regularExpression)
+                        .replacingOccurrences(of: "s[0-9]+[a-z]?$", with: "", options: .regularExpression)
+                    usedDisks.insert(baseName)
+                }
+            }
+
+            // Get mounted disks
+            let mountOutput = try await SSHConnectionManager.shared.executeCommand("mount | grep '^/dev/' | awk '{print $1}' | sed 's|/dev/||'")
+            var mountedDisks = Set<String>()
+            for line in mountOutput.components(separatedBy: .newlines) {
+                let diskName = line.trimmingCharacters(in: .whitespaces)
+                if !diskName.isEmpty {
+                    mountedDisks.insert(diskName)
+                    // Also add the base disk name
+                    let baseName = diskName.replacingOccurrences(of: "p[0-9]+$", with: "", options: .regularExpression)
+                        .replacingOccurrences(of: "s[0-9]+[a-z]?$", with: "", options: .regularExpression)
+                    mountedDisks.insert(baseName)
+                }
+            }
+
+            // Get partition info for all disks
+            let gpartOutput = try await SSHConnectionManager.shared.executeCommand("gpart show 2>/dev/null || true")
+            var partitionedDisks: [String: String] = [:]  // diskName -> scheme (GPT, MBR, etc.)
+            for line in gpartOutput.components(separatedBy: .newlines) {
+                // Lines like "=>      40  41942960  da0  GPT  (20G)"
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("=>") {
+                    let parts = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+                    if parts.count >= 4 {
+                        let diskName = parts[3]
+                        let scheme = parts.count >= 5 ? parts[4] : "Unknown"
+                        partitionedDisks[diskName] = scheme
+                    }
+                }
+            }
+
+            // Parse geom output to get disk info
+            var disks: [AvailableDisk] = []
+            var currentDisk: (name: String, size: String, desc: String)? = nil
+
+            for line in geomOutput.components(separatedBy: .newlines) {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+                if trimmed.hasPrefix("Geom name:") {
+                    // Save previous disk if exists and not in use by ZFS or mounted
+                    if let disk = currentDisk {
+                        let baseName = disk.name.replacingOccurrences(of: "p[0-9]+$", with: "", options: .regularExpression)
+                        // Filter out optical drives (cd0, cd1, etc.)
+                        if !disk.name.hasPrefix("cd") &&
+                           !usedDisks.contains(disk.name) && !usedDisks.contains(baseName) &&
+                           !mountedDisks.contains(disk.name) && !mountedDisks.contains(baseName) {
+                            let hasPartitions = partitionedDisks[disk.name] != nil
+                            let scheme = partitionedDisks[disk.name] ?? ""
+                            disks.append(AvailableDisk(name: disk.name, size: disk.size, description: disk.desc, hasPartitions: hasPartitions, partitionScheme: scheme))
+                        }
+                    }
+                    let name = trimmed.replacingOccurrences(of: "Geom name: ", with: "")
+                    currentDisk = (name: name, size: "", desc: "")
+                } else if trimmed.hasPrefix("Mediasize:") {
+                    // Extract human-readable size (e.g., "Mediasize: 21474836480 (20G)")
+                    if let match = trimmed.range(of: "\\([^)]+\\)", options: .regularExpression) {
+                        let size = String(trimmed[match]).replacingOccurrences(of: "(", with: "").replacingOccurrences(of: ")", with: "")
+                        currentDisk?.size = size
+                    }
+                } else if trimmed.hasPrefix("descr:") {
+                    let desc = trimmed.replacingOccurrences(of: "descr: ", with: "")
+                    currentDisk?.desc = desc
+                }
+            }
+
+            // Don't forget the last disk
+            if let disk = currentDisk {
+                let baseName = disk.name.replacingOccurrences(of: "p[0-9]+$", with: "", options: .regularExpression)
+                // Filter out optical drives (cd0, cd1, etc.)
+                if !disk.name.hasPrefix("cd") &&
+                   !usedDisks.contains(disk.name) && !usedDisks.contains(baseName) &&
+                   !mountedDisks.contains(disk.name) && !mountedDisks.contains(baseName) {
+                    let hasPartitions = partitionedDisks[disk.name] != nil
+                    let scheme = partitionedDisks[disk.name] ?? ""
+                    disks.append(AvailableDisk(name: disk.name, size: disk.size, description: disk.desc, hasPartitions: hasPartitions, partitionScheme: scheme))
+                }
+            }
+
+            await MainActor.run {
+                availableDisks = disks
+                isLoadingDisks = false
+            }
+        } catch {
+            await MainActor.run {
+                availableDisks = []
+                isLoadingDisks = false
             }
         }
     }
@@ -4285,6 +4618,221 @@ struct ReplicationDatasetNodeView: View {
     }
 }
 
+// MARK: - Create Pool Sheet
+
+struct CreatePoolSheet: View {
+    @Binding var availableDisks: [AvailableDisk]
+    let onCreate: (String, [String], String) -> Void  // poolName, selectedDisks, raidType
+    let onCancel: () -> Void
+    let onWipe: (String) async -> Void  // diskName
+
+    @State private var poolName: String = ""
+    @State private var selectedDisks: Set<String> = []
+    @State private var raidType: String = "stripe"
+    @State private var isWiping: String? = nil  // disk currently being wiped
+    @Environment(\.dismiss) private var dismiss
+
+    private let raidTypes = [
+        ("stripe", "Stripe (No Redundancy)", 1),
+        ("mirror", "Mirror (2+ disks)", 2),
+        ("raidz1", "RAID-Z1 (3+ disks)", 3),
+        ("raidz2", "RAID-Z2 (4+ disks)", 4),
+        ("raidz3", "RAID-Z3 (5+ disks)", 5)
+    ]
+
+    private var canCreate: Bool {
+        !poolName.isEmpty &&
+        !selectedDisks.isEmpty &&
+        selectedDisks.count >= minimumDisksForRaid
+    }
+
+    private var minimumDisksForRaid: Int {
+        raidTypes.first(where: { $0.0 == raidType })?.2 ?? 1
+    }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Create ZFS Pool")
+                .font(.title2)
+                .bold()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Pool Name")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                TextField("mypool", text: $poolName)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("RAID Type")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Picker("", selection: $raidType) {
+                    ForEach(raidTypes, id: \.0) { type in
+                        Text(type.1).tag(type.0)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                if selectedDisks.count < minimumDisksForRaid {
+                    Text("⚠️ \(raidType) requires at least \(minimumDisksForRaid) disk(s). Select \(minimumDisksForRaid - selectedDisks.count) more.")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Available Disks")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Text("\(selectedDisks.count) selected")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                ScrollView {
+                    VStack(spacing: 4) {
+                        ForEach(availableDisks) { disk in
+                            HStack {
+                                if disk.hasPartitions {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundColor(.orange)
+                                } else {
+                                    Image(systemName: selectedDisks.contains(disk.name) ? "checkmark.circle.fill" : "circle")
+                                        .foregroundColor(selectedDisks.contains(disk.name) ? .accentColor : .secondary)
+                                }
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack(spacing: 4) {
+                                        Text(disk.name)
+                                            .font(.body)
+                                            .fontWeight(.medium)
+                                        if disk.hasPartitions {
+                                            Text("(\(disk.partitionScheme))")
+                                                .font(.caption)
+                                                .foregroundColor(.orange)
+                                        }
+                                    }
+                                    Text("\(disk.size) - \(disk.description)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+
+                                Spacer()
+
+                                if disk.hasPartitions {
+                                    if isWiping == disk.name {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    } else {
+                                        Button("Wipe") {
+                                            wipeDisk(disk.name)
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .tint(.orange)
+                                        .controlSize(.small)
+                                        .disabled(isWiping != nil)
+                                    }
+                                } else {
+                                    Text(disk.size)
+                                        .font(.body)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(disk.hasPartitions ? Color.orange.opacity(0.05) : (selectedDisks.contains(disk.name) ? Color.accentColor.opacity(0.1) : Color.clear))
+                            .cornerRadius(6)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if !disk.hasPartitions {
+                                    if selectedDisks.contains(disk.name) {
+                                        selectedDisks.remove(disk.name)
+                                    } else {
+                                        selectedDisks.insert(disk.name)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(height: 200)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(8)
+            }
+
+            if canCreate {
+                // Preview command
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Command Preview")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text(buildCommand())
+                        .font(.system(.caption, design: .monospaced))
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(nsColor: .textBackgroundColor))
+                        .cornerRadius(4)
+                }
+            }
+
+            HStack {
+                Button("Cancel") {
+                    dismiss()
+                    onCancel()
+                }
+                .keyboardShortcut(.escape)
+
+                Spacer()
+
+                Button("Create Pool") {
+                    onCreate(poolName, Array(selectedDisks), raidType)
+                    dismiss()
+                }
+                .keyboardShortcut(.return)
+                .buttonStyle(.borderedProminent)
+                .disabled(!canCreate)
+            }
+        }
+        .padding()
+        .frame(width: 800, height: 650)
+    }
+
+    private func buildCommand() -> String {
+        let disks = selectedDisks.sorted().map { "/dev/\($0)" }.joined(separator: " ")
+        if raidType == "stripe" {
+            return "zpool create \(poolName) \(disks)"
+        } else {
+            return "zpool create \(poolName) \(raidType) \(disks)"
+        }
+    }
+
+    private func wipeDisk(_ diskName: String) {
+        // Confirm wipe
+        let alert = NSAlert()
+        alert.messageText = "Wipe Disk \(diskName)?"
+        alert.informativeText = "This will destroy all partitions and data on /dev/\(diskName). This action cannot be undone."
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "Wipe Disk")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+
+        isWiping = diskName
+        Task {
+            await onWipe(diskName)
+            await MainActor.run {
+                isWiping = nil
+            }
+        }
+    }
+}
+
 // MARK: - Create Snapshot Sheet
 
 struct CreateSnapshotSheet: View {
@@ -4494,6 +5042,26 @@ class ZFSViewModel: ObservableObject {
             await refreshDatasets()
         } catch {
             self.error = "Failed to delete snapshot: \(error.localizedDescription)"
+        }
+    }
+
+    func createPool(name: String, disks: [String], raidType: String) async {
+        error = nil
+
+        do {
+            let diskPaths = disks.map { "/dev/\($0)" }.joined(separator: " ")
+            let command: String
+            if raidType == "stripe" {
+                command = "zpool create \(name) \(diskPaths)"
+            } else {
+                command = "zpool create \(name) \(raidType) \(diskPaths)"
+            }
+
+            let _ = try await sshManager.executeCommand(command)
+            await refreshPools()
+            await refreshDatasets()
+        } catch {
+            self.error = "Failed to create pool: \(error.localizedDescription)"
         }
     }
 
