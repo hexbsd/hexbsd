@@ -5144,7 +5144,7 @@ extension SSHConnectionManager {
     /// Returns a dictionary mapping command substrings to (lastRun, result) tuples
     func getCronHistory() async throws -> [(timestamp: String, user: String, command: String)] {
         // FreeBSD cron logs to /var/log/cron
-        // Format: "Jan 16 15:00:00 hostname cron[1234]: (user) CMD (command)"
+        // Format: "Jan 16 15:00:00 hostname /usr/sbin/cron[1234]: (user) CMD (command)"
         let output = try await executeCommand("tail -500 /var/log/cron 2>/dev/null | grep 'CMD' || echo ''")
 
         var history: [(timestamp: String, user: String, command: String)] = []
@@ -5152,18 +5152,18 @@ extension SSHConnectionManager {
         for line in output.split(separator: "\n") {
             let lineStr = String(line)
 
-            // Parse: "Jan 16 15:00:00 hostname cron[1234]: (user) CMD (command)"
+            // Parse: "Jan 16 15:00:00 hostname /usr/sbin/cron[1234]: (user) CMD (command)"
             // Extract timestamp (first 15 chars), user, and command
             guard lineStr.count > 15 else { continue }
 
             let timestamp = String(lineStr.prefix(15)) // "Jan 16 15:00:00"
 
-            // Find user in parentheses after "cron[...]:"
-            if let userStart = lineStr.range(of: "): ("),
+            // Find user in parentheses after ": ("
+            if let userStart = lineStr.range(of: ": ("),
                let userEnd = lineStr.range(of: ") CMD", range: userStart.upperBound..<lineStr.endIndex) {
                 let user = String(lineStr[userStart.upperBound..<userEnd.lowerBound])
 
-                // Find command in parentheses after "CMD"
+                // Find command in parentheses after "CMD ("
                 if let cmdStart = lineStr.range(of: "CMD ("),
                    let cmdEnd = lineStr.lastIndex(of: ")") {
                     let command = String(lineStr[cmdStart.upperBound..<cmdEnd])

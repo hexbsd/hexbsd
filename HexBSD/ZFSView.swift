@@ -654,8 +654,9 @@ struct ReplicationChoiceSheet: View {
         // 1. Creates a timestamped snapshot
         // 2. Finds the previous auto- snapshot if any
         // 3. Does incremental send if previous exists, otherwise full send
+        // NOTE: % must be escaped as \% in crontab (% means newline in cron)
         return """
-SNAP="\(dataset)@auto-$(date +%Y%m%d-%H%M%S)" && zfs snapshot "$SNAP" && PREV=$(zfs list -t snapshot -o name -S creation \(dataset) 2>/dev/null | grep '@auto-' | sed -n '2p') && if [ -n "$PREV" ]; then zfs send -i "$PREV" "$SNAP" | ssh -o StrictHostKeyChecking=no \(target) 'zfs receive -F \(dest)'; else zfs send "$SNAP" | ssh -o StrictHostKeyChecking=no \(target) 'zfs receive -F \(dest)'; fi
+SNAP="\(dataset)@auto-$(date +\\%Y\\%m\\%d-\\%H\\%M\\%S)" && zfs snapshot "$SNAP" && PREV=$(zfs list -t snapshot -o name -S creation \(dataset) 2>/dev/null | grep '@auto-' | sed -n '2p') && if [ -n "$PREV" ]; then zfs send -i "$PREV" "$SNAP" | ssh -o StrictHostKeyChecking=no \(target) 'zfs receive -F \(dest)'; else zfs send "$SNAP" | ssh -o StrictHostKeyChecking=no \(target) 'zfs receive -F \(dest)'; fi
 """
     }
 

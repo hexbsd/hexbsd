@@ -529,7 +529,9 @@ class TasksViewModel: ObservableObject {
                     let task = loadedTasks[i]
                     // Find the most recent history entry that matches this task's command
                     // We check if the history command contains a significant portion of the task command
-                    let taskCmdPrefix = String(task.command.prefix(30))
+                    // Note: crontab has \% but log shows % (unescaped), so we normalize both
+                    let taskCmdNormalized = task.command.replacingOccurrences(of: "\\%", with: "%")
+                    let taskCmdPrefix = String(taskCmdNormalized.prefix(30))
                     if let match = history.last(where: { entry in
                         entry.user == task.user && entry.command.contains(taskCmdPrefix)
                     }) {
