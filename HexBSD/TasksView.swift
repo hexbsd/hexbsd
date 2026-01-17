@@ -278,66 +278,48 @@ struct AddTaskView: View {
     let task: CronTask?
     let onSave: (String, String, String, String, String, String, String) -> Void
 
-    @State private var selectedTab = 0
     @State private var command: String
     @State private var user: String
 
-    // Simple mode
-    @State private var frequency = 0 // 0=hourly, 1=daily, 2=weekly, 3=monthly
+    @State private var frequency = 0 // 0=minute, 1=hourly, 2=daily, 3=weekly, 4=monthly
+    @State private var minuteInterval = 5 // For "every X minutes" option
     @State private var selectedMinute = 0
     @State private var selectedHour = 0
     @State private var selectedDayOfWeek = 0
     @State private var selectedDayOfMonth = 1
-
-    // Advanced mode
-    @State private var minute: String
-    @State private var hour: String
-    @State private var dayOfMonth: String
-    @State private var month: String
-    @State private var dayOfWeek: String
 
     init(task: CronTask?, onSave: @escaping (String, String, String, String, String, String, String) -> Void) {
         self.task = task
         self.onSave = onSave
 
         if let task = task {
-            _minute = State(initialValue: task.minute)
-            _hour = State(initialValue: task.hour)
-            _dayOfMonth = State(initialValue: task.dayOfMonth)
-            _month = State(initialValue: task.month)
-            _dayOfWeek = State(initialValue: task.dayOfWeek)
             _command = State(initialValue: task.command)
             _user = State(initialValue: task.user)
-            _selectedTab = State(initialValue: 1) // Default to advanced for editing
+            // Try to parse existing schedule into simple mode values
+            if let min = Int(task.minute), let hr = Int(task.hour) {
+                _selectedMinute = State(initialValue: min)
+                _selectedHour = State(initialValue: hr)
+            }
         } else {
-            _minute = State(initialValue: "*")
-            _hour = State(initialValue: "*")
-            _dayOfMonth = State(initialValue: "*")
-            _month = State(initialValue: "*")
-            _dayOfWeek = State(initialValue: "*")
             _command = State(initialValue: "")
             _user = State(initialValue: "root")
         }
     }
 
     var computedCronSchedule: (String, String, String, String, String) {
-        if selectedTab == 0 {
-            // Simple mode
-            switch frequency {
-            case 0: // Hourly
-                return ("\(selectedMinute)", "*", "*", "*", "*")
-            case 1: // Daily
-                return ("\(selectedMinute)", "\(selectedHour)", "*", "*", "*")
-            case 2: // Weekly
-                return ("\(selectedMinute)", "\(selectedHour)", "*", "*", "\(selectedDayOfWeek)")
-            case 3: // Monthly
-                return ("\(selectedMinute)", "\(selectedHour)", "\(selectedDayOfMonth)", "*", "*")
-            default:
-                return ("*", "*", "*", "*", "*")
-            }
-        } else {
-            // Advanced mode
-            return (minute, hour, dayOfMonth, month, dayOfWeek)
+        switch frequency {
+        case 0: // Every X minutes
+            return ("*/\(minuteInterval)", "*", "*", "*", "*")
+        case 1: // Hourly
+            return ("\(selectedMinute)", "*", "*", "*", "*")
+        case 2: // Daily
+            return ("\(selectedMinute)", "\(selectedHour)", "*", "*", "*")
+        case 3: // Weekly
+            return ("\(selectedMinute)", "\(selectedHour)", "*", "*", "\(selectedDayOfWeek)")
+        case 4: // Monthly
+            return ("\(selectedMinute)", "\(selectedHour)", "\(selectedDayOfMonth)", "*", "*")
+        default:
+            return ("*", "*", "*", "*", "*")
         }
     }
 
@@ -352,24 +334,10 @@ struct AddTaskView: View {
 
             Divider()
 
-            // Tab selector
-            Picker("", selection: $selectedTab) {
-                Text("Simple").tag(0)
-                Text("Advanced").tag(1)
-            }
-            .pickerStyle(.segmented)
-            .padding()
-
             // Content
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    if selectedTab == 0 {
-                        // Simple mode
-                        simpleScheduleView
-                    } else {
-                        // Advanced mode
-                        advancedScheduleView
-                    }
+                    simpleScheduleView
 
                     Divider()
 
@@ -411,25 +379,42 @@ struct AddTaskView: View {
                 .font(.headline)
 
             Picker("Run", selection: $frequency) {
-                Text("Hourly").tag(0)
-                Text("Daily").tag(1)
-                Text("Weekly").tag(2)
-                Text("Monthly").tag(3)
+                Text("Minute").tag(0)
+                Text("Hourly").tag(1)
+                Text("Daily").tag(2)
+                Text("Weekly").tag(3)
+                Text("Monthly").tag(4)
             }
             .pickerStyle(.radioGroup)
 
             // Time settings based on frequency
             VStack(alignment: .leading, spacing: 12) {
-                if frequency >= 1 {
+                if frequency == 0 {
+                    // Every X minutes
+                    HStack {
+                        Text("Every:")
+                            .frame(width: 80, alignment: .trailing)
+                        Picker("Minutes", selection: $minuteInterval) {
+                            ForEach(1..<60, id: \.self) { min in
+                                Text("\(min)").tag(min)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 80)
+                        Text("minute\(minuteInterval == 1 ? "" : "s")")
+                            .foregroundColor(.secondary)
+                    }
+                } else if frequency >= 2 {
+                    // Daily, weekly, monthly - pick time
                     HStack {
                         Text("At time:")
                             .frame(width: 80, alignment: .trailing)
                         Picker("Hour", selection: $selectedHour) {
                             ForEach(0..<24, id: \.self) { hour in
-                                Text(String(format: "%02d:00", hour)).tag(hour)
+                                Text(String(format: "%02d", hour)).tag(hour)
                             }
                         }
-                        .frame(width: 100)
+                        .frame(width: 80)
 
                         Text(":")
 
@@ -440,7 +425,8 @@ struct AddTaskView: View {
                         }
                         .frame(width: 80)
                     }
-                } else {
+                } else if frequency == 1 {
+                    // Hourly - just pick minute
                     HStack {
                         Text("At minute:")
                             .frame(width: 80, alignment: .trailing)
@@ -453,9 +439,10 @@ struct AddTaskView: View {
                     }
                 }
 
-                if frequency == 2 {
+                if frequency == 3 {
+                    // Weekly - pick day of week
                     HStack {
-                        Text("On day:")
+                        Text("On:")
                             .frame(width: 80, alignment: .trailing)
                         Picker("Day", selection: $selectedDayOfWeek) {
                             Text("Sunday").tag(0)
@@ -470,7 +457,8 @@ struct AddTaskView: View {
                     }
                 }
 
-                if frequency == 3 {
+                if frequency == 4 {
+                    // Monthly - pick day of month
                     HStack {
                         Text("On day:")
                             .frame(width: 80, alignment: .trailing)
@@ -485,42 +473,6 @@ struct AddTaskView: View {
                     }
                 }
             }
-        }
-    }
-
-    var advancedScheduleView: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Cron Expression")
-                .font(.headline)
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 12) {
-                    cronField("Minute", value: $minute, placeholder: "*", help: "0-59")
-                    cronField("Hour", value: $hour, placeholder: "*", help: "0-23")
-                    cronField("Day", value: $dayOfMonth, placeholder: "*", help: "1-31")
-                    cronField("Month", value: $month, placeholder: "*", help: "1-12")
-                    cronField("Weekday", value: $dayOfWeek, placeholder: "*", help: "0-6")
-                }
-
-                Text("Use * for any value, or specific numbers/ranges")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .padding(.top, 4)
-            }
-        }
-    }
-
-    func cronField(_ label: String, value: Binding<String>, placeholder: String, help: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label)
-                .font(.caption)
-                .foregroundColor(.secondary)
-            TextField(placeholder, text: value)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 70)
-            Text(help)
-                .font(.caption2)
-                .foregroundColor(.secondary)
         }
     }
 

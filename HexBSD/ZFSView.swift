@@ -785,7 +785,8 @@ struct ScheduleReplicationTaskSheet: View {
     let onSave: (String, String, String, String, String, String, String) -> Void
     let onCancel: () -> Void
 
-    @State private var frequency = 1 // 0=hourly, 1=daily, 2=weekly, 3=monthly
+    @State private var frequency = 0 // 0=minute, 1=hourly, 2=daily, 3=weekly, 4=monthly
+    @State private var minuteInterval = 5 // For "every X minutes" option
     @State private var selectedMinute = 0
     @State private var selectedHour = 2 // Default to 2 AM
     @State private var selectedDayOfWeek = 0
@@ -801,13 +802,15 @@ struct ScheduleReplicationTaskSheet: View {
 
     private var computedCronSchedule: (String, String, String, String, String) {
         switch frequency {
-        case 0: // Hourly
+        case 0: // Every X minutes
+            return ("*/\(minuteInterval)", "*", "*", "*", "*")
+        case 1: // Hourly
             return ("\(selectedMinute)", "*", "*", "*", "*")
-        case 1: // Daily
+        case 2: // Daily
             return ("\(selectedMinute)", "\(selectedHour)", "*", "*", "*")
-        case 2: // Weekly
+        case 3: // Weekly
             return ("\(selectedMinute)", "\(selectedHour)", "*", "*", "\(selectedDayOfWeek)")
-        case 3: // Monthly
+        case 4: // Monthly
             return ("\(selectedMinute)", "\(selectedHour)", "\(selectedDayOfMonth)", "*", "*")
         default:
             return ("0", "2", "*", "*", "*")
@@ -817,13 +820,15 @@ struct ScheduleReplicationTaskSheet: View {
     private var scheduleDescription: String {
         switch frequency {
         case 0:
-            return "Every hour at :\(String(format: "%02d", selectedMinute))"
+            return "Every \(minuteInterval) minute\(minuteInterval == 1 ? "" : "s")"
         case 1:
-            return "Daily at \(String(format: "%02d:%02d", selectedHour, selectedMinute))"
+            return "Every hour at :\(String(format: "%02d", selectedMinute))"
         case 2:
+            return "Daily at \(String(format: "%02d:%02d", selectedHour, selectedMinute))"
+        case 3:
             let days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
             return "Every \(days[selectedDayOfWeek]) at \(String(format: "%02d:%02d", selectedHour, selectedMinute))"
-        case 3:
+        case 4:
             return "Monthly on day \(selectedDayOfMonth) at \(String(format: "%02d:%02d", selectedHour, selectedMinute))"
         default:
             return ""
@@ -848,16 +853,32 @@ struct ScheduleReplicationTaskSheet: View {
                             .font(.headline)
 
                         Picker("Run", selection: $frequency) {
-                            Text("Hourly").tag(0)
-                            Text("Daily").tag(1)
-                            Text("Weekly").tag(2)
-                            Text("Monthly").tag(3)
+                            Text("Minute").tag(0)
+                            Text("Hourly").tag(1)
+                            Text("Daily").tag(2)
+                            Text("Weekly").tag(3)
+                            Text("Monthly").tag(4)
                         }
                         .pickerStyle(.segmented)
 
                         // Time settings
                         VStack(alignment: .leading, spacing: 12) {
-                            if frequency >= 1 {
+                            if frequency == 0 {
+                                // Every X minutes
+                                HStack {
+                                    Text("Every:")
+                                        .frame(width: 80, alignment: .trailing)
+                                    Picker("Minutes", selection: $minuteInterval) {
+                                        ForEach(1..<60, id: \.self) { min in
+                                            Text("\(min)").tag(min)
+                                        }
+                                    }
+                                    .pickerStyle(.menu)
+                                    .frame(width: 80)
+                                    Text("minute\(minuteInterval == 1 ? "" : "s")")
+                                        .foregroundColor(.secondary)
+                                }
+                            } else if frequency >= 2 {
                                 HStack {
                                     Text("At time:")
                                         .frame(width: 80, alignment: .trailing)
@@ -877,7 +898,8 @@ struct ScheduleReplicationTaskSheet: View {
                                     }
                                     .frame(width: 70)
                                 }
-                            } else {
+                            } else if frequency == 1 {
+                                // Hourly - just pick minute
                                 HStack {
                                     Text("At minute:")
                                         .frame(width: 80, alignment: .trailing)
@@ -890,7 +912,8 @@ struct ScheduleReplicationTaskSheet: View {
                                 }
                             }
 
-                            if frequency == 2 {
+                            if frequency == 3 {
+                                // Weekly - pick day
                                 HStack {
                                     Text("On:")
                                         .frame(width: 80, alignment: .trailing)
@@ -907,7 +930,8 @@ struct ScheduleReplicationTaskSheet: View {
                                 }
                             }
 
-                            if frequency == 3 {
+                            if frequency == 4 {
+                                // Monthly - pick day of month
                                 HStack {
                                     Text("On day:")
                                         .frame(width: 80, alignment: .trailing)
