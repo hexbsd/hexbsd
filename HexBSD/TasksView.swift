@@ -21,6 +21,20 @@ struct CronTask: Identifiable, Hashable {
     let user: String
     let enabled: Bool
     let originalLine: String
+    var lastRun: String?
+
+    init(minute: String, hour: String, dayOfMonth: String, month: String, dayOfWeek: String, command: String, user: String, enabled: Bool, originalLine: String, lastRun: String? = nil) {
+        self.minute = minute
+        self.hour = hour
+        self.dayOfMonth = dayOfMonth
+        self.month = month
+        self.dayOfWeek = dayOfWeek
+        self.command = command
+        self.user = user
+        self.enabled = enabled
+        self.originalLine = originalLine
+        self.lastRun = lastRun
+    }
 
     var schedule: String {
         "\(minute) \(hour) \(dayOfMonth) \(month) \(dayOfWeek)"
@@ -46,6 +60,14 @@ struct CronTask: Identifiable, Hashable {
             return "Daily at \(hour):\(minute)"
         }
         return schedule
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(originalLine)
+    }
+
+    static func == (lhs: CronTask, rhs: CronTask) -> Bool {
+        lhs.originalLine == rhs.originalLine
     }
 }
 
@@ -138,13 +160,32 @@ struct TasksContentView: View {
                                 .foregroundColor(.secondary)
                         }
                     }
-                    .width(min: 150, ideal: 200)
+                    .width(min: 150, ideal: 180)
 
-                    TableColumn("Command", value: \.command)
-                        .width(min: 200, ideal: 400)
+                    TableColumn("Last Run") { task in
+                        if let lastRun = task.lastRun {
+                            Text(lastRun)
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text("Never")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                                .italic()
+                        }
+                    }
+                    .width(min: 120, ideal: 150)
+
+                    TableColumn("Command") { task in
+                        Text(task.command)
+                            .font(.system(size: 11))
+                            .lineLimit(2)
+                            .help(task.command)
+                    }
+                    .width(min: 200, ideal: 300)
 
                     TableColumn("User", value: \.user)
-                        .width(min: 80, ideal: 100)
+                        .width(min: 60, ideal: 80)
 
                     TableColumn("Actions") { task in
                         HStack(spacing: 8) {
@@ -526,7 +567,36 @@ class TasksViewModel: ObservableObject {
         error = nil
 
         do {
-            tasks = try await sshManager.listCronTasks()
+            var loadedTasks = try await sshManager.listCronTasks()
+
+            // Try to get execution history from cron logs
+            if let history = try? await sshManager.getCronHistory() {
+                // Match history entries to tasks and update lastRun
+                for i in 0..<loadedTasks.count {
+                    let task = loadedTasks[i]
+                    // Find the most recent history entry that matches this task's command
+                    // We check if the history command contains a significant portion of the task command
+                    let taskCmdPrefix = String(task.command.prefix(30))
+                    if let match = history.last(where: { entry in
+                        entry.user == task.user && entry.command.contains(taskCmdPrefix)
+                    }) {
+                        loadedTasks[i] = CronTask(
+                            minute: task.minute,
+                            hour: task.hour,
+                            dayOfMonth: task.dayOfMonth,
+                            month: task.month,
+                            dayOfWeek: task.dayOfWeek,
+                            command: task.command,
+                            user: task.user,
+                            enabled: task.enabled,
+                            originalLine: task.originalLine,
+                            lastRun: match.timestamp
+                        )
+                    }
+                }
+            }
+
+            tasks = loadedTasks
         } catch {
             self.error = "Failed to load tasks: \(error.localizedDescription)"
             tasks = []
