@@ -2357,17 +2357,46 @@ struct DatasetsView: View {
             node.children.sort { $0.dataset.name < $1.dataset.name }
         }
 
-        // Add snapshots as children of their parent datasets (only for visible datasets)
+        // Group snapshots by parent dataset and add as a collapsible "Snapshots" node
         let snapshots = targetDatasets.filter { $0.isSnapshot }.sorted { $0.name < $1.name }
+        var snapshotsByParent: [String: [ZFSDataset]] = [:]
         for snapshot in snapshots {
             let parentName = snapshot.name.components(separatedBy: "@")[0]
-            if let parent = nodes[parentName] {
-                let snapshotNode = DatasetNode(dataset: snapshot)
-                parent.children.append(snapshotNode)
+            snapshotsByParent[parentName, default: []].append(snapshot)
+        }
+
+        for (parentName, parentSnapshots) in snapshotsByParent {
+            if let parent = nodes[parentName], !parentSnapshots.isEmpty {
+                let snapshotsGroupNode = DatasetNode.snapshotsGroup(parentName: parentName, snapshots: parentSnapshots)
+                // Sync expanded state with expandedTargetDatasets
+                snapshotsGroupNode.isExpanded = expandedTargetDatasets.contains(snapshotsGroupNode.dataset.name)
+                parent.children.insert(snapshotsGroupNode, at: 0)  // Insert at beginning
             }
         }
 
         return rootNodes.sorted { $0.dataset.name < $1.dataset.name }
+    }
+
+    private var targetSnapshotsCount: Int {
+        targetDatasets.filter { $0.isSnapshot }.count
+    }
+
+    private var targetDatasetsCount: Int {
+        let allDatasets = targetDatasets.filter { !$0.isSnapshot }
+        if showProtectedDatasets { return allDatasets.count }
+        let protectedNames = Set(allDatasets.filter { $0.isProtected }.map { $0.name })
+        let rootDatasetNames = Set(allDatasets.filter { !$0.name.contains("/") }.map { $0.name })
+        return allDatasets.filter { dataset in
+            if !dataset.name.contains("/") { return true }
+            if dataset.isProtected { return false }
+            var path = dataset.name
+            while let lastSlash = path.lastIndex(of: "/") {
+                path = String(path[..<lastSlash])
+                if rootDatasetNames.contains(path) { break }
+                if protectedNames.contains(path) { return false }
+            }
+            return true
+        }.count
     }
 
     var body: some View {
@@ -2955,13 +2984,6 @@ struct DatasetsView: View {
                         Text("Drag to target to replicate")
                             .font(.caption)
                             .foregroundColor(.secondary)
-
-                        // Invisible spacer to match target's refresh button
-                        Button(action: {}) {
-                            Label("Refresh", systemImage: "arrow.clockwise")
-                        }
-                        .buttonStyle(.bordered)
-                        .hidden()
                     }
 
                     HStack {
@@ -3056,14 +3078,6 @@ struct DatasetsView: View {
                                 .font(.headline)
                         }
                         Spacer()
-                        Button(action: {
-                            Task {
-                                await loadTargetData()
-                            }
-                        }) {
-                            Label("Refresh", systemImage: "arrow.clockwise")
-                        }
-                        .buttonStyle(.bordered)
                     }
 
                     HStack {
@@ -3994,22 +4008,37 @@ struct DraggableDatasetNodeView: View {
                     }
 
                     // Dataset icon
-                    Image(systemName: node.dataset.icon)
-                        .foregroundColor(node.dataset.isSnapshot ? .orange : .blue)
-                        .frame(width: 16)
+                    if node.isSnapshotsGroup {
+                        Image(systemName: "camera.fill")
+                            .foregroundColor(.orange)
+                            .frame(width: 16)
+                    } else {
+                        Image(systemName: node.dataset.icon)
+                            .foregroundColor(node.dataset.isSnapshot ? .orange : .blue)
+                            .frame(width: 16)
+                    }
 
                     // Dataset name
                     HStack(spacing: 4) {
-                        Text(lastPathComponent(node.dataset.name))
-                            .font(.body)
+                        if node.isSnapshotsGroup {
+                            Text("Snapshots")
+                                .font(.body)
+                                .foregroundColor(.secondary)
+                            Text("(\(node.snapshotCount))")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text(lastPathComponent(node.dataset.name))
+                                .font(.body)
 
-                        if node.dataset.isSnapshot {
-                            Text("snapshot")
-                                .font(.caption2)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(Color.orange.opacity(0.2))
-                                .cornerRadius(3)
+                            if node.dataset.isSnapshot {
+                                Text("snapshot")
+                                    .font(.caption2)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background(Color.orange.opacity(0.2))
+                                    .cornerRadius(3)
+                            }
                         }
                     }
                 }
@@ -4022,9 +4051,14 @@ struct DraggableDatasetNodeView: View {
             .contentShape(Rectangle())
             .background(selectedDataset?.id == node.dataset.id ? Color.accentColor.opacity(0.2) : Color.clear)
             .onTapGesture {
-                selectedDataset = node.dataset
+                if !node.isSnapshotsGroup {
+                    selectedDataset = node.dataset
+                }
             }
             .onDrag {
+                if node.isSnapshotsGroup {
+                    return NSItemProvider()
+                }
                 onDragStarted(node.dataset)
                 return NSItemProvider(object: node.dataset.name as NSString)
             }
@@ -4107,22 +4141,37 @@ struct DroppableDatasetNodeView: View {
                     }
 
                     // Dataset icon
-                    Image(systemName: node.dataset.icon)
-                        .foregroundColor(node.dataset.isSnapshot ? .orange : .blue)
-                        .frame(width: 16)
+                    if node.isSnapshotsGroup {
+                        Image(systemName: "camera.fill")
+                            .foregroundColor(.orange)
+                            .frame(width: 16)
+                    } else {
+                        Image(systemName: node.dataset.icon)
+                            .foregroundColor(node.dataset.isSnapshot ? .orange : .blue)
+                            .frame(width: 16)
+                    }
 
                     // Dataset name
                     HStack(spacing: 4) {
-                        Text(lastPathComponent(node.dataset.name))
-                            .font(.body)
+                        if node.isSnapshotsGroup {
+                            Text("Snapshots")
+                                .font(.body)
+                                .foregroundColor(.secondary)
+                            Text("(\(node.snapshotCount))")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text(lastPathComponent(node.dataset.name))
+                                .font(.body)
 
-                        if node.dataset.isSnapshot {
-                            Text("snapshot")
-                                .font(.caption2)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(Color.orange.opacity(0.2))
-                                .cornerRadius(3)
+                            if node.dataset.isSnapshot {
+                                Text("snapshot")
+                                    .font(.caption2)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background(Color.orange.opacity(0.2))
+                                    .cornerRadius(3)
+                            }
                         }
                     }
                 }
@@ -4133,8 +4182,9 @@ struct DroppableDatasetNodeView: View {
             }
             .padding(.vertical, 4)
             .contentShape(Rectangle())
-            .background(isTargeted ? Color.accentColor.opacity(0.3) : Color.clear)
+            .background(isTargeted && !node.isSnapshotsGroup ? Color.accentColor.opacity(0.3) : Color.clear)
             .onDrop(of: [.text], isTargeted: $isTargeted) { providers in
+                if node.isSnapshotsGroup { return false }
                 onDropped(node.dataset)
                 return true
             }
