@@ -1839,8 +1839,9 @@ struct DatasetsView: View {
     @State private var serverToServerSetupError: String? = nil
     @State private var isSettingUpServerToServer = false
     @State private var onlineServers: Set<String> = []  // Server IDs that are online
-    @State private var isCheckingServers = false
+    @State private var hasCheckedServers = false  // True after initial check completes
     @State private var showServerPicker = false
+    @State private var serverCheckTimer: Timer?
 
     struct PendingReplication: Identifiable {
         let id = UUID()
@@ -2040,17 +2041,6 @@ struct DatasetsView: View {
                     .buttonStyle(.plain)
                     .popover(isPresented: $showServerPicker, arrowEdge: .bottom) {
                         VStack(alignment: .leading, spacing: 0) {
-                            if isCheckingServers {
-                                HStack {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                    Text("Checking servers...")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                                .padding()
-                            }
-
                             // None option
                             Button(action: {
                                 selectedReplicationServer = nil
@@ -2078,24 +2068,30 @@ struct DatasetsView: View {
                             ForEach(savedServers, id: \.id) { server in
                                 let isOnline = onlineServers.contains(server.id.uuidString)
                                 Button(action: {
-                                    if isOnline {
+                                    if hasCheckedServers && isOnline {
                                         selectedReplicationServer = server.id.uuidString
                                         showServerPicker = false
                                         handleServerSelection(server.id.uuidString)
                                     }
                                 }) {
                                     HStack {
-                                        Circle()
-                                            .fill(isOnline ? Color.green : Color.red)
-                                            .frame(width: 8, height: 8)
+                                        if !hasCheckedServers {
+                                            ProgressView()
+                                                .controlSize(.small)
+                                                .frame(width: 10, height: 10)
+                                        } else {
+                                            Circle()
+                                                .fill(isOnline ? Color.green : Color.red)
+                                                .frame(width: 8, height: 8)
+                                        }
                                         Text(server.name)
-                                            .foregroundColor(isOnline ? .primary : .secondary)
+                                            .foregroundColor(hasCheckedServers && isOnline ? .primary : .secondary)
                                         Spacer()
                                         if selectedReplicationServer == server.id.uuidString {
                                             Image(systemName: "checkmark")
                                                 .foregroundColor(.accentColor)
                                         }
-                                        if !isOnline {
+                                        if hasCheckedServers && !isOnline {
                                             Text("offline")
                                                 .font(.caption2)
                                                 .foregroundColor(.secondary)
@@ -2106,7 +2102,7 @@ struct DatasetsView: View {
                                     .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
-                                .disabled(!isOnline)
+                                .disabled(!hasCheckedServers || !isOnline)
                             }
                         }
                         .frame(minWidth: 200)
@@ -2148,6 +2144,20 @@ struct DatasetsView: View {
         }
         .onAppear {
             loadSavedServers()
+            // Initial check immediately
+            Task {
+                await checkServersOnline()
+            }
+            // Then recheck every 5 seconds
+            serverCheckTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+                Task {
+                    await checkServersOnline()
+                }
+            }
+        }
+        .onDisappear {
+            serverCheckTimer?.invalidate()
+            serverCheckTimer = nil
         }
         .sheet(isPresented: $showCreateSnapshot) {
             if let dataset = selectedDataset {
@@ -2787,7 +2797,6 @@ struct DatasetsView: View {
 
     // Check connectivity to each saved server (quick TCP check to port 22)
     private func checkServersOnline() async {
-        isCheckingServers = true
         var online: Set<String> = []
 
         await withTaskGroup(of: (String, Bool).self) { group in
@@ -2807,7 +2816,7 @@ struct DatasetsView: View {
 
         await MainActor.run {
             onlineServers = online
-            isCheckingServers = false
+            hasCheckedServers = true
         }
     }
 

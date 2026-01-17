@@ -8,6 +8,7 @@
 import SwiftUI
 import Foundation
 import Combine
+import Network
 #if os(macOS)
 import AppKit
 #endif
@@ -638,6 +639,9 @@ struct ContentView: View {
     @State private var savedServers: [SavedServer] = []
     @State private var selectedServer: SavedServer?
     @State private var isNavigationLocked = false  // Locks sidebar during long-running operations
+    @State private var onlineServers: Set<String> = []  // Server IDs that are online
+    @State private var hasCheckedServers = false  // True after initial check completes
+    @State private var serverCheckTimer: Timer?
 
     // Use shared SSH connection manager across all windows
     var sshManager = SSHConnectionManager.shared
@@ -680,13 +684,32 @@ struct ContentView: View {
                         }
                     } else {
                         List(savedServers) { server in
+                            let isOnline = onlineServers.contains(server.id.uuidString)
                             HStack {
+                                // Online/offline indicator
+                                if !hasCheckedServers {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .frame(width: 12, height: 12)
+                                } else {
+                                    Circle()
+                                        .fill(isOnline ? Color.green : Color.red)
+                                        .frame(width: 10, height: 10)
+                                }
+
                                 VStack(alignment: .leading) {
                                     Text(server.name)
                                         .font(.headline)
-                                    Text("\(server.username)@\(server.host):\(server.port)")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
+                                    HStack(spacing: 4) {
+                                        Text("\(server.username)@\(server.host):\(server.port)")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                        if hasCheckedServers && !isOnline {
+                                            Text("• offline")
+                                                .font(.caption)
+                                                .foregroundColor(.red)
+                                        }
+                                    }
                                 }
 
                                 Spacer()
@@ -702,6 +725,21 @@ struct ContentView: View {
                                 .buttonStyle(.bordered)
                             }
                             .padding(.vertical, 4)
+                        }
+                        .onAppear {
+                            Task {
+                                await checkServersOnline()
+                            }
+                            // Recheck servers every 5 seconds
+                            serverCheckTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+                                Task {
+                                    await checkServersOnline()
+                                }
+                            }
+                        }
+                        .onDisappear {
+                            serverCheckTimer?.invalidate()
+                            serverCheckTimer = nil
                         }
                     }
 
@@ -829,6 +867,73 @@ struct ContentView: View {
     func removeServer(_ server: SavedServer) {
         savedServers.removeAll { $0.id == server.id }
         saveServers()
+    }
+
+    // Check connectivity to each saved server (quick TCP check)
+    private func checkServersOnline() async {
+        var online: Set<String> = []
+
+        await withTaskGroup(of: (String, Bool).self) { group in
+            for server in savedServers {
+                group.addTask {
+                    let isOnline = await self.checkHostReachable(host: server.host, port: server.port)
+                    return (server.id.uuidString, isOnline)
+                }
+            }
+
+            for await (serverId, isOnline) in group {
+                if isOnline {
+                    online.insert(serverId)
+                }
+            }
+        }
+
+        await MainActor.run {
+            onlineServers = online
+            hasCheckedServers = true
+        }
+    }
+
+    private func checkHostReachable(host: String, port: Int) async -> Bool {
+        return await withCheckedContinuation { continuation in
+            var hasResumed = false
+            let lock = NSLock()
+
+            func resumeOnce(with result: Bool) {
+                lock.lock()
+                defer { lock.unlock() }
+                if !hasResumed {
+                    hasResumed = true
+                    continuation.resume(returning: result)
+                }
+            }
+
+            let socket = NWConnection(
+                host: NWEndpoint.Host(host),
+                port: NWEndpoint.Port(integerLiteral: UInt16(port)),
+                using: .tcp
+            )
+
+            socket.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    socket.cancel()
+                    resumeOnce(with: true)
+                case .failed, .cancelled:
+                    resumeOnce(with: false)
+                default:
+                    break
+                }
+            }
+
+            socket.start(queue: .global())
+
+            // Timeout after 2 seconds
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                socket.cancel()
+                resumeOnce(with: false)
+            }
+        }
     }
 
     func connectToServer(_ server: SavedServer) {
