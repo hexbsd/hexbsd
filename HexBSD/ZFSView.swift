@@ -1840,6 +1840,7 @@ struct DatasetsView: View {
     @State private var isSettingUpServerToServer = false
     @State private var onlineServers: Set<String> = []  // Server IDs that are online
     @State private var isCheckingServers = false
+    @State private var showServerPicker = false
 
     struct PendingReplication: Identifiable {
         let id = UUID()
@@ -2006,25 +2007,113 @@ struct DatasetsView: View {
                         .font(.subheadline)
                         .foregroundColor(.secondary)
 
-                    Picker("", selection: $selectedReplicationServer) {
-                        Text("None").tag(nil as String?)
-                        // Only show online servers
-                        ForEach(savedServers.filter { onlineServers.contains($0.id.uuidString) }, id: \.id) { server in
-                            Text(server.name).tag(server.id.uuidString as String?)
-                        }
-                    }
-                    .frame(width: 200)
-                    .simultaneousGesture(TapGesture().onEnded {
-                        // Recheck which servers are online when picker is clicked
+                    Button(action: {
+                        showServerPicker = true
+                        // Check all servers when dropdown is clicked
                         Task {
                             await checkServersOnline()
                         }
-                    })
-                    .onChange(of: selectedReplicationServer) { oldValue, newValue in
-                        handleServerSelection(newValue)
+                    }) {
+                        HStack {
+                            if let serverId = selectedReplicationServer,
+                               let server = savedServers.first(where: { $0.id.uuidString == serverId }) {
+                                Text(server.name)
+                            } else {
+                                Text("Select Server...")
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.down")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(width: 180)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color(NSColor.controlBackgroundColor))
+                        .cornerRadius(6)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color(NSColor.separatorColor), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .popover(isPresented: $showServerPicker, arrowEdge: .bottom) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            if isCheckingServers {
+                                HStack {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text("Checking servers...")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                .padding()
+                            }
+
+                            // None option
+                            Button(action: {
+                                selectedReplicationServer = nil
+                                showServerPicker = false
+                                handleServerSelection(nil)
+                            }) {
+                                HStack {
+                                    Text("None")
+                                    Spacer()
+                                    if selectedReplicationServer == nil {
+                                        Image(systemName: "checkmark")
+                                            .foregroundColor(.accentColor)
+                                    }
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+
+                            Divider()
+                                .padding(.vertical, 4)
+
+                            // Server list
+                            ForEach(savedServers, id: \.id) { server in
+                                let isOnline = onlineServers.contains(server.id.uuidString)
+                                Button(action: {
+                                    if isOnline {
+                                        selectedReplicationServer = server.id.uuidString
+                                        showServerPicker = false
+                                        handleServerSelection(server.id.uuidString)
+                                    }
+                                }) {
+                                    HStack {
+                                        Circle()
+                                            .fill(isOnline ? Color.green : Color.red)
+                                            .frame(width: 8, height: 8)
+                                        Text(server.name)
+                                            .foregroundColor(isOnline ? .primary : .secondary)
+                                        Spacer()
+                                        if selectedReplicationServer == server.id.uuidString {
+                                            Image(systemName: "checkmark")
+                                                .foregroundColor(.accentColor)
+                                        }
+                                        if !isOnline {
+                                            Text("offline")
+                                                .font(.caption2)
+                                                .foregroundColor(.secondary)
+                                        }
+                                    }
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(!isOnline)
+                            }
+                        }
+                        .frame(minWidth: 200)
+                        .padding(.vertical, 8)
                     }
 
-                    // Show setup progress, checking status, or offline count
+                    // Show setup progress or error
                     if isSettingUpServerToServer {
                         HStack(spacing: 4) {
                             ProgressView()
@@ -2042,16 +2131,6 @@ struct DatasetsView: View {
                                 .font(.caption)
                                 .foregroundColor(.orange)
                                 .lineLimit(1)
-                        }
-                    } else if isCheckingServers {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        let offlineCount = savedServers.count - onlineServers.count
-                        if offlineCount > 0 {
-                            Text("\(offlineCount) offline")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
                         }
                     }
                 }
@@ -2703,11 +2782,6 @@ struct DatasetsView: View {
            let decoded = try? JSONDecoder().decode([SavedServer].self, from: data) {
             // Filter out the currently connected server
             savedServers = decoded.filter { $0.host != SSHConnectionManager.shared.serverAddress }
-
-            // Check which servers are online
-            Task {
-                await checkServersOnline()
-            }
         }
     }
 
