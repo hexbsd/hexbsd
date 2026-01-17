@@ -621,6 +621,364 @@ struct ReplicationKeySetupSheet: View {
     }
 }
 
+// MARK: - Replication Choice Sheet
+
+struct ReplicationChoiceSheet: View {
+    let sourceDataset: ZFSDataset
+    let targetParent: ZFSDataset?
+    let targetServer: SavedServer
+    let onOneTime: () -> Void
+    let onSchedule: (String) -> Void
+    let onCancel: () -> Void
+
+    private var sourceBaseName: String {
+        sourceDataset.name.components(separatedBy: "@")[0]
+    }
+
+    private var destinationPath: String {
+        if let parent = targetParent {
+            let lastComponent = sourceBaseName.components(separatedBy: "/").last ?? sourceBaseName
+            return "\(parent.name)/\(lastComponent)"
+        } else {
+            return sourceBaseName
+        }
+    }
+
+    private var replicationCommand: String {
+        // Generate an incremental-capable replication command
+        let dataset = sourceBaseName
+        let target = "\(targetServer.username)@\(targetServer.host)"
+        let dest = destinationPath
+
+        // This command:
+        // 1. Creates a timestamped snapshot
+        // 2. Finds the previous auto- snapshot if any
+        // 3. Does incremental send if previous exists, otherwise full send
+        return """
+SNAP="\(dataset)@auto-$(date +%Y%m%d-%H%M%S)" && zfs snapshot "$SNAP" && PREV=$(zfs list -t snapshot -o name -S creation \(dataset) 2>/dev/null | grep '@auto-' | sed -n '2p') && if [ -n "$PREV" ]; then zfs send -i "$PREV" "$SNAP" | ssh -o StrictHostKeyChecking=no \(target) 'zfs receive -F \(dest)'; else zfs send "$SNAP" | ssh -o StrictHostKeyChecking=no \(target) 'zfs receive -F \(dest)'; fi
+"""
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Replicate Dataset")
+                .font(.title2)
+                .fontWeight(.semibold)
+                .padding(.top, 20)
+                .padding(.bottom, 16)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 20) {
+                // Source info
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Source")
+                        .font(.headline)
+                    HStack {
+                        Image(systemName: sourceDataset.isSnapshot ? "camera.fill" : "folder.fill")
+                            .foregroundColor(sourceDataset.isSnapshot ? .orange : .blue)
+                        Text(sourceDataset.name)
+                            .font(.system(.body, design: .monospaced))
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .cornerRadius(6)
+                }
+
+                // Target info
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Destination")
+                        .font(.headline)
+                    HStack {
+                        Image(systemName: "server.rack")
+                            .foregroundColor(.green)
+                        Text("\(targetServer.name): \(destinationPath)")
+                            .font(.system(.body, design: .monospaced))
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .cornerRadius(6)
+                }
+
+                Divider()
+
+                // Choice buttons
+                Text("How would you like to replicate?")
+                    .font(.headline)
+
+                VStack(spacing: 12) {
+                    // One-time option
+                    Button(action: onOneTime) {
+                        HStack {
+                            Image(systemName: "arrow.right.circle.fill")
+                                .font(.title2)
+                                .foregroundColor(.blue)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("One-Time Replication")
+                                    .font(.headline)
+                                    .foregroundColor(.primary)
+                                Text("Replicate now and done")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .foregroundColor(.secondary)
+                        }
+                        .padding()
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+
+                    // Scheduled option
+                    Button(action: { onSchedule(replicationCommand) }) {
+                        HStack {
+                            Image(systemName: "clock.fill")
+                                .font(.title2)
+                                .foregroundColor(.orange)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Schedule Recurring Replication")
+                                    .font(.headline)
+                                    .foregroundColor(.primary)
+                                Text("Set up automatic backups (hourly, daily, etc.)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .foregroundColor(.secondary)
+                        }
+                        .padding()
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding()
+
+            Spacer()
+
+            Divider()
+
+            HStack {
+                Button("Cancel") {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+                Spacer()
+            }
+            .padding()
+        }
+        .frame(width: 500, height: 550)
+    }
+}
+
+// MARK: - Schedule Replication Task Sheet
+
+struct ScheduleReplicationTaskSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let command: String
+    let onSave: (String, String, String, String, String, String, String) -> Void
+    let onCancel: () -> Void
+
+    @State private var frequency = 1 // 0=hourly, 1=daily, 2=weekly, 3=monthly
+    @State private var selectedMinute = 0
+    @State private var selectedHour = 2 // Default to 2 AM
+    @State private var selectedDayOfWeek = 0
+    @State private var selectedDayOfMonth = 1
+    @State private var editedCommand: String
+
+    init(command: String, onSave: @escaping (String, String, String, String, String, String, String) -> Void, onCancel: @escaping () -> Void) {
+        self.command = command
+        self.onSave = onSave
+        self.onCancel = onCancel
+        self._editedCommand = State(initialValue: command)
+    }
+
+    private var computedCronSchedule: (String, String, String, String, String) {
+        switch frequency {
+        case 0: // Hourly
+            return ("\(selectedMinute)", "*", "*", "*", "*")
+        case 1: // Daily
+            return ("\(selectedMinute)", "\(selectedHour)", "*", "*", "*")
+        case 2: // Weekly
+            return ("\(selectedMinute)", "\(selectedHour)", "*", "*", "\(selectedDayOfWeek)")
+        case 3: // Monthly
+            return ("\(selectedMinute)", "\(selectedHour)", "\(selectedDayOfMonth)", "*", "*")
+        default:
+            return ("0", "2", "*", "*", "*")
+        }
+    }
+
+    private var scheduleDescription: String {
+        switch frequency {
+        case 0:
+            return "Every hour at :\(String(format: "%02d", selectedMinute))"
+        case 1:
+            return "Daily at \(String(format: "%02d:%02d", selectedHour, selectedMinute))"
+        case 2:
+            let days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+            return "Every \(days[selectedDayOfWeek]) at \(String(format: "%02d:%02d", selectedHour, selectedMinute))"
+        case 3:
+            return "Monthly on day \(selectedDayOfMonth) at \(String(format: "%02d:%02d", selectedHour, selectedMinute))"
+        default:
+            return ""
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Schedule Replication")
+                .font(.title2)
+                .fontWeight(.semibold)
+                .padding(.top, 20)
+                .padding(.bottom, 16)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    // Frequency selection
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Frequency")
+                            .font(.headline)
+
+                        Picker("Run", selection: $frequency) {
+                            Text("Hourly").tag(0)
+                            Text("Daily").tag(1)
+                            Text("Weekly").tag(2)
+                            Text("Monthly").tag(3)
+                        }
+                        .pickerStyle(.segmented)
+
+                        // Time settings
+                        VStack(alignment: .leading, spacing: 12) {
+                            if frequency >= 1 {
+                                HStack {
+                                    Text("At time:")
+                                        .frame(width: 80, alignment: .trailing)
+                                    Picker("Hour", selection: $selectedHour) {
+                                        ForEach(0..<24, id: \.self) { hour in
+                                            Text(String(format: "%02d", hour)).tag(hour)
+                                        }
+                                    }
+                                    .frame(width: 70)
+
+                                    Text(":")
+
+                                    Picker("Minute", selection: $selectedMinute) {
+                                        ForEach([0, 15, 30, 45], id: \.self) { min in
+                                            Text(String(format: "%02d", min)).tag(min)
+                                        }
+                                    }
+                                    .frame(width: 70)
+                                }
+                            } else {
+                                HStack {
+                                    Text("At minute:")
+                                        .frame(width: 80, alignment: .trailing)
+                                    Picker("Minute", selection: $selectedMinute) {
+                                        ForEach([0, 15, 30, 45], id: \.self) { min in
+                                            Text(String(format: ":%02d", min)).tag(min)
+                                        }
+                                    }
+                                    .frame(width: 80)
+                                }
+                            }
+
+                            if frequency == 2 {
+                                HStack {
+                                    Text("On:")
+                                        .frame(width: 80, alignment: .trailing)
+                                    Picker("Day", selection: $selectedDayOfWeek) {
+                                        Text("Sunday").tag(0)
+                                        Text("Monday").tag(1)
+                                        Text("Tuesday").tag(2)
+                                        Text("Wednesday").tag(3)
+                                        Text("Thursday").tag(4)
+                                        Text("Friday").tag(5)
+                                        Text("Saturday").tag(6)
+                                    }
+                                    .frame(width: 150)
+                                }
+                            }
+
+                            if frequency == 3 {
+                                HStack {
+                                    Text("On day:")
+                                        .frame(width: 80, alignment: .trailing)
+                                    Picker("Day", selection: $selectedDayOfMonth) {
+                                        ForEach(1...28, id: \.self) { day in
+                                            Text("\(day)").tag(day)
+                                        }
+                                    }
+                                    .frame(width: 80)
+                                    Text("of the month")
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+
+                        // Schedule preview
+                        HStack {
+                            Image(systemName: "clock")
+                                .foregroundColor(.blue)
+                            Text(scheduleDescription)
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.top, 8)
+                    }
+
+                    Divider()
+
+                    // Command preview
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Replication Command")
+                            .font(.headline)
+
+                        TextEditor(text: $editedCommand)
+                            .font(.system(.caption, design: .monospaced))
+                            .frame(height: 80)
+                            .border(Color(nsColor: .separatorColor), width: 1)
+
+                        Text("This command creates a snapshot and replicates incrementally to the target")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding()
+            }
+
+            Divider()
+
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    onCancel()
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Button("Schedule Task") {
+                    let schedule = computedCronSchedule
+                    onSave(schedule.0, schedule.1, schedule.2, schedule.3, schedule.4, editedCommand, "root")
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+            }
+            .padding()
+        }
+        .frame(width: 580, height: 550)
+    }
+}
+
 // MARK: - Pools View (Legacy - can be removed later)
 
 struct PoolsView: View {
@@ -1157,6 +1515,20 @@ struct DatasetsView: View {
     @State private var expandedTargetDatasets: Set<String> = []
     @State private var draggedDataset: ZFSDataset?
     @State private var pendingReplicationServer: SavedServer? = nil
+    @State private var pendingReplicationInfo: PendingReplication? = nil
+    @State private var pendingScheduledReplication: ScheduledReplicationInfo? = nil
+
+    struct PendingReplication: Identifiable {
+        let id = UUID()
+        let source: ZFSDataset
+        let target: ZFSDataset?
+        let server: SavedServer
+    }
+
+    struct ScheduledReplicationInfo: Identifiable {
+        let id = UUID()
+        let command: String
+    }
 
     private var datasetsCount: Int {
         viewModel.datasets.filter { !$0.isSnapshot }.count
@@ -1458,6 +1830,53 @@ struct DatasetsView: View {
                 onCancel: {
                     pendingReplicationServer = nil
                     selectedReplicationServer = nil
+                }
+            )
+        }
+        .sheet(item: $pendingReplicationInfo) { info in
+            ReplicationChoiceSheet(
+                sourceDataset: info.source,
+                targetParent: info.target,
+                targetServer: info.server,
+                onOneTime: {
+                    pendingReplicationInfo = nil
+                    Task {
+                        await replicateDataset(source: info.source, targetParent: info.target)
+                    }
+                },
+                onSchedule: { command in
+                    pendingReplicationInfo = nil
+                    pendingScheduledReplication = ScheduledReplicationInfo(command: command)
+                },
+                onCancel: {
+                    pendingReplicationInfo = nil
+                }
+            )
+        }
+        .sheet(item: $pendingScheduledReplication) { info in
+            ScheduleReplicationTaskSheet(
+                command: info.command,
+                onSave: { minute, hour, dayOfMonth, month, dayOfWeek, command, user in
+                    Task {
+                        do {
+                            try await SSHConnectionManager.shared.addCronTask(
+                                minute: minute,
+                                hour: hour,
+                                dayOfMonth: dayOfMonth,
+                                month: month,
+                                dayOfWeek: dayOfWeek,
+                                command: command,
+                                user: user
+                            )
+                        } catch {
+                            await MainActor.run {
+                                viewModel.error = "Failed to schedule task: \(error.localizedDescription)"
+                            }
+                        }
+                    }
+                },
+                onCancel: {
+                    pendingScheduledReplication = nil
                 }
             )
         }
@@ -1895,10 +2314,14 @@ struct DatasetsView: View {
                                     level: 0,
                                     expandedDatasets: $expandedTargetDatasets,
                                     onDropped: { targetDataset in
-                                        if let sourceDataset = draggedDataset {
-                                            Task {
-                                                await replicateDataset(source: sourceDataset, targetParent: targetDataset)
-                                            }
+                                        if let sourceDataset = draggedDataset,
+                                           let serverId = selectedReplicationServer,
+                                           let server = savedServers.first(where: { $0.id.uuidString == serverId }) {
+                                            pendingReplicationInfo = PendingReplication(
+                                                source: sourceDataset,
+                                                target: targetDataset,
+                                                server: server
+                                            )
                                         }
                                     }
                                 )
@@ -1906,10 +2329,14 @@ struct DatasetsView: View {
                         }
                         .onDrop(of: [.text], isTargeted: nil) { providers in
                             // Drop on empty space - replicate to root
-                            if let sourceDataset = draggedDataset {
-                                Task {
-                                    await replicateDataset(source: sourceDataset, targetParent: nil)
-                                }
+                            if let sourceDataset = draggedDataset,
+                               let serverId = selectedReplicationServer,
+                               let server = savedServers.first(where: { $0.id.uuidString == serverId }) {
+                                pendingReplicationInfo = PendingReplication(
+                                    source: sourceDataset,
+                                    target: nil,
+                                    server: server
+                                )
                                 return true
                             }
                             return false
@@ -2998,6 +3425,12 @@ struct CreateSnapshotSheet: View {
     let onCreate: () -> Void
     let onCancel: () -> Void
 
+    private static func generateTimestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        return formatter.string(from: Date())
+    }
+
     var body: some View {
         VStack(spacing: 16) {
             Text("Create Snapshot")
@@ -3016,7 +3449,7 @@ struct CreateSnapshotSheet: View {
 
                 Text("Snapshot Name")
                     .font(.caption)
-                TextField("e.g., backup-2025-01-01", text: $snapshotName)
+                TextField("Snapshot name", text: $snapshotName)
                     .textFieldStyle(.roundedBorder)
 
                 Text("Full name will be: \(datasetName)@\(snapshotName)")
@@ -3040,6 +3473,11 @@ struct CreateSnapshotSheet: View {
         }
         .padding()
         .frame(width: 450)
+        .onAppear {
+            if snapshotName.isEmpty {
+                snapshotName = Self.generateTimestamp()
+            }
+        }
     }
 }
 
