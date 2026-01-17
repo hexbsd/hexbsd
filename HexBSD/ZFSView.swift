@@ -286,6 +286,7 @@ struct PoolsSheet: View {
     @State private var availableDisks: [AvailableDisk] = []
     @State private var isLoadingDisks = false
     @State private var showCreatePool = false
+    @State private var scrubRefreshTimer: Timer?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -367,6 +368,16 @@ struct PoolsSheet: View {
                 await viewModel.refreshScrubStatus()
                 await loadAvailableDisks()
             }
+            // Auto-refresh scrub status every 5 seconds
+            scrubRefreshTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+                Task {
+                    await viewModel.refreshScrubStatus()
+                }
+            }
+        }
+        .onDisappear {
+            scrubRefreshTimer?.invalidate()
+            scrubRefreshTimer = nil
         }
         .sheet(isPresented: $showCreatePool) {
             CreatePoolSheet(
