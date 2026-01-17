@@ -4631,12 +4631,12 @@ struct CreatePoolSheet: View {
     }
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 12) {
             Text("Create ZFS Pool")
                 .font(.title2)
                 .bold()
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text("Pool Name")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -4644,7 +4644,7 @@ struct CreatePoolSheet: View {
                     .textFieldStyle(.roundedBorder)
             }
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text("RAID Type")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -4662,7 +4662,7 @@ struct CreatePoolSheet: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text("Available Disks")
                         .font(.caption)
@@ -4746,13 +4746,13 @@ struct CreatePoolSheet: View {
 
             if canCreate {
                 // Preview command
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text("Command Preview")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Text(buildCommand())
                         .font(.system(.caption, design: .monospaced))
-                        .padding(8)
+                        .padding(6)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color(nsColor: .textBackgroundColor))
                         .cornerRadius(4)
@@ -4777,8 +4777,9 @@ struct CreatePoolSheet: View {
                 .disabled(!canCreate)
             }
         }
-        .padding()
-        .frame(width: 800, height: 650)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .frame(width: 750, height: 520)
     }
 
     private func buildCommand() -> String {
