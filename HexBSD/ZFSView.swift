@@ -309,17 +309,21 @@ struct ReplicationServerPickerView: View {
 
     private func checkHostReachable(host: String, port: Int) async -> Bool {
         return await withCheckedContinuation { continuation in
-            var hasResumed = false
-            let lock = NSLock()
+            final class ResumeState: @unchecked Sendable {
+                private var hasResumed = false
+                private let lock = NSLock()
 
-            func resumeOnce(with result: Bool) {
-                lock.lock()
-                defer { lock.unlock() }
-                if !hasResumed {
-                    hasResumed = true
-                    continuation.resume(returning: result)
+                func resumeOnce(with result: Bool, continuation: CheckedContinuation<Bool, Never>) {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    if !hasResumed {
+                        hasResumed = true
+                        continuation.resume(returning: result)
+                    }
                 }
             }
+
+            let state = ResumeState()
 
             let socket = NWConnection(
                 host: NWEndpoint.Host(host),
@@ -327,13 +331,13 @@ struct ReplicationServerPickerView: View {
                 using: .tcp
             )
 
-            socket.stateUpdateHandler = { state in
-                switch state {
+            socket.stateUpdateHandler = { socketState in
+                switch socketState {
                 case .ready:
                     socket.cancel()
-                    resumeOnce(with: true)
+                    state.resumeOnce(with: true, continuation: continuation)
                 case .failed, .cancelled:
-                    resumeOnce(with: false)
+                    state.resumeOnce(with: false, continuation: continuation)
                 default:
                     break
                 }
@@ -343,7 +347,7 @@ struct ReplicationServerPickerView: View {
 
             DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
                 socket.cancel()
-                resumeOnce(with: false)
+                state.resumeOnce(with: false, continuation: continuation)
             }
         }
     }
@@ -3366,17 +3370,21 @@ struct DatasetsView: View {
     // Quick TCP connectivity check
     private func checkHostReachable(host: String, port: Int) async -> Bool {
         return await withCheckedContinuation { continuation in
-            var hasResumed = false
-            let lock = NSLock()
+            final class ResumeState: @unchecked Sendable {
+                private var hasResumed = false
+                private let lock = NSLock()
 
-            func resumeOnce(with result: Bool) {
-                lock.lock()
-                defer { lock.unlock() }
-                if !hasResumed {
-                    hasResumed = true
-                    continuation.resume(returning: result)
+                func resumeOnce(with result: Bool, continuation: CheckedContinuation<Bool, Never>) {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    if !hasResumed {
+                        hasResumed = true
+                        continuation.resume(returning: result)
+                    }
                 }
             }
+
+            let state = ResumeState()
 
             let socket = NWConnection(
                 host: NWEndpoint.Host(host),
@@ -3384,13 +3392,13 @@ struct DatasetsView: View {
                 using: .tcp
             )
 
-            socket.stateUpdateHandler = { state in
-                switch state {
+            socket.stateUpdateHandler = { socketState in
+                switch socketState {
                 case .ready:
                     socket.cancel()
-                    resumeOnce(with: true)
+                    state.resumeOnce(with: true, continuation: continuation)
                 case .failed, .cancelled:
-                    resumeOnce(with: false)
+                    state.resumeOnce(with: false, continuation: continuation)
                 default:
                     break
                 }
@@ -3401,7 +3409,7 @@ struct DatasetsView: View {
             // Timeout after 2 seconds
             DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
                 socket.cancel()
-                resumeOnce(with: false)
+                state.resumeOnce(with: false, continuation: continuation)
             }
         }
     }

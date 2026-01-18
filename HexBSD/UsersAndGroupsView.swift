@@ -559,8 +559,8 @@ class UsersAndGroupsViewModel: ObservableObject {
         error = nil
 
         do {
-            guard let bootEnv = setupState.bootEnvironment,
-                  let zpoolRoot = setupState.zpoolRoot else {
+            guard let _ = setupState.bootEnvironment,
+                  let _ = setupState.zpoolRoot else {
                 throw NSError(domain: "UsersAndGroups", code: 1, userInfo: [NSLocalizedDescriptionKey: "Boot environment not detected"])
             }
 
@@ -2456,9 +2456,9 @@ struct UsersAndGroupsContentView: View {
 
     private var isSystemSetupComplete: Bool {
         let zfsConfigured = viewModel.setupState.relevantZFSDatasets.allSatisfy { $0.status == .configured }
-        let userConfigured = viewModel.setupState.userConfig?.status == .configured
+        _ = viewModel.setupState.userConfig?.status == .configured
         let networkRole = viewModel.selectedNetworkRole
-        let homeStyle = viewModel.selectedHomeDirectoryStyle
+        _ = viewModel.selectedHomeDirectoryStyle
 
         // If users already exist with UID >= 1001 and home in /home, system is already set up
         // Skip setup wizard and show standalone user management
@@ -2647,7 +2647,7 @@ struct UserManagementCard: View {
                 }
             }
         }
-        .onChange(of: selectedTab) { newTab in
+        .onChange(of: selectedTab) { _, newTab in
             // Load data when switching tabs
             Task {
                 if newTab == 0 {

@@ -565,32 +565,6 @@ class SSHConnectionManager {
         // Always use SCP for reliable binary transfers
         print("DEBUG: Using SCP for file download")
         return try await downloadWithSCP(remotePath: remotePath, localURL: localURL, fileSize: fileSize, progressCallback: progressCallback, cancelCheck: cancelCheck)
-
-        // Legacy base64 code below - kept for reference but no longer used
-        print("DEBUG: Using base64 for small file download")
-        progressCallback?(0, fileSize, "")
-
-        // Check for cancellation
-        if cancelCheck?() == true {
-            throw NSError(domain: "SSHConnectionManager", code: 100,
-                         userInfo: [NSLocalizedDescriptionKey: "Transfer cancelled"])
-        }
-
-        let base64Output = try await executeCommand("base64 '\(remotePath)'")
-        guard let data = Data(base64Encoded: base64Output.trimmingCharacters(in: .whitespacesAndNewlines), options: .ignoreUnknownCharacters) else {
-            // Fallback to raw cat for text files
-            let output = try await executeCommand("cat '\(remotePath)'")
-            guard let textData = output.data(using: .utf8) else {
-                throw NSError(domain: "SSHConnectionManager", code: 2,
-                             userInfo: [NSLocalizedDescriptionKey: "Failed to convert file data"])
-            }
-            try textData.write(to: localURL)
-            progressCallback?(fileSize, fileSize, "")
-            return
-        }
-
-        try data.write(to: localURL)
-        progressCallback?(fileSize, fileSize, "")
     }
 
     private func downloadWithSCP(
@@ -6318,10 +6292,7 @@ EOFPKG
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
-        // Escape single quotes in content for the shell
-        let escapedContent = content.replacingOccurrences(of: "'", with: "'\"'\"'")
-
-        // Write content using cat with heredoc
+        // Write content using cat with heredoc (quotes in heredoc don't need escaping)
         _ = try await executeCommand("cat > '\(path)' << 'CONFIGEOF'\n\(content)\nCONFIGEOF")
     }
 

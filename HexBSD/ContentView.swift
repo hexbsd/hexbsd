@@ -13,6 +13,21 @@ import Network
 import AppKit
 #endif
 
+/// Thread-safe helper for resuming a continuation only once
+private final class HostReachabilityResumeState: @unchecked Sendable {
+    private var hasResumed = false
+    private let lock = NSLock()
+
+    func resumeOnce(with result: Bool, continuation: CheckedContinuation<Bool, Never>) {
+        lock.lock()
+        defer { lock.unlock() }
+        if !hasResumed {
+            hasResumed = true
+            continuation.resume(returning: result)
+        }
+    }
+}
+
 struct NetworkInterface {
     let name: String
     let inRate: String
@@ -900,17 +915,7 @@ struct ContentView: View {
 
     private func checkHostReachable(host: String, port: Int) async -> Bool {
         return await withCheckedContinuation { continuation in
-            var hasResumed = false
-            let lock = NSLock()
-
-            func resumeOnce(with result: Bool) {
-                lock.lock()
-                defer { lock.unlock() }
-                if !hasResumed {
-                    hasResumed = true
-                    continuation.resume(returning: result)
-                }
-            }
+            let state = HostReachabilityResumeState()
 
             let socket = NWConnection(
                 host: NWEndpoint.Host(host),
@@ -918,13 +923,13 @@ struct ContentView: View {
                 using: .tcp
             )
 
-            socket.stateUpdateHandler = { state in
-                switch state {
+            socket.stateUpdateHandler = { socketState in
+                switch socketState {
                 case .ready:
                     socket.cancel()
-                    resumeOnce(with: true)
+                    state.resumeOnce(with: true, continuation: continuation)
                 case .failed, .cancelled:
-                    resumeOnce(with: false)
+                    state.resumeOnce(with: false, continuation: continuation)
                 default:
                     break
                 }
@@ -935,7 +940,7 @@ struct ContentView: View {
             // Timeout after 2 seconds
             DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
                 socket.cancel()
-                resumeOnce(with: false)
+                state.resumeOnce(with: false, continuation: continuation)
             }
         }
     }

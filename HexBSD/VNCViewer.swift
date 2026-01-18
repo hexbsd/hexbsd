@@ -725,7 +725,6 @@ class VNCClient: ObservableObject {
 
     private func receiveServerMessages() async throws {
         // Main update loop
-        var isFirstUpdate = true
         var updateCount = 0
 
         while isConnected {
