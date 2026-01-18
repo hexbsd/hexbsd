@@ -167,7 +167,8 @@ struct JailsContentView: View {
             Divider()
 
             // Content area
-            if viewModel.isLoading && viewModel.jails.isEmpty && viewModel.templates.isEmpty {
+            if !viewModel.initialCheckComplete {
+                // Show loading until initial setup check completes
                 VStack(spacing: 20) {
                     ProgressView()
                         .scaleEffect(1.5)
@@ -2094,6 +2095,7 @@ class JailsViewModel: ObservableObject {
     @Published var hasElevatedPrivileges: Bool = false
     @Published var jailSetupStatus = JailSetupStatus()
     @Published var isLongRunningOperation = false  // Locks navigation during template creation, etc.
+    @Published var initialCheckComplete = false  // Tracks if initial setup check has completed
 
     private let sshManager = SSHConnectionManager.shared
 
@@ -2120,6 +2122,7 @@ class JailsViewModel: ObservableObject {
             jails = []
         }
 
+        initialCheckComplete = true
         isLoading = false
     }
 
