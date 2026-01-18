@@ -1460,7 +1460,7 @@ SNAP="\(dataset)@auto-$(date +\\%Y\\%m\\%d-\\%H\\%M\\%S)" && zfs snapshot "$SNAP
 struct ScheduleReplicationTaskSheet: View {
     @Environment(\.dismiss) private var dismiss
     let command: String
-    let onSave: (String, String, String, String, String, String, String) -> Void
+    let onSave: (String, String, String, String, String, String, String, Int) -> Void  // Added retention
     let onCancel: () -> Void
 
     @State private var frequency = 0 // 0=minute, 1=hourly, 2=daily, 3=weekly, 4=monthly
@@ -1470,8 +1470,9 @@ struct ScheduleReplicationTaskSheet: View {
     @State private var selectedDayOfWeek = 0
     @State private var selectedDayOfMonth = 1
     @State private var editedCommand: String
+    @State private var retentionPeriod = 0 // 0=forever, 1=1day, 2=1week, 3=1month, 4=3months, 5=1year
 
-    init(command: String, onSave: @escaping (String, String, String, String, String, String, String) -> Void, onCancel: @escaping () -> Void) {
+    init(command: String, onSave: @escaping (String, String, String, String, String, String, String, Int) -> Void, onCancel: @escaping () -> Void) {
         self.command = command
         self.onSave = onSave
         self.onCancel = onCancel
@@ -1639,17 +1640,25 @@ struct ScheduleReplicationTaskSheet: View {
 
                     Divider()
 
-                    // Command preview
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Replication Command")
+                    // Snapshot retention
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Snapshot Retention")
                             .font(.headline)
 
-                        TextEditor(text: $editedCommand)
-                            .font(.system(.caption, design: .monospaced))
-                            .frame(height: 80)
-                            .border(Color(nsColor: .separatorColor), width: 1)
+                        Picker("Keep snapshots for:", selection: $retentionPeriod) {
+                            Text("Forever").tag(0)
+                            Text("1 Hour").tag(1)
+                            Text("1 Day").tag(2)
+                            Text("1 Week").tag(3)
+                            Text("1 Month").tag(4)
+                            Text("3 Months").tag(5)
+                            Text("1 Year").tag(6)
+                        }
+                        .pickerStyle(.segmented)
 
-                        Text("This command creates a snapshot and replicates incrementally to the target")
+                        Text(retentionPeriod == 0
+                            ? "Snapshots will be kept indefinitely on both source and target"
+                            : "Older snapshots will be automatically pruned on both source and target")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -1670,7 +1679,7 @@ struct ScheduleReplicationTaskSheet: View {
 
                 Button("Schedule Task") {
                     let schedule = computedCronSchedule
-                    onSave(schedule.0, schedule.1, schedule.2, schedule.3, schedule.4, editedCommand, "root")
+                    onSave(schedule.0, schedule.1, schedule.2, schedule.3, schedule.4, editedCommand, "root", retentionPeriod)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -1678,7 +1687,7 @@ struct ScheduleReplicationTaskSheet: View {
             }
             .padding()
         }
-        .frame(width: 580, height: 550)
+        .frame(width: 580, height: 480)
     }
 }
 
@@ -2788,16 +2797,41 @@ struct DatasetsView: View {
         .sheet(item: $pendingScheduledReplication) { info in
             ScheduleReplicationTaskSheet(
                 command: info.command,
-                onSave: { minute, hour, dayOfMonth, month, dayOfWeek, command, user in
+                onSave: { minute, hour, dayOfMonth, month, dayOfWeek, command, user, retention in
                     Task {
                         do {
+                            // Build the full command with optional pruning
+                            var fullCommand = command
+
+                            // Add pruning if retention is not "Forever" (0)
+                            if retention > 0 {
+                                // Calculate retention in seconds based on selection
+                                let retentionSeconds: Int
+                                switch retention {
+                                case 1: retentionSeconds = 3600         // 1 Hour
+                                case 2: retentionSeconds = 86400        // 1 Day
+                                case 3: retentionSeconds = 604800       // 1 Week
+                                case 4: retentionSeconds = 2592000      // 1 Month (30 days)
+                                case 5: retentionSeconds = 7776000      // 3 Months (90 days)
+                                case 6: retentionSeconds = 31536000     // 1 Year (365 days)
+                                default: retentionSeconds = 0
+                                }
+
+                                if retentionSeconds > 0 {
+                                    // Add pruning command using base FreeBSD tools with epoch timestamps
+                                    // Prunes snapshots matching 'auto-' prefix older than specified seconds
+                                    let pruneScript = " && cutoff=$(($(date +%s) - \(retentionSeconds))); zfs list -H -t snapshot -o name,creation | grep '@auto-' | while read snap creation; do snap_epoch=$(date -j -f '%a %b %d %H:%M %Y' \"$creation\" +%s 2>/dev/null || echo 0); if [ \"$snap_epoch\" -lt \"$cutoff\" ]; then zfs destroy \"$snap\"; fi; done"
+                                    fullCommand += pruneScript
+                                }
+                            }
+
                             try await SSHConnectionManager.shared.addCronTask(
                                 minute: minute,
                                 hour: hour,
                                 dayOfMonth: dayOfMonth,
                                 month: month,
                                 dayOfWeek: dayOfWeek,
-                                command: command,
+                                command: fullCommand,
                                 user: user
                             )
                             // Navigate to Tasks page after successful scheduling
