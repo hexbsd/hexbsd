@@ -195,6 +195,160 @@ class ZFSToolbarState: ObservableObject {
     @Published var hasCheckedServers = false
 }
 
+// MARK: - Replication Server Picker
+
+struct ReplicationServerPickerView: View {
+    @ObservedObject var toolbarState: ZFSToolbarState
+    @State private var serverCheckTimer: Timer?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // None option
+            Button(action: {
+                toolbarState.selectedReplicationServer = nil
+                toolbarState.showServerPicker = false
+            }) {
+                HStack {
+                    Text("None")
+                    Spacer()
+                    if toolbarState.selectedReplicationServer == nil {
+                        Image(systemName: "checkmark")
+                            .foregroundColor(.accentColor)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Divider()
+                .padding(.vertical, 4)
+
+            // Server list
+            ForEach(toolbarState.savedServers, id: \.id) { server in
+                let isOnline = toolbarState.onlineServers.contains(server.id.uuidString)
+                Button(action: {
+                    if toolbarState.hasCheckedServers && isOnline {
+                        toolbarState.selectedReplicationServer = server.id.uuidString
+                        toolbarState.showServerPicker = false
+                    }
+                }) {
+                    HStack {
+                        if !toolbarState.hasCheckedServers {
+                            ProgressView()
+                                .controlSize(.small)
+                                .frame(width: 10, height: 10)
+                        } else {
+                            Circle()
+                                .fill(isOnline ? Color.green : Color.red)
+                                .frame(width: 8, height: 8)
+                        }
+                        Text(server.name)
+                            .foregroundColor(toolbarState.hasCheckedServers && isOnline ? .primary : .secondary)
+                        Spacer()
+                        if toolbarState.selectedReplicationServer == server.id.uuidString {
+                            Image(systemName: "checkmark")
+                                .foregroundColor(.accentColor)
+                        }
+                        if toolbarState.hasCheckedServers && !isOnline {
+                            Text("offline")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!toolbarState.hasCheckedServers || !isOnline)
+            }
+        }
+        .frame(minWidth: 200)
+        .padding(.vertical, 8)
+        .onAppear {
+            loadSavedServers()
+            Task {
+                await checkServersOnline()
+            }
+        }
+    }
+
+    private func loadSavedServers() {
+        if let data = UserDefaults.standard.data(forKey: "savedServers"),
+           let decoded = try? JSONDecoder().decode([SavedServer].self, from: data) {
+            // Filter out the currently connected server
+            toolbarState.savedServers = decoded.filter { $0.host != SSHConnectionManager.shared.serverAddress }
+        }
+    }
+
+    private func checkServersOnline() async {
+        var online: Set<String> = []
+
+        await withTaskGroup(of: (String, Bool).self) { group in
+            for server in toolbarState.savedServers {
+                group.addTask {
+                    let isOnline = await self.checkHostReachable(host: server.host, port: server.port)
+                    return (server.id.uuidString, isOnline)
+                }
+            }
+
+            for await (serverId, isOnline) in group {
+                if isOnline {
+                    online.insert(serverId)
+                }
+            }
+        }
+
+        await MainActor.run {
+            toolbarState.onlineServers = online
+            toolbarState.hasCheckedServers = true
+        }
+    }
+
+    private func checkHostReachable(host: String, port: Int) async -> Bool {
+        return await withCheckedContinuation { continuation in
+            var hasResumed = false
+            let lock = NSLock()
+
+            func resumeOnce(with result: Bool) {
+                lock.lock()
+                defer { lock.unlock() }
+                if !hasResumed {
+                    hasResumed = true
+                    continuation.resume(returning: result)
+                }
+            }
+
+            let socket = NWConnection(
+                host: NWEndpoint.Host(host),
+                port: NWEndpoint.Port(integerLiteral: UInt16(port)),
+                using: .tcp
+            )
+
+            socket.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    socket.cancel()
+                    resumeOnce(with: true)
+                case .failed, .cancelled:
+                    resumeOnce(with: false)
+                default:
+                    break
+                }
+            }
+
+            socket.start(queue: .global())
+
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                socket.cancel()
+                resumeOnce(with: false)
+            }
+        }
+    }
+}
+
 struct ZFSContentView: View {
     @StateObject private var viewModel = ZFSViewModel()
     @StateObject private var toolbarState = ZFSToolbarState()
@@ -261,6 +415,9 @@ struct ZFSContentView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(viewModel.pools.isEmpty)
+                    .popover(isPresented: $toolbarState.showServerPicker, arrowEdge: .bottom) {
+                        ReplicationServerPickerView(toolbarState: toolbarState)
+                    }
                 }
             }
             .padding()
@@ -2497,101 +2654,8 @@ struct DatasetsView: View {
                 datasetManagementView
             }
         }
-        .popover(isPresented: Binding(
-            get: { toolbarState.showServerPicker },
-            set: { toolbarState.showServerPicker = $0 }
-        ), arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 0) {
-                // None option
-                Button(action: {
-                    selectedReplicationServer = nil
-                    showServerPicker = false
-                    handleServerSelection(nil)
-                }) {
-                    HStack {
-                        Text("None")
-                        Spacer()
-                        if selectedReplicationServer == nil {
-                            Image(systemName: "checkmark")
-                                .foregroundColor(.accentColor)
-                        }
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-
-                Divider()
-                    .padding(.vertical, 4)
-
-                // Server list
-                ForEach(savedServers, id: \.id) { server in
-                    let isOnline = onlineServers.contains(server.id.uuidString)
-                    Button(action: {
-                        if hasCheckedServers && isOnline {
-                            selectedReplicationServer = server.id.uuidString
-                            showServerPicker = false
-                            handleServerSelection(server.id.uuidString)
-                        }
-                    }) {
-                        HStack {
-                            if !hasCheckedServers {
-                                ProgressView()
-                                    .controlSize(.small)
-                                    .frame(width: 10, height: 10)
-                            } else {
-                                Circle()
-                                    .fill(isOnline ? Color.green : Color.red)
-                                    .frame(width: 8, height: 8)
-                            }
-                            Text(server.name)
-                                .foregroundColor(hasCheckedServers && isOnline ? .primary : .secondary)
-                            Spacer()
-                            if selectedReplicationServer == server.id.uuidString {
-                                Image(systemName: "checkmark")
-                                    .foregroundColor(.accentColor)
-                            }
-                            if hasCheckedServers && !isOnline {
-                                Text("offline")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!hasCheckedServers || !isOnline)
-                }
-            }
-            .frame(minWidth: 200)
-            .padding(.vertical, 8)
-        }
-        .onChange(of: showServerPicker) { oldValue, newValue in
-            if newValue {
-                Task {
-                    await checkServersOnline()
-                }
-            }
-        }
-        .onAppear {
-            loadSavedServers()
-            // Initial check immediately
-            Task {
-                await checkServersOnline()
-            }
-            // Then recheck every 5 seconds
-            serverCheckTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
-                Task {
-                    await checkServersOnline()
-                }
-            }
-        }
-        .onDisappear {
-            serverCheckTimer?.invalidate()
-            serverCheckTimer = nil
+        .onChange(of: selectedReplicationServer) { oldValue, newValue in
+            handleServerSelection(newValue)
         }
         .sheet(isPresented: $showCreateSnapshot) {
             if let dataset = selectedDataset {
