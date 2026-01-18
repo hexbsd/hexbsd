@@ -6,6 +6,24 @@
 //
 
 import Foundation
+import SwiftUI
+
+// MARK: - Window ID Environment Key
+
+/// Environment key for passing window-specific ID to child views
+/// Used to scope notifications to the current window only
+struct WindowIDKey: EnvironmentKey {
+    static let defaultValue: UUID = UUID()
+}
+
+extension EnvironmentValues {
+    var windowID: UUID {
+        get { self[WindowIDKey.self] }
+        set { self[WindowIDKey.self] = newValue }
+    }
+}
+
+// MARK: - Notification Names
 
 extension Notification.Name {
     /// Posted when a terminal should be opened with a specific command

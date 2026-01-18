@@ -656,6 +656,9 @@ struct ContentView: View {
     @State private var hasCheckedServers = false  // True after initial check completes
     @State private var serverCheckTimer: Timer?
 
+    // Unique ID for this window instance - used to scope notifications
+    @State private var windowId = UUID()
+
     // Use shared SSH connection manager across all windows
     var sshManager = SSHConnectionManager.shared
 
@@ -682,6 +685,7 @@ struct ContentView: View {
                     serverAddress: sshManager.serverAddress,
                     systemStatus: systemStatus
                 )
+                .environment(\.windowID, windowId)
             } else {
                 ZStack(alignment: .bottomTrailing) {
                     if savedServers.isEmpty {
@@ -854,7 +858,13 @@ struct ContentView: View {
                 selectedSection = .tasks
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .navigateToZFS)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .navigateToZFS)) { notification in
+            // Only handle if this notification is for this window
+            if let notificationWindowId = notification.userInfo?["windowId"] as? UUID,
+               notificationWindowId != windowId {
+                return
+            }
+
             // Switch to ZFS section for pool setup
             if sshManager.isConnected {
                 let wasNotOnZFS = selectedSection != .zfs
@@ -863,7 +873,7 @@ struct ContentView: View {
                 // Re-post notification after ZFSContentView loads so it can open the pools sheet
                 if wasNotOnZFS {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                        NotificationCenter.default.post(name: .navigateToZFS, object: nil)
+                        NotificationCenter.default.post(name: .navigateToZFS, object: nil, userInfo: ["windowId": self.windowId])
                     }
                 }
             }

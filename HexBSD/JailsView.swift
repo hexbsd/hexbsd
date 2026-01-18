@@ -1757,6 +1757,7 @@ struct TemplatesTabView: View {
 
 struct JailSetupWizardView: View {
     @ObservedObject var viewModel: JailsViewModel
+    @Environment(\.windowID) private var windowId
     @State private var storageMode = "zfs"  // "zfs" or "ufs"
     @State private var selectedPool: ZFSPool?
     @State private var datasetName = "jails"
@@ -1901,7 +1902,7 @@ struct JailSetupWizardView: View {
                                         .foregroundColor(.secondary)
                                     Spacer()
                                     Button("Setup ZFS Pool") {
-                                        NotificationCenter.default.post(name: .navigateToZFS, object: nil)
+                                        NotificationCenter.default.post(name: .navigateToZFS, object: nil, userInfo: ["windowId": windowId])
                                     }
                                     .buttonStyle(.bordered)
                                     .controlSize(.small)

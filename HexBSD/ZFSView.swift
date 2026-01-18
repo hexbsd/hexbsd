@@ -356,6 +356,7 @@ struct ReplicationServerPickerView: View {
 struct ZFSContentView: View {
     @StateObject private var viewModel = ZFSViewModel()
     @StateObject private var toolbarState = ZFSToolbarState()
+    @Environment(\.windowID) private var windowId
     @State private var showError = false
     @State private var showBootEnvironments = false
     @State private var showPools = false
@@ -455,7 +456,12 @@ struct ZFSContentView: View {
                 await viewModel.loadAll()
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .navigateToZFS)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .navigateToZFS)) { notification in
+            // Only handle if this notification is for this window
+            if let notificationWindowId = notification.userInfo?["windowId"] as? UUID,
+               notificationWindowId != windowId {
+                return
+            }
             // Open pools sheet
             showPools = true
         }
