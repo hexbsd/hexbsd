@@ -5373,7 +5373,11 @@ extension SSHConnectionManager {
             let version = components[1]
             let description = components[2]
             let size = components[3]
-            let repository = components[4].isEmpty ? "Unknown" : components[4]
+            var repository = components[4].isEmpty ? "Unknown" : components[4]
+            // Normalize "FreeBSD" to "FreeBSD-base" to avoid redundant filter
+            if repository == "FreeBSD" {
+                repository = "FreeBSD-base"
+            }
 
             packages.append(Package(
                 name: name,
