@@ -2,8 +2,7 @@
 
 A macOS application for managing FreeBSD servers over SSH.
 
-<img width="1686" height="1166" alt="Screenshot 2026-01-14 at 10 10 34 PM" src="https://github.com/user-attachments/assets/f7cf38e1-6929-4efd-8443-b2d2d4d4f31d" />
-
+<img width="1400" height="850" alt="Screenshot 2026-01-17 at 9 45 53 PM" src="https://github.com/user-attachments/assets/d3ae7889-2070-47c7-9ce6-19bafdf61d64" />
 
 ## Features
 
