@@ -276,20 +276,178 @@ class TerminalCoordinator: NSObject, ObservableObject, TerminalViewDelegate {
 
 /// Custom terminal view class (extends SwiftTerm's TerminalView for macOS)
 class TerminalViewImpl: TerminalView {
+
+    // MARK: - Custom Selection Tracking
+
+    private struct SelectionPosition {
+        var col: Int
+        var row: Int
+    }
+
+    private var selectionStart: SelectionPosition?
+    private var selectionEnd: SelectionPosition?
+    private var isSelecting = false
+    private var eventMonitor: Any?
+    private let terminalFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         configureTerminal()
+        setupEventMonitor()
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         configureTerminal()
+        setupEventMonitor()
+    }
+
+    deinit {
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
     }
 
     private func configureTerminal() {
         // Configure terminal appearance
         nativeForegroundColor = NSColor.white
         nativeBackgroundColor = NSColor.black
-        font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        font = terminalFont
+    }
+
+    // MARK: - Event Monitor for Selection Tracking
+
+    private func setupEventMonitor() {
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
+            self?.handleMouseEvent(event)
+            return event
+        }
+    }
+
+    private func handleMouseEvent(_ event: NSEvent) {
+        // Only handle events for this view
+        guard let eventWindow = event.window,
+              eventWindow == self.window else {
+            return
+        }
+
+        let locationInWindow = event.locationInWindow
+        let locationInView = convert(locationInWindow, from: nil)
+
+        // Check if the event is within our bounds
+        guard bounds.contains(locationInView) else {
+            return
+        }
+
+        let position = convertToTerminalPosition(locationInView: locationInView)
+
+        switch event.type {
+        case .leftMouseDown:
+            selectionStart = position
+            selectionEnd = position
+            isSelecting = true
+        case .leftMouseDragged:
+            if isSelecting {
+                selectionEnd = position
+            }
+        case .leftMouseUp:
+            if isSelecting {
+                selectionEnd = position
+                isSelecting = false
+            }
+        default:
+            break
+        }
+    }
+
+    /// Calculate cell dimensions from font metrics
+    private func getCellDimensions() -> (width: CGFloat, height: CGFloat) {
+        let fontAttributes: [NSAttributedString.Key: Any] = [.font: terminalFont]
+        let charSize = "W".size(withAttributes: fontAttributes)
+        // Use line height for cell height
+        let lineHeight = terminalFont.ascender - terminalFont.descender + terminalFont.leading
+        return (charSize.width, max(lineHeight, charSize.height))
+    }
+
+    /// Convert view location to terminal column/row position
+    private func convertToTerminalPosition(locationInView: NSPoint) -> SelectionPosition {
+        let (cellWidth, cellHeight) = getCellDimensions()
+
+        // Calculate column and row (0-based)
+        let col = max(0, min(Int(locationInView.x / cellWidth), terminal.cols - 1))
+        // Y is flipped in AppKit - origin is bottom-left
+        let flippedY = bounds.height - locationInView.y
+        let row = max(0, min(Int(flippedY / cellHeight), terminal.rows - 1))
+
+        return SelectionPosition(col: col, row: row)
+    }
+
+    // MARK: - Custom Copy Implementation
+
+    /// Override copy to use our own selection tracking
+    @objc override func copy(_ sender: Any) {
+        guard let text = getSelectedText(), !text.isEmpty else {
+            return
+        }
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+
+    /// Extract selected text from terminal buffer using our tracked selection
+    private func getSelectedText() -> String? {
+        guard let start = selectionStart, let end = selectionEnd else {
+            return nil
+        }
+
+        // Normalize selection (start should be before end)
+        let (normalizedStart, normalizedEnd) = normalizeSelection(start: start, end: end)
+
+        var result = ""
+
+        // Single line selection
+        if normalizedStart.row == normalizedEnd.row {
+            result = getTextFromLine(row: normalizedStart.row, startCol: normalizedStart.col, endCol: normalizedEnd.col)
+        } else {
+            // Multi-line selection
+            // First line: from start column to end of line
+            result += getTextFromLine(row: normalizedStart.row, startCol: normalizedStart.col, endCol: terminal.cols - 1)
+            result += "\n"
+
+            // Middle lines: full lines
+            for row in (normalizedStart.row + 1)..<normalizedEnd.row {
+                result += getTextFromLine(row: row, startCol: 0, endCol: terminal.cols - 1)
+                result += "\n"
+            }
+
+            // Last line: from start of line to end column
+            result += getTextFromLine(row: normalizedEnd.row, startCol: 0, endCol: normalizedEnd.col)
+        }
+
+        return result.isEmpty ? nil : result
+    }
+
+    /// Normalize selection so start is always before end
+    private func normalizeSelection(start: SelectionPosition, end: SelectionPosition) -> (SelectionPosition, SelectionPosition) {
+        if start.row < end.row || (start.row == end.row && start.col <= end.col) {
+            return (start, end)
+        } else {
+            return (end, start)
+        }
+    }
+
+    /// Extract text from a single line between column positions
+    private func getTextFromLine(row: Int, startCol: Int, endCol: Int) -> String {
+        var lineText = ""
+
+        for col in startCol...endCol {
+            if let char = terminal.getCharacter(col: col, row: row) {
+                lineText.append(char)
+            }
+        }
+
+        // Trim trailing whitespace from line
+        return lineText.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
     }
 }
