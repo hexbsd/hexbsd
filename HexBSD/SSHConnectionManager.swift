@@ -5003,6 +5003,18 @@ extension SSHConnectionManager {
         _ = try await executeCommand("zpool scrub -s \(pool)")
     }
 
+    /// Export a ZFS pool (make it unavailable but preserve data)
+    func exportZFSPool(pool: String, force: Bool = false) async throws {
+        let forceFlag = force ? "-f " : ""
+        _ = try await executeCommand("zpool export \(forceFlag)\(pool)")
+    }
+
+    /// Destroy a ZFS pool (permanently deletes all data)
+    func destroyZFSPool(pool: String, force: Bool = false) async throws {
+        let forceFlag = force ? "-f " : ""
+        _ = try await executeCommand("zpool destroy \(forceFlag)\(pool)")
+    }
+
     /// Replicate a ZFS dataset/snapshot to another server using ZFS send/receive
     func replicateDataset(dataset: String, targetHost: String, targetManager: SSHConnectionManager) async throws {
         // If it's a snapshot, replicate it directly

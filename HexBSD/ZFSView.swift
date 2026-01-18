@@ -1951,6 +1951,9 @@ struct PoolCard: View {
     let pool: ZFSPool
     let scrubStatus: ZFSScrubStatus?
     @ObservedObject var viewModel: ZFSViewModel
+    @State private var showExportConfirm = false
+    @State private var showDestroyConfirm = false
+    @State private var destroyConfirmText = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2106,6 +2109,36 @@ struct PoolCard: View {
                                 .foregroundColor(.secondary)
                         }
                     }
+
+                    Divider()
+
+                    // Pool Actions
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Image(systemName: "gearshape")
+                                .foregroundColor(.blue)
+                            Text("Pool Actions")
+                                .font(.headline)
+                        }
+
+                        HStack(spacing: 12) {
+                            Button(action: {
+                                showExportConfirm = true
+                            }) {
+                                Label("Export", systemImage: "square.and.arrow.up")
+                            }
+                            .buttonStyle(.bordered)
+
+                            Button(action: {
+                                destroyConfirmText = ""
+                                showDestroyConfirm = true
+                            }) {
+                                Label("Destroy", systemImage: "trash")
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.red)
+                        }
+                    }
                 }
                 .padding()
         }
@@ -2114,6 +2147,28 @@ struct PoolCard: View {
                 .fill(Color(nsColor: .controlBackgroundColor))
                 .shadow(color: .black.opacity(0.1), radius: 3, x: 0, y: 1)
         )
+        .alert("Export Pool", isPresented: $showExportConfirm) {
+            Button("Cancel", role: .cancel) { }
+            Button("Export") {
+                Task {
+                    await viewModel.exportPool(pool: pool.name)
+                }
+            }
+        } message: {
+            Text("Are you sure you want to export pool '\(pool.name)'? The pool will be unavailable until imported again.")
+        }
+        .alert("Destroy Pool", isPresented: $showDestroyConfirm) {
+            TextField("Type pool name to confirm", text: $destroyConfirmText)
+            Button("Cancel", role: .cancel) { }
+            Button("Destroy", role: .destructive) {
+                Task {
+                    await viewModel.destroyPool(pool: pool.name, force: true)
+                }
+            }
+            .disabled(destroyConfirmText != pool.name)
+        } message: {
+            Text("This will permanently destroy pool '\(pool.name)' and ALL data it contains. This action cannot be undone.\n\nType '\(pool.name)' to confirm.")
+        }
     }
 }
 
@@ -5195,6 +5250,29 @@ class ZFSViewModel: ObservableObject {
             await refreshScrubStatus()
         } catch {
             self.error = "Failed to stop scrub: \(error.localizedDescription)"
+        }
+    }
+
+    func exportPool(pool: String, force: Bool = false) async {
+        error = nil
+
+        do {
+            try await sshManager.exportZFSPool(pool: pool, force: force)
+            await refreshPools()
+        } catch {
+            self.error = "Failed to export pool: \(error.localizedDescription)"
+        }
+    }
+
+    func destroyPool(pool: String, force: Bool = false) async {
+        error = nil
+
+        do {
+            try await sshManager.destroyZFSPool(pool: pool, force: force)
+            await refreshPools()
+            await refreshDatasets()
+        } catch {
+            self.error = "Failed to destroy pool: \(error.localizedDescription)"
         }
     }
 
