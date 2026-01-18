@@ -607,7 +607,6 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case tasks = "Tasks"
     case terminal = "Terminal"
     case usersAndGroups = "Users & Groups"
-    case vms = "Virtual Machines"
     case zfs = "ZFS"
 
     var id: String { rawValue }
@@ -626,7 +625,6 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .tasks: return "clock"
         case .terminal: return "terminal"
         case .usersAndGroups: return "person.2"
-        case .vms: return "desktopcomputer"
         case .zfs: return "cylinder.split.1x2"
         }
     }
@@ -1123,9 +1121,6 @@ struct DetailView: View {
             } else if section == .terminal {
                 // Terminal view handled separately with its own coordinator
                 TerminalContentView()
-            } else if section == .vms {
-                // Virtual Machine management
-                VMsContentView()
             } else if section == .zfs {
                 // ZFS pool and dataset management
                 ZFSContentView()

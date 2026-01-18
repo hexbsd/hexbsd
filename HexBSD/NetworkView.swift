@@ -161,42 +161,17 @@ struct BridgeInterface: Identifiable, Hashable {
     }
 }
 
-// MARK: - VM Switch Models
-
-/// Represents a vm-bhyve virtual switch
-struct VMSwitch: Identifiable, Hashable {
-    let id = UUID()
-    let name: String
-    let type: String           // standard, vale, etc.
-    let iface: String          // bridge interface (e.g., vm-public)
-    let address: String        // IP address if configured
-    let isPrivate: Bool
-    let mtu: String
-    let vlan: String
-    let ports: [String]        // Physical interfaces attached
-
-    var hasInterface: Bool {
-        !iface.isEmpty && iface != "-"
-    }
-
-    var hasPorts: Bool {
-        !ports.isEmpty
-    }
-}
-
 // MARK: - Network Tab Enum
 
 enum NetworkTab: String, CaseIterable {
     case interfaces = "Interfaces"
     case bridges = "Bridges"
-    case switches = "Switches"
     case routing = "Routing"
 
     var icon: String {
         switch self {
         case .interfaces: return "network"
         case .bridges: return "point.3.connected.trianglepath.dotted"
-        case .switches: return "arrow.left.arrow.right.square"
         case .routing: return "arrow.triangle.branch"
         }
     }
@@ -300,14 +275,12 @@ struct NetworkContentView: View {
                 InterfacesTabView()
             case .bridges:
                 BridgesTabView()
-            case .switches:
-                SwitchesTabView()
             case .routing:
                 RoutingTabView()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .navigateToNetworkBridges)) { _ in
-            // Switch to bridges tab when requested from VMs or Jails
+            // Switch to bridges tab when requested from Jails
             selectedTab = .bridges
         }
     }
@@ -328,7 +301,6 @@ struct InterfacesTabView: View {
         var interfaces = viewModel.interfaces
 
         // Exclude bridges - they have their own Bridges tab
-        // Also exclude vm-* interfaces as they are managed through the Switches tab
         interfaces = interfaces.filter { $0.type != .bridge }
 
         // Apply type filter
@@ -1745,270 +1717,6 @@ struct AddRouteSheet: View {
     }
 }
 
-// MARK: - Switches Tab View
-
-struct SwitchesTabView: View {
-    @StateObject private var viewModel = SwitchesViewModel()
-    @State private var selectedSwitch: VMSwitch?
-    @State private var showError = false
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Toolbar
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("VM Switches")
-                        .font(.headline)
-                    Text("\(viewModel.switches.count) switch\(viewModel.switches.count == 1 ? "" : "es")")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                Spacer()
-
-            }
-            .padding()
-
-            Divider()
-
-            // Content
-            if viewModel.isLoading {
-                VStack(spacing: 20) {
-                    ProgressView()
-                        .scaleEffect(1.5)
-                    Text("Loading switches...")
-                        .font(.headline)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if viewModel.switches.isEmpty {
-                VStack(spacing: 20) {
-                    Image(systemName: "arrow.left.arrow.right.square")
-                        .font(.system(size: 72))
-                        .foregroundColor(.secondary)
-                    Text("No VM Switches Found")
-                        .font(.title2)
-                        .foregroundColor(.secondary)
-                    Text("VM switches are created through the VMs feature setup wizard")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                HSplitView {
-                    // Switch list
-                    List(viewModel.switches, selection: $selectedSwitch) { vmSwitch in
-                        SwitchRowView(vmSwitch: vmSwitch)
-                            .tag(vmSwitch)
-                            .contextMenu {
-                                Button(role: .destructive) {
-                                    Task {
-                                        await viewModel.deleteSwitch(vmSwitch.name)
-                                        if selectedSwitch?.name == vmSwitch.name {
-                                            selectedSwitch = nil
-                                        }
-                                    }
-                                } label: {
-                                    Label("Delete Switch", systemImage: "trash")
-                                }
-                            }
-                    }
-                    .frame(minWidth: 250, maxWidth: 350)
-
-                    // Detail view
-                    Group {
-                        if let vmSwitch = selectedSwitch {
-                            SwitchDetailView(vmSwitch: vmSwitch, viewModel: viewModel)
-                        } else {
-                            VStack(spacing: 20) {
-                                Image(systemName: "arrow.left.arrow.right.square")
-                                    .font(.system(size: 48))
-                                    .foregroundColor(.secondary)
-                                Text("Select a switch to view details")
-                                    .font(.title2)
-                                    .foregroundColor(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        }
-                    }
-                    .frame(minWidth: 400, maxWidth: .infinity)
-                }
-            }
-        }
-        .alert("Error", isPresented: $showError) {
-            Button("OK") {
-                showError = false
-            }
-        } message: {
-            Text(viewModel.error ?? "Unknown error")
-        }
-        .onChange(of: viewModel.error) { oldValue, newValue in
-            if newValue != nil {
-                showError = true
-            }
-        }
-        .onAppear {
-            Task {
-                await viewModel.loadSwitches()
-            }
-        }
-    }
-}
-
-// MARK: - Switch Row View
-
-struct SwitchRowView: View {
-    let vmSwitch: VMSwitch
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "arrow.left.arrow.right.square")
-                .font(.system(size: 24))
-                .foregroundColor(.cyan)
-                .frame(width: 32)
-
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text(vmSwitch.name)
-                        .font(.headline)
-
-                    Text(vmSwitch.type)
-                        .font(.caption2)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.cyan.opacity(0.15))
-                        .foregroundColor(.cyan)
-                        .cornerRadius(4)
-                }
-
-                if vmSwitch.hasInterface {
-                    Text(vmSwitch.iface)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                if vmSwitch.hasPorts {
-                    Text("Ports: \(vmSwitch.ports.joined(separator: ", "))")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-            }
-
-            Spacer()
-        }
-        .padding(.vertical, 6)
-    }
-}
-
-// MARK: - Switch Detail View
-
-struct SwitchDetailView: View {
-    let vmSwitch: VMSwitch
-    @ObservedObject var viewModel: SwitchesViewModel
-    @State private var showDeleteConfirmation = false
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                // Header
-                HStack {
-                    Image(systemName: "arrow.left.arrow.right.square")
-                        .font(.system(size: 36))
-                        .foregroundColor(.cyan)
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(vmSwitch.name)
-                            .font(.title)
-                        Text("VM Switch")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-
-                    Spacer()
-
-                    Text(vmSwitch.type)
-                        .font(.headline)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Color.cyan.opacity(0.2))
-                        .foregroundColor(.cyan)
-                        .cornerRadius(8)
-                }
-                .padding()
-                .background(Color(nsColor: .controlBackgroundColor))
-                .cornerRadius(12)
-
-                // Action buttons
-                HStack(spacing: 12) {
-                    Button(action: {
-                        showDeleteConfirmation = true
-                    }) {
-                        Label("Delete Switch", systemImage: "trash")
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.red)
-
-                    Spacer()
-                }
-
-                // Configuration
-                GroupBox("Configuration") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        NetworkDetailRow(label: "Bridge Interface", value: vmSwitch.hasInterface ? vmSwitch.iface : "Not configured")
-                        NetworkDetailRow(label: "Address", value: vmSwitch.address == "-" ? "Not configured" : vmSwitch.address)
-                        NetworkDetailRow(label: "Private", value: vmSwitch.isPrivate ? "Yes" : "No")
-                        NetworkDetailRow(label: "MTU", value: vmSwitch.mtu == "-" ? "Default" : vmSwitch.mtu)
-                        NetworkDetailRow(label: "VLAN", value: vmSwitch.vlan == "-" ? "None" : vmSwitch.vlan)
-                    }
-                    .padding(.vertical, 8)
-                }
-
-                // Only show Physical Interfaces section for standard switches (not manual switches which use existing bridges)
-                if vmSwitch.type != "manual" {
-                    GroupBox("Physical Interfaces") {
-                        if vmSwitch.ports.isEmpty {
-                            Text("No physical interfaces attached")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .padding(.vertical, 8)
-                        } else {
-                            VStack(alignment: .leading, spacing: 8) {
-                                ForEach(vmSwitch.ports, id: \.self) { port in
-                                    HStack {
-                                        Image(systemName: "cable.connector")
-                                            .foregroundColor(.blue)
-                                        Text(port)
-                                            .font(.system(.body, design: .monospaced))
-                                        Spacer()
-                                    }
-                                    .padding(.vertical, 4)
-                                }
-                            }
-                            .padding(.vertical, 8)
-                        }
-                    }
-                }
-            }
-            .padding()
-        }
-        .alert("Delete Switch", isPresented: $showDeleteConfirmation) {
-            Button("Cancel", role: .cancel) { }
-            Button("Delete", role: .destructive) {
-                Task {
-                    await viewModel.deleteSwitch(vmSwitch.name)
-                }
-            }
-        } message: {
-            if vmSwitch.type == "manual" {
-                Text("Are you sure you want to delete the '\(vmSwitch.name)' switch? The underlying bridge interface will not be affected.")
-            } else {
-                Text("Are you sure you want to delete the '\(vmSwitch.name)' switch? This will also remove the associated bridge interface.")
-            }
-        }
-    }
-}
-
 // MARK: - View Models
 
 @MainActor
@@ -2222,39 +1930,3 @@ class RoutingViewModel: ObservableObject {
     }
 }
 
-@MainActor
-class SwitchesViewModel: ObservableObject {
-    @Published var switches: [VMSwitch] = []
-    @Published var isLoading = false
-    @Published var error: String?
-
-    private let sshManager = SSHConnectionManager.shared
-
-    func loadSwitches() async {
-        isLoading = true
-        error = nil
-
-        do {
-            switches = try await sshManager.listVMSwitches()
-        } catch {
-            self.error = "Failed to load switches: \(error.localizedDescription)"
-            switches = []
-        }
-
-        isLoading = false
-    }
-
-    func refresh() async {
-        await loadSwitches()
-    }
-
-    func deleteSwitch(_ name: String) async {
-        error = nil
-        do {
-            try await sshManager.deleteVMSwitch(name)
-            await refresh()
-        } catch {
-            self.error = "Failed to delete switch: \(error.localizedDescription)"
-        }
-    }
-}

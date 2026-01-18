@@ -2148,7 +2148,7 @@ class JailsViewModel: ObservableObject {
     /// List available ZFS pools
     func listZFSPools() async -> [ZFSPool] {
         do {
-            return try await sshManager.listZFSPoolsForVMSetup()
+            return try await sshManager.listZFSPools()
         } catch {
             self.error = "Failed to list ZFS pools: \(error.localizedDescription)"
             return []
