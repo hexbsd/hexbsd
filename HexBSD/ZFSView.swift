@@ -212,6 +212,7 @@ struct ZFSContentView: View {
                     Label("Boot Environments", systemImage: "arrow.triangle.branch")
                 }
                 .buttonStyle(.bordered)
+                .disabled(viewModel.pools.isEmpty)
 
                 Button(action: {
                     showPools = true
@@ -223,6 +224,7 @@ struct ZFSContentView: View {
                 Toggle("Show protected", isOn: $toolbarState.showProtectedDatasets)
                     .toggleStyle(.checkbox)
                     .font(.subheadline)
+                    .disabled(viewModel.pools.isEmpty)
 
                 Spacer()
 
@@ -230,7 +232,7 @@ struct ZFSContentView: View {
                 HStack(spacing: 8) {
                     Text("Replicate to:")
                         .font(.subheadline)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(viewModel.pools.isEmpty ? .secondary.opacity(0.5) : .secondary)
 
                     Button(action: {
                         toolbarState.showServerPicker = true
@@ -258,6 +260,7 @@ struct ZFSContentView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .disabled(viewModel.pools.isEmpty)
                 }
             }
             .padding()
