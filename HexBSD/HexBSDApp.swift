@@ -51,6 +51,7 @@ struct HexBSDApp: App {
                     NotificationCenter.default.post(name: NSNotification.Name("ShowAboutWindow"), object: nil)
                 }
             }
+            HelpWindowCommand()
         }
     }
 }
