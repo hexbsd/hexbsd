@@ -6504,12 +6504,12 @@ EOFPKG
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
-        // Update package repository first
-        _ = try await executeCommand("pkg update -q")
+        // Update package repository first (ignore errors - might fail due to network)
+        _ = try? await executeCommand("pkg update -q 2>/dev/null || true")
 
         // Get list of packages that can be upgraded
         // Use a more direct approach: just get the full output and parse lines with ->
-        let output = try await executeCommand("pkg upgrade -n 2>&1")
+        let output = try await executeCommand("pkg upgrade -n 2>&1 || true")
 
         var upgradablePackages: [UpgradablePackage] = []
 
