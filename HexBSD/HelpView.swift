@@ -67,20 +67,69 @@ struct HelpData {
         title: "Getting Started",
         icon: "play.circle",
         sections: [
-            HelpSection(title: "Connecting to a Server", content: [
-                .numbered(1, "Launch HexBSD - you'll see your saved servers list (or an empty state if none configured)"),
+            HelpSection(title: "Server Preparation (FreeBSD)", content: [
+                .paragraph("Before connecting with HexBSD, your FreeBSD server needs SSH configured for key-based authentication."),
+                .bold("1. Enable and Start SSH Service"),
+                .paragraph("Run these commands on your FreeBSD server:"),
+                .bullet("sysrc sshd_enable=YES"),
+                .bullet("service sshd start"),
+                .bold("2. Configure SSH for Root Login (if using root)"),
+                .paragraph("Edit /etc/ssh/sshd_config and set:"),
+                .bullet("PermitRootLogin prohibit-password"),
+                .paragraph("This allows root login with SSH keys only (more secure than 'yes')."),
+                .paragraph("Then restart SSH:"),
+                .bullet("service sshd restart"),
+                .bold("3. Create SSH Directory on Server"),
+                .paragraph("If connecting as root:"),
+                .bullet("mkdir -p /root/.ssh"),
+                .bullet("chmod 700 /root/.ssh"),
+                .paragraph("If connecting as a regular user:"),
+                .bullet("mkdir -p ~/.ssh"),
+                .bullet("chmod 700 ~/.ssh")
+            ]),
+            HelpSection(title: "SSH Key Setup (Your Mac)", content: [
+                .bold("1. Generate an SSH Key (if you don't have one)"),
+                .paragraph("Open Terminal on your Mac and run:"),
+                .bullet("ssh-keygen -t ed25519"),
+                .paragraph("Press Enter to accept the default location (~/.ssh/id_ed25519)."),
+                .paragraph("Optionally set a passphrase (or press Enter for none)."),
+                .bold("2. Copy Your Public Key to the Server"),
+                .paragraph("Option A - Using ssh-copy-id (easiest):"),
+                .bullet("ssh-copy-id root@your-server-ip"),
+                .paragraph("You'll need to enter the password once. After this, key auth will work."),
+                .paragraph("Option B - Manual copy:"),
+                .bullet("cat ~/.ssh/id_ed25519.pub"),
+                .paragraph("Copy the output, then on the server:"),
+                .bullet("echo 'paste-your-key-here' >> ~/.ssh/authorized_keys"),
+                .bullet("chmod 600 ~/.ssh/authorized_keys"),
+                .bold("3. Test the Connection"),
+                .paragraph("From your Mac terminal:"),
+                .bullet("ssh root@your-server-ip"),
+                .paragraph("You should connect without being asked for a password.")
+            ]),
+            HelpSection(title: "Firewall Considerations", content: [
+                .paragraph("If your FreeBSD server has a firewall enabled (pf or ipfw), ensure port 22 is open."),
+                .bold("For pf:"),
+                .bullet("Add to /etc/pf.conf: pass in on egress proto tcp to port 22"),
+                .bullet("Reload: pfctl -f /etc/pf.conf"),
+                .bold("For ipfw:"),
+                .bullet("ipfw add allow tcp from any to any 22 in"),
+                .tip("If you're locked out, use console access to fix firewall rules.")
+            ]),
+            HelpSection(title: "Connecting with HexBSD", content: [
+                .numbered(1, "Launch HexBSD - you'll see your saved servers list"),
                 .numbered(2, "Click the + button in the bottom-right corner"),
                 .numbered(3, "Enter your connection details:"),
-                .bullet("Server Name: A friendly name for the server (optional)"),
+                .bullet("Server Name: A friendly name (optional)"),
                 .bullet("Server Address: Hostname or IP address"),
                 .bullet("Port: SSH port (default: 22)"),
-                .bullet("Username: SSH user account (root recommended for full functionality)"),
-                .bullet("SSH Private Key: Click to select your private key file"),
+                .bullet("Username: root (recommended for full functionality)"),
+                .bullet("SSH Private Key: Select your private key file (~/.ssh/id_ed25519)"),
                 .numbered(4, "Click Connect"),
-                .numbered(5, "On successful connection, you'll be prompted to save the server for quick access")
+                .numbered(5, "On success, you'll be prompted to save the server for quick access")
             ]),
             HelpSection(title: "Supported Key Types", content: [
-                .bullet("Ed25519 (recommended)"),
+                .bullet("Ed25519 (recommended - most secure and compact)"),
                 .bullet("RSA (PKCS#1 or OpenSSH format)"),
                 .bullet("ECDSA P256"),
                 .warning("Password authentication is not supported - only SSH key-based authentication.")
@@ -90,7 +139,8 @@ struct HelpData {
                 .bullet("Green dot = Online"),
                 .bullet("Red dot = Offline"),
                 .bullet("Click Connect to quickly connect to a saved server"),
-                .bullet("Click Remove to delete a saved server configuration")
+                .bullet("Click Remove to delete a saved server configuration"),
+                .tip("Having trouble connecting? See the Troubleshooting section for common issues and solutions.")
             ])
         ]
     )
@@ -514,26 +564,79 @@ struct HelpData {
         title: "Troubleshooting",
         icon: "wrench.and.screwdriver",
         sections: [
-            HelpSection(title: "Connection Issues", content: [
-                .bullet("Verify server is reachable (ping test)"),
-                .bullet("Check SSH key permissions (should be 600)"),
-                .bullet("Ensure SSH key type is supported (Ed25519, RSA, ECDSA)"),
-                .bullet("Verify username has SSH access")
+            HelpSection(title: "Connection Refused", content: [
+                .paragraph("The server is not accepting connections on port 22."),
+                .bullet("SSH service not running: service sshd start"),
+                .bullet("SSH not enabled at boot: sysrc sshd_enable=YES"),
+                .bullet("Firewall blocking port 22 (check pf or ipfw rules)"),
+                .bullet("Wrong port number in HexBSD connection settings")
             ]),
-            HelpSection(title: "Permission Errors", content: [
+            HelpSection(title: "Permission Denied", content: [
+                .paragraph("SSH connected but authentication failed."),
+                .bullet("Public key not in ~/.ssh/authorized_keys on server"),
+                .bullet("Wrong permissions on server:"),
+                .bullet("  chmod 700 ~/.ssh"),
+                .bullet("  chmod 600 ~/.ssh/authorized_keys"),
+                .bullet("PermitRootLogin not set in /etc/ssh/sshd_config (if using root)"),
+                .bullet("Selected wrong key file in HexBSD (must be private key, not .pub)")
+            ]),
+            HelpSection(title: "Host Key Verification Failed", content: [
+                .paragraph("The server's identity has changed since last connection."),
+                .bullet("Server was reinstalled or IP was reassigned"),
+                .bullet("Remove old key: ssh-keygen -R your-server-ip"),
+                .bullet("Then try connecting again")
+            ]),
+            HelpSection(title: "Key Not Accepted", content: [
+                .paragraph("HexBSD cannot use the selected SSH key."),
+                .bullet("Ensure you selected the private key (id_ed25519), not public key (.pub)"),
+                .bullet("Check key permissions on Mac: chmod 600 ~/.ssh/id_ed25519"),
+                .bullet("Key type must be Ed25519, RSA, or ECDSA P256"),
+                .bullet("Key may be corrupted - try generating a new one")
+            ]),
+            HelpSection(title: "Connection Timeout", content: [
+                .paragraph("Server is not responding."),
+                .bullet("Verify server is online and reachable (ping test)"),
+                .bullet("Check if server IP address is correct"),
+                .bullet("Network firewall may be blocking the connection"),
+                .bullet("Server may be under heavy load")
+            ]),
+            HelpSection(title: "Permission Errors During Operations", content: [
+                .paragraph("Connected successfully but operations fail with permission errors."),
                 .bullet("Many operations require root access"),
-                .bullet("Consider connecting as root or user with sudo privileges")
+                .bullet("Connect as root for full functionality"),
+                .bullet("Or configure doas/sudo for your user (advanced)")
             ]),
             HelpSection(title: "Replication Not Working", content: [
+                .paragraph("ZFS replication tasks fail or don't create snapshots."),
                 .bullet("Verify SSH key (id_replication) exists on source server"),
-                .bullet("Ensure public key is in target's authorized_keys"),
+                .bullet("Ensure public key is in target's ~/.ssh/authorized_keys"),
                 .bullet("Check target dataset exists and is writable"),
-                .bullet("Verify network connectivity between servers")
+                .bullet("Verify network connectivity between servers"),
+                .bullet("Check cron logs: grep CRON /var/log/cron"),
+                .bullet("Test manually: ssh -i ~/.ssh/id_replication user@target")
             ]),
             HelpSection(title: "Services Won't Start", content: [
-                .bullet("Check service configuration file for errors"),
-                .bullet("View service logs for detailed error messages"),
-                .bullet("Ensure dependencies are running")
+                .paragraph("Service fails to start or immediately stops."),
+                .bullet("Check configuration file for syntax errors"),
+                .bullet("View service logs: tail /var/log/messages"),
+                .bullet("Check service-specific log if available"),
+                .bullet("Ensure required dependencies are running"),
+                .bullet("Try running the service command manually for detailed errors")
+            ]),
+            HelpSection(title: "Jails Won't Start", content: [
+                .paragraph("Jail fails to start or network doesn't work."),
+                .bullet("Ensure a network bridge exists (create in Network section)"),
+                .bullet("Check jail configuration: cat /etc/jail.conf.d/jailname.conf"),
+                .bullet("Verify ZFS dataset exists for the jail"),
+                .bullet("Check if jail_enable=YES in /etc/rc.conf"),
+                .bullet("View jail errors: tail /var/log/messages")
+            ]),
+            HelpSection(title: "ZFS Pool Not Visible", content: [
+                .paragraph("Expected ZFS pool doesn't appear in the list."),
+                .bullet("Pool may not be imported: zpool import"),
+                .bullet("Pool may be exported: zpool import poolname"),
+                .bullet("Disk may have failed or been disconnected"),
+                .bullet("Check pool status: zpool status")
             ])
         ]
     )
