@@ -2513,14 +2513,20 @@ struct DatasetsView: View {
             return true
         }
 
-        for dataset in datasets {
-            let node = DatasetNode(dataset: dataset)
-            node.isExpanded = expandedDatasets.contains(dataset.name)
-            nodes[dataset.name] = node
-        }
-
         // Collect names that need to be expanded (defer state modification)
         var namesToExpand: [String] = []
+
+        for dataset in datasets {
+            let node = DatasetNode(dataset: dataset)
+            // Expand all datasets by default (but not snapshot groups - those are added later)
+            if expandedDatasets.contains(dataset.name) {
+                node.isExpanded = true
+            } else {
+                node.isExpanded = true
+                namesToExpand.append(dataset.name)
+            }
+            nodes[dataset.name] = node
+        }
 
         // Build parent-child relationships
         for node in nodes.values {
@@ -2538,29 +2544,12 @@ struct DatasetsView: View {
             } else {
                 // No slash means it's a pool-level dataset (root)
                 rootNodes.append(node)
-                // Expand root datasets by default
-                if !expandedDatasets.contains(name) {
-                    node.isExpanded = true
-                    namesToExpand.append(name)
-                }
             }
         }
 
         // Sort children for each node
         for node in nodes.values {
             node.children.sort { $0.dataset.name < $1.dataset.name }
-        }
-
-        // Auto-expand protected datasets so users can see unprotected children (only when showing protected)
-        if showProtectedDatasets {
-            for node in nodes.values {
-                if node.dataset.isProtected && node.hasChildren {
-                    if !expandedDatasets.contains(node.dataset.name) {
-                        node.isExpanded = true
-                        namesToExpand.append(node.dataset.name)
-                    }
-                }
-            }
         }
 
         // Defer state modification to avoid modifying during view update
@@ -2618,14 +2607,20 @@ struct DatasetsView: View {
             return true
         }
 
-        for dataset in datasets {
-            let node = DatasetNode(dataset: dataset)
-            node.isExpanded = expandedTargetDatasets.contains(dataset.name)
-            nodes[dataset.name] = node
-        }
-
         // Collect names that need to be expanded (defer state modification)
         var namesToExpand: [String] = []
+
+        for dataset in datasets {
+            let node = DatasetNode(dataset: dataset)
+            // Expand all datasets by default (but not snapshot groups - those are added later)
+            if expandedTargetDatasets.contains(dataset.name) {
+                node.isExpanded = true
+            } else {
+                node.isExpanded = true
+                namesToExpand.append(dataset.name)
+            }
+            nodes[dataset.name] = node
+        }
 
         // Build parent-child relationships
         for node in nodes.values {
@@ -2643,11 +2638,6 @@ struct DatasetsView: View {
             } else {
                 // No slash means it's a pool-level dataset (root)
                 rootNodes.append(node)
-                // Expand root datasets by default
-                if !expandedTargetDatasets.contains(name) {
-                    node.isExpanded = true
-                    namesToExpand.append(name)
-                }
             }
         }
 
@@ -4661,14 +4651,20 @@ struct ReplicationPaneView: View {
         // Create nodes for all datasets (not snapshots)
         let datasetsOnly = datasets.filter { !$0.isSnapshot }.sorted { $0.name < $1.name }
 
-        for dataset in datasetsOnly {
-            let node = DatasetNode(dataset: dataset)
-            node.isExpanded = expandedDatasets.contains(dataset.name)
-            nodes[dataset.name] = node
-        }
-
         // Collect names that need to be expanded (defer state modification)
         var namesToExpand: [String] = []
+
+        for dataset in datasetsOnly {
+            let node = DatasetNode(dataset: dataset)
+            // Expand all datasets by default (but not snapshot groups - those are added later)
+            if expandedDatasets.contains(dataset.name) {
+                node.isExpanded = true
+            } else {
+                node.isExpanded = true
+                namesToExpand.append(dataset.name)
+            }
+            nodes[dataset.name] = node
+        }
 
         // Build parent-child relationships
         for node in nodes.values {
@@ -4686,11 +4682,6 @@ struct ReplicationPaneView: View {
             } else {
                 // No slash means it's a pool-level dataset (root)
                 rootNodes.append(node)
-                // Expand root datasets by default
-                if !expandedDatasets.contains(name) {
-                    node.isExpanded = true
-                    namesToExpand.append(name)
-                }
             }
         }
 
