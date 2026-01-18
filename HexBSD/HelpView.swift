@@ -782,6 +782,7 @@ struct HelpView: View {
             .listStyle(.sidebar)
             .navigationTitle("Help")
             .searchable(text: $searchText, prompt: "Search Help")
+            .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 300)
         } detail: {
             if let topic = selectedTopic {
                 HelpTopicDetailView(topic: topic)
@@ -800,19 +801,12 @@ struct HelpView: View {
     }
 }
 
-// MARK: - Help Window Command
+// MARK: - Help Window Controller
 
-struct HelpWindowCommand: Commands {
-    var body: some Commands {
-        CommandGroup(replacing: .help) {
-            Button("HexBSD Help") {
-                openHelpWindow()
-            }
-            .keyboardShortcut("?", modifiers: .command)
-        }
-    }
+class HelpWindowController: NSWindowController {
+    static let shared = HelpWindowController()
 
-    private func openHelpWindow() {
+    private init() {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -822,7 +816,32 @@ struct HelpWindowCommand: Commands {
         window.center()
         window.title = "HexBSD Help"
         window.contentView = NSHostingView(rootView: HelpView())
-        window.makeKeyAndOrderFront(nil)
+        window.isReleasedWhenClosed = false
+        super.init(window: window)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func showHelp() {
+        window?.center()
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+// MARK: - Help Window Command
+
+struct HelpWindowCommand: Commands {
+    var body: some Commands {
+        CommandGroup(replacing: .help) {
+            Button("HexBSD Help") {
+                HelpWindowController.shared.showHelp()
+            }
+            .keyboardShortcut("?", modifiers: .command)
+        }
     }
 }
 
