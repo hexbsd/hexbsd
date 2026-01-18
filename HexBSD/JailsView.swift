@@ -141,15 +141,20 @@ struct JailsContentView: View {
         VStack(spacing: 0) {
             // Toolbar
             HStack {
-                // Tab picker
-                Picker("", selection: $selectedTab) {
-                    ForEach(JailsTab.allCases, id: \.self) { tab in
-                        Text(tab.rawValue).tag(tab)
+                // Tab picker - only show Templates tab if jails are using ZFS storage
+                if viewModel.jailSetupStatus.zfsDataset != nil {
+                    Picker("", selection: $selectedTab) {
+                        ForEach(JailsTab.allCases, id: \.self) { tab in
+                            Text(tab.rawValue).tag(tab)
+                        }
                     }
+                    .pickerStyle(.segmented)
+                    .disabled(viewModel.isLongRunningOperation)
+                    .frame(width: 200)
+                } else {
+                    Text("Jails")
+                        .font(.headline)
                 }
-                .pickerStyle(.segmented)
-                .disabled(viewModel.isLongRunningOperation)
-                .frame(width: 200)
 
                 Spacer()
 
@@ -213,7 +218,17 @@ struct JailsContentView: View {
                 selectedJail = updated
             }
         }
+        .onChange(of: viewModel.jailSetupStatus.zfsDataset) { _, zfsDataset in
+            // Reset to jails tab if not using ZFS storage
+            if zfsDataset == nil {
+                selectedTab = .jails
+            }
+        }
         .onAppear {
+            // Default to jails tab for UFS mode
+            if viewModel.jailSetupStatus.zfsDataset == nil {
+                selectedTab = .jails
+            }
             Task {
                 await viewModel.loadJails()
                 await viewModel.loadTemplates()
@@ -594,7 +609,7 @@ struct JailDetailView: View {
                 }
             }
         } message: {
-            Text("Are you sure you want to delete '\(jail.name)'? This will remove the configuration and optionally the jail data.")
+            Text("Are you sure you want to delete '\(jail.name)'? This will remove the configuration and all jail data.")
         }
         .onAppear {
             Task {
@@ -682,101 +697,160 @@ struct JailCreateSheet: View {
     @State private var isCreating = false
     @State private var createError: String?
     @State private var currentStep = 0
+    @State private var creationOutput = ""
+    @State private var showingProgress = false
+    @State private var creationComplete = false
 
     var body: some View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Text("Create New Jail")
+                Text(showingProgress ? "Creating Jail: \(jailName)" : "Create New Jail")
                     .font(.title2)
                     .fontWeight(.semibold)
                 Spacer()
-                Button("Cancel") {
-                    dismiss()
+                if !showingProgress {
+                    Button("Cancel") {
+                        dismiss()
+                    }
                 }
             }
             .padding()
 
             Divider()
 
-            // Step indicator
-            HStack(spacing: 4) {
-                ForEach(0..<3, id: \.self) { step in
-                    Circle()
-                        .fill(step <= currentStep ? Color.accentColor : Color.secondary.opacity(0.3))
-                        .frame(width: 8, height: 8)
+            if showingProgress {
+                // Progress view with terminal output
+                VStack(spacing: 0) {
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            Text(creationOutput)
+                                .font(.system(.body, design: .monospaced))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding()
+                                .id("output")
+                        }
+                        .background(Color(nsColor: .textBackgroundColor))
+                        .onChange(of: creationOutput) { _, _ in
+                            withAnimation {
+                                proxy.scrollTo("output", anchor: .bottom)
+                            }
+                        }
+                    }
+
+                    Divider()
+
+                    // Footer with status/buttons
+                    HStack {
+                        if let error = createError {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.red)
+                            Text(error)
+                                .font(.caption)
+                                .foregroundColor(.red)
+                        } else if creationComplete {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                            Text("Jail created successfully!")
+                                .foregroundColor(.green)
+                        } else {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                            Text("Creating jail...")
+                                .foregroundColor(.secondary)
+                        }
+
+                        Spacer()
+
+                        if creationComplete || createError != nil {
+                            Button("Done") {
+                                dismiss()
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                    }
+                    .padding()
                 }
-            }
-            .padding(.vertical, 8)
+            } else {
+                // Step indicator
+                HStack(spacing: 4) {
+                    ForEach(0..<3, id: \.self) { step in
+                        Circle()
+                            .fill(step <= currentStep ? Color.accentColor : Color.secondary.opacity(0.3))
+                            .frame(width: 8, height: 8)
+                    }
+                }
+                .padding(.vertical, 8)
 
-            // Content
-            TabView(selection: $currentStep) {
-                // Step 1: Basic Info
-                basicInfoStep
-                    .tag(0)
+                // Content
+                TabView(selection: $currentStep) {
+                    // Step 1: Basic Info
+                    basicInfoStep
+                        .tag(0)
 
-                // Step 2: Network
-                networkStep
-                    .tag(1)
+                    // Step 2: Network
+                    networkStep
+                        .tag(1)
 
-                // Step 3: Review
-                reviewStep
-                    .tag(2)
-            }
-            .tabViewStyle(.automatic)
+                    // Step 3: Review
+                    reviewStep
+                        .tag(2)
+                }
+                .tabViewStyle(.automatic)
 
-            Divider()
+                Divider()
 
-            // Error message
-            if let error = createError {
+                // Error message
+                if let error = createError {
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                        Text(error)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                }
+
+                // Navigation buttons
                 HStack {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.orange)
-                    Text(error)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    if currentStep > 0 {
+                        Button("Back") {
+                            withAnimation {
+                                currentStep -= 1
+                            }
+                        }
+                    }
+
                     Spacer()
+
+                    if currentStep < 2 {
+                        Button("Next") {
+                            withAnimation {
+                                currentStep += 1
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!canProceed)
+                    } else {
+                        Button(isCreating ? "Creating..." : "Create Jail") {
+                            Task {
+                                await createJail()
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isCreating || !canCreate)
+                    }
                 }
-                .padding(.horizontal)
-                .padding(.top, 8)
+                .padding()
             }
-
-            // Navigation buttons
-            HStack {
-                if currentStep > 0 {
-                    Button("Back") {
-                        withAnimation {
-                            currentStep -= 1
-                        }
-                    }
-                }
-
-                Spacer()
-
-                if currentStep < 2 {
-                    Button("Next") {
-                        withAnimation {
-                            currentStep += 1
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!canProceed)
-                } else {
-                    Button(isCreating ? "Creating..." : "Create Jail") {
-                        Task {
-                            await createJail()
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(isCreating || !canCreate)
-                }
-            }
-            .padding()
         }
         .frame(width: 600, height: 550)
         .onAppear {
-            // Default to thick for UFS mode
-            if !viewModel.jailSetupStatus.hasZFS {
+            // Default to thick for UFS mode (no ZFS dataset)
+            if viewModel.jailSetupStatus.zfsDataset == nil {
                 jailType = .thick
             }
             Task {
@@ -809,8 +883,8 @@ struct JailCreateSheet: View {
                     .textFieldStyle(.roundedBorder)
             }
 
-            // Only show jail type picker for ZFS (UFS defaults to thick)
-            if viewModel.jailSetupStatus.hasZFS {
+            // Only show jail type picker if using ZFS storage (UFS defaults to thick)
+            if viewModel.jailSetupStatus.zfsDataset != nil {
                 Section("Jail Type") {
                     Picker("Type", selection: $jailType) {
                         ForEach(JailType.allCases) { type in
@@ -846,8 +920,8 @@ struct JailCreateSheet: View {
                 }
             }
 
-            // Show FreeBSD version picker for thick jails or UFS mode
-            if jailType == .thick || !viewModel.jailSetupStatus.hasZFS {
+            // Show FreeBSD version picker for thick jails or UFS mode (no ZFS dataset)
+            if jailType == .thick || viewModel.jailSetupStatus.zfsDataset == nil {
                 Section("FreeBSD Version") {
                     if isLoadingReleases {
                         HStack {
@@ -1067,19 +1141,50 @@ struct JailCreateSheet: View {
     private func createJail() async {
         isCreating = true
         createError = nil
+        creationOutput = ""
+        creationComplete = false
+
+        // Use streaming for thick jails (they download base.txz which takes time)
+        // Thin jails are instant (ZFS clone) so no need for streaming
+        let needsStreaming = jailType == .thick
+
+        if needsStreaming {
+            showingProgress = true
+            creationOutput = "Starting jail creation for '\(jailName)'...\n\n"
+        }
 
         do {
-            try await viewModel.createJail(
-                name: jailName,
-                hostname: hostname.isEmpty ? jailName : hostname,
-                type: jailType,
-                ipMode: ipMode,
-                ipAddress: ipAddress,
-                bridgeName: selectedBridge?.name ?? "bridge0",
-                template: selectedTemplate,
-                freebsdVersion: freebsdVersion
-            )
-            dismiss()
+            if needsStreaming {
+                try await viewModel.createJailStreaming(
+                    name: jailName,
+                    hostname: hostname.isEmpty ? jailName : hostname,
+                    type: jailType,
+                    ipMode: ipMode,
+                    ipAddress: ipAddress,
+                    bridgeName: selectedBridge?.name ?? "bridge0",
+                    template: selectedTemplate,
+                    freebsdVersion: freebsdVersion,
+                    onOutput: { output in
+                        Task { @MainActor in
+                            creationOutput += output
+                        }
+                    }
+                )
+                creationComplete = true
+            } else {
+                // Thin jails are instant, use non-streaming version
+                try await viewModel.createJail(
+                    name: jailName,
+                    hostname: hostname.isEmpty ? jailName : hostname,
+                    type: jailType,
+                    ipMode: ipMode,
+                    ipAddress: ipAddress,
+                    bridgeName: selectedBridge?.name ?? "bridge0",
+                    template: selectedTemplate,
+                    freebsdVersion: freebsdVersion
+                )
+                dismiss()
+            }
         } catch {
             createError = error.localizedDescription
         }
@@ -2260,7 +2365,7 @@ class JailsViewModel: ObservableObject {
     func deleteJail(_ jail: Jail) async {
         error = nil
         do {
-            try await sshManager.deleteJail(name: jail.name, removePath: false)
+            try await sshManager.deleteJail(name: jail.name, removePath: true)
             await loadJails()
         } catch {
             self.error = "Failed to delete jail: \(error.localizedDescription)"
@@ -2286,7 +2391,33 @@ class JailsViewModel: ObservableObject {
             bridgeName: bridgeName,
             template: template,
             freebsdVersion: freebsdVersion,
-            useZFS: jailSetupStatus.hasZFS
+            useZFS: jailSetupStatus.zfsDataset != nil
+        )
+        await loadJails()
+    }
+
+    func createJailStreaming(
+        name: String,
+        hostname: String,
+        type: JailType,
+        ipMode: JailIPMode,
+        ipAddress: String,
+        bridgeName: String,
+        template: JailTemplate?,
+        freebsdVersion: String,
+        onOutput: @escaping (String) -> Void
+    ) async throws {
+        try await sshManager.createJailStreaming(
+            name: name,
+            hostname: hostname,
+            type: type,
+            ipMode: ipMode,
+            ipAddress: ipAddress,
+            bridgeName: bridgeName,
+            template: template,
+            freebsdVersion: freebsdVersion,
+            useZFS: jailSetupStatus.zfsDataset != nil,
+            onOutput: onOutput
         )
         await loadJails()
     }

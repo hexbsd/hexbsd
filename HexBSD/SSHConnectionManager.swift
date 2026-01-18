@@ -3422,9 +3422,10 @@ extension SSHConnectionManager {
                 echo "JAIL_CONFD:no"
             fi
 
-            # Determine base path and check if full directory structure exists
+            # Determine base path and check if directory structure exists
+            # Note: templates directory is optional (only for ZFS mode)
             echo "BASE_PATH:/jails"
-            if [ -d /jails/templates ] && [ -d /jails/containers ] && [ -d /jails/media ]; then
+            if [ -d /jails/containers ] && [ -d /jails/media ]; then
                 echo "DIRS_EXIST:yes"
             else
                 echo "DIRS_EXIST:no"
@@ -3570,6 +3571,79 @@ extension SSHConnectionManager {
         } else {
             // UFS mode - only thick jails supported
             try await createThickUFSJail(name: name, path: path, freebsdVersion: freebsdVersion)
+        }
+
+        print("DEBUG: Jail '\(name)' created successfully")
+    }
+
+    /// Create a new jail with streaming output for progress display (Thick jails only - thin jails are instant)
+    func createJailStreaming(
+        name: String,
+        hostname: String,
+        type: JailType,
+        ipMode: JailIPMode,
+        ipAddress: String,
+        bridgeName: String,
+        template: JailTemplate?,
+        freebsdVersion: String,
+        useZFS: Bool = true,
+        onOutput: @escaping (String) -> Void
+    ) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        print("DEBUG: Creating jail '\(name)' of type \(type.rawValue) using \(useZFS ? "ZFS" : "UFS") (streaming)")
+
+        // Determine jail path
+        let basePath = "/jails/containers"
+        let path = "\(basePath)/\(name)"
+
+        // Get next available jail ID for epair numbering
+        let jailId = try await getNextJailId()
+        onOutput("Using jail ID \(jailId) for network interface\n")
+
+        // Generate jail configuration
+        let configContent = generateJailConfig(
+            name: name,
+            hostname: hostname,
+            path: path,
+            type: type,
+            ipMode: ipMode,
+            ipAddress: ipAddress,
+            bridgeName: bridgeName,
+            jailId: jailId
+        )
+
+        // Ensure jail.conf.d directory exists
+        _ = try await executeCommand("mkdir -p /etc/jail.conf.d")
+
+        // Write the jail configuration file
+        let writeConfigCommand = """
+        cat > '/etc/jail.conf.d/\(name).conf' << 'JAILCONF'
+        \(configContent)
+        JAILCONF
+        """
+        _ = try await executeCommand(writeConfigCommand)
+        onOutput("Created jail configuration: /etc/jail.conf.d/\(name).conf\n\n")
+
+        // Create jail directory structure based on type and storage backend
+        if useZFS {
+            switch type {
+            case .thick:
+                // Thick jail: dedicated ZFS dataset with full copy - use streaming
+                try await createThickZFSJailStreaming(name: name, path: path, freebsdVersion: freebsdVersion, onOutput: onOutput)
+
+            case .thin:
+                // Thin jail: ZFS clone from template snapshot (instant, no streaming needed)
+                onOutput("Creating thin jail from template snapshot...\n")
+                try await createThinZFSJail(name: name, path: path, template: template?.name)
+                onOutput("Thin jail created successfully!\n")
+            }
+        } else {
+            // UFS mode - only thick jails supported, use streaming
+            try await createThickUFSJailStreaming(name: name, path: path, freebsdVersion: freebsdVersion, onOutput: onOutput)
         }
 
         print("DEBUG: Jail '\(name)' created successfully")
@@ -3756,6 +3830,152 @@ extension SSHConnectionManager {
         _ = try await executeCommand(createCommand)
     }
 
+    /// Create a thick jail using UFS directories (no ZFS) - streaming version with progress
+    private func createThickUFSJailStreaming(name: String, path: String, freebsdVersion: String, onOutput: @escaping (String) -> Void) async throws {
+        print("DEBUG: Creating thick UFS jail '\(name)' at \(path) (streaming)")
+
+        let version = freebsdVersion.isEmpty ? "14.2-RELEASE" : freebsdVersion
+
+        // Detect host architecture for correct download URL
+        let hostArch = try await executeCommand("uname -m").trimmingCharacters(in: .whitespacesAndNewlines)
+        let archPath: String
+        switch hostArch {
+        case "aarch64", "arm64":
+            archPath = "arm64/aarch64"
+        case "amd64", "x86_64":
+            archPath = "amd64"
+        default:
+            archPath = hostArch
+        }
+        let baseUrl = "https://download.freebsd.org/releases/\(archPath)/\(version)"
+
+        let createCommand = """
+        # Create jail directory
+        mkdir -p '\(path)'
+        echo "Created jail directory: \(path)"
+
+        # Download and extract base if needed
+        media_dir="/jails/media/\(version)"
+        mkdir -p "$media_dir"
+
+        if [ ! -f "$media_dir/base.txz" ]; then
+            echo ""
+            echo "Downloading base.txz from \(baseUrl)..."
+            echo ""
+            fetch -v -o "$media_dir/base.txz" "\(baseUrl)/base.txz" || exit 1
+            echo ""
+        else
+            echo "Using cached base.txz from $media_dir"
+        fi
+
+        echo ""
+        echo "Extracting base system to \(path)..."
+        count=0
+        tar -xvf "$media_dir/base.txz" -C '\(path)' 2>&1 | while read line; do
+            count=$((count + 1))
+            if [ $((count % 100)) -eq 0 ]; then
+                echo "Extracted $count files..."
+            fi
+        done
+        echo "Extraction complete."
+
+        # Copy resolv.conf and localtime
+        echo ""
+        echo "Configuring jail..."
+        cp /etc/resolv.conf '\(path)/etc/resolv.conf' 2>/dev/null || true
+        cp /etc/localtime '\(path)/etc/localtime' 2>/dev/null || true
+
+        echo ""
+        echo "================================================"
+        echo "Thick UFS jail '\(name)' created successfully!"
+        echo "Path: \(path)"
+        echo "================================================"
+        """
+
+        let exitCode = try await executeCommandStreaming(createCommand, onOutput: onOutput)
+        if exitCode != 0 {
+            throw NSError(domain: "SSHConnectionManager", code: exitCode,
+                         userInfo: [NSLocalizedDescriptionKey: "UFS jail creation failed with exit code \(exitCode)"])
+        }
+    }
+
+    /// Create a thick jail with dedicated ZFS dataset - streaming version with progress
+    private func createThickZFSJailStreaming(name: String, path: String, freebsdVersion: String, onOutput: @escaping (String) -> Void) async throws {
+        print("DEBUG: Creating thick ZFS jail '\(name)' at \(path) (streaming)")
+
+        // Find ZFS pool for jails
+        let poolCommand = "zfs list -H -o name 2>/dev/null | grep -E 'jails?$' | head -1 || zpool list -H -o name | head -1"
+        let pool = try await executeCommand(poolCommand).trimmingCharacters(in: .whitespacesAndNewlines)
+        let jailDataset = "\(pool)/containers/\(name)"
+
+        let version = freebsdVersion.isEmpty ? "14.2-RELEASE" : freebsdVersion
+
+        // Detect host architecture for correct download URL
+        let hostArch = try await executeCommand("uname -m").trimmingCharacters(in: .whitespacesAndNewlines)
+        let archPath: String
+        switch hostArch {
+        case "aarch64", "arm64":
+            archPath = "arm64/aarch64"
+        case "amd64", "x86_64":
+            archPath = "amd64"
+        default:
+            archPath = hostArch
+        }
+        let baseUrl = "https://download.freebsd.org/releases/\(archPath)/\(version)"
+
+        let createCommand = """
+        # Create ZFS dataset for jail
+        echo "Creating ZFS dataset: \(jailDataset)"
+        zfs create '\(jailDataset)'
+        zfs set mountpoint='\(path)' '\(jailDataset)'
+        echo "Dataset mounted at: \(path)"
+
+        # Download and extract base if needed
+        media_dir="/jails/media/\(version)"
+        mkdir -p "$media_dir"
+
+        if [ ! -f "$media_dir/base.txz" ]; then
+            echo ""
+            echo "Downloading base.txz from \(baseUrl)..."
+            echo ""
+            fetch -v -o "$media_dir/base.txz" "\(baseUrl)/base.txz" || exit 1
+            echo ""
+        else
+            echo "Using cached base.txz from $media_dir"
+        fi
+
+        echo ""
+        echo "Extracting base system to \(path)..."
+        count=0
+        tar -xvf "$media_dir/base.txz" -C '\(path)' 2>&1 | while read line; do
+            count=$((count + 1))
+            if [ $((count % 100)) -eq 0 ]; then
+                echo "Extracted $count files..."
+            fi
+        done
+        echo "Extraction complete."
+
+        # Copy resolv.conf and localtime
+        echo ""
+        echo "Configuring jail..."
+        cp /etc/resolv.conf '\(path)/etc/resolv.conf' 2>/dev/null || true
+        cp /etc/localtime '\(path)/etc/localtime' 2>/dev/null || true
+
+        echo ""
+        echo "================================================"
+        echo "Thick ZFS jail '\(name)' created successfully!"
+        echo "Dataset: \(jailDataset)"
+        echo "Path: \(path)"
+        echo "================================================"
+        """
+
+        let exitCode = try await executeCommandStreaming(createCommand, onOutput: onOutput)
+        if exitCode != 0 {
+            throw NSError(domain: "SSHConnectionManager", code: exitCode,
+                         userInfo: [NSLocalizedDescriptionKey: "ZFS jail creation failed with exit code \(exitCode)"])
+        }
+    }
+
     /// Create a thin jail by cloning a ZFS template snapshot
     private func createThinZFSJail(name: String, path: String, template: String?) async throws {
         guard let template = template else {
@@ -3838,7 +4058,9 @@ extension SSHConnectionManager {
                 print("DEBUG: Destroying ZFS dataset \(dataset)")
                 _ = try await executeCommand("zfs destroy -r '\(dataset)' 2>/dev/null || rm -rf '\(jailPath)'")
             } else {
-                // Regular directory
+                // Regular directory - need to clear schg flags first (FreeBSD sets these on base system files)
+                print("DEBUG: Clearing schg flags on \(jailPath)")
+                _ = try await executeCommand("chflags -R noschg '\(jailPath)'")
                 print("DEBUG: Removing jail directory \(jailPath)")
                 _ = try await executeCommand("rm -rf '\(jailPath)'")
             }
