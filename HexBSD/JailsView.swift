@@ -1757,6 +1757,7 @@ struct TemplatesTabView: View {
 
 struct JailSetupWizardView: View {
     @ObservedObject var viewModel: JailsViewModel
+    @State private var storageMode = "zfs"  // "zfs" or "ufs"
     @State private var selectedPool: ZFSPool?
     @State private var datasetName = "jails"
     @State private var pools: [ZFSPool] = []
@@ -1765,8 +1766,10 @@ struct JailSetupWizardView: View {
     @State private var setupOutput = ""
     @State private var setupError: String?
 
+    private var useZfs: Bool { storageMode == "zfs" }
+
     private var zfsDataset: String {
-        guard let pool = selectedPool else { return "" }
+        guard useZfs, let pool = selectedPool else { return "" }
         return "\(pool.name)/\(datasetName)"
     }
 
@@ -1775,7 +1778,7 @@ struct JailSetupWizardView: View {
     }
 
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 12) {
             // Check for bridges first - this is required before any other setup
             if !viewModel.hasBridges {
                 // No bridges exist - show message and navigation button
@@ -1810,23 +1813,18 @@ struct JailSetupWizardView: View {
             } else {
                 // Bridges exist - show normal setup wizard
                 // Header
-                VStack(spacing: 8) {
+                HStack(spacing: 12) {
                     Image(systemName: "building.2.fill")
-                        .font(.system(size: 48))
+                        .font(.system(size: 32))
                         .foregroundColor(.blue)
                     Text("Jail Setup Required")
-                        .font(.title)
+                        .font(.title2)
                         .fontWeight(.semibold)
-                    Text("Configure your jail infrastructure before creating jails")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
                 }
-                .padding(.top, 20)
-
-                Divider()
+                .padding(.top, 8)
 
                 // Status indicators
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
                     StatusRow(
                         title: "Network Bridge",
                         isComplete: viewModel.hasBridges,
@@ -1848,66 +1846,100 @@ struct JailSetupWizardView: View {
                         detail: viewModel.jailSetupStatus.jailEnabled ? "Enabled in rc.conf" : "Not enabled"
                     )
                 }
-                .padding()
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
                 .background(Color(nsColor: .controlBackgroundColor))
                 .cornerRadius(8)
 
                 // Setup form
                 Form {
-                Section("ZFS Configuration") {
-                    if isLoadingPools {
-                        HStack {
-                            ProgressView()
-                                .scaleEffect(0.7)
-                            Text("Loading ZFS pools...")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                    Section("Storage Mode") {
+                        Picker("Storage Mode", selection: $storageMode) {
+                            Text("ZFS").tag("zfs")
+                            Text("UFS").tag("ufs")
                         }
-                    } else if pools.isEmpty {
-                        HStack {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundColor(.orange)
-                            Text("No ZFS pools found")
+                        .pickerStyle(.segmented)
+
+                        if useZfs {
+                            Text("Uses ZFS datasets for jail storage. Supports thin jails (clones) and snapshots.")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
-                            Spacer()
-                            Button("Retry") {
-                                Task { await loadPools() }
+                        } else {
+                            HStack {
+                                Image(systemName: "info.circle")
+                                    .foregroundColor(.blue)
+                                Text("UFS mode uses regular directories. Thin jails (clones) will not be available.")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
                         }
-                    } else {
-                        Picker("ZFS Pool:", selection: $selectedPool) {
-                            Text("Select a pool...").tag(nil as ZFSPool?)
-                            ForEach(pools) { pool in
+                    }
+
+                    if useZfs {
+                        Section("ZFS Configuration") {
+                            if isLoadingPools {
                                 HStack {
-                                    Text(pool.name)
-                                    Spacer()
-                                    Text("\(pool.free) free of \(pool.size)")
+                                    ProgressView()
+                                        .scaleEffect(0.7)
+                                    Text("Loading ZFS pools...")
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                 }
-                                .tag(pool as ZFSPool?)
+                            } else if pools.isEmpty {
+                                HStack {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundColor(.orange)
+                                    Text("No ZFS pools found")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                    Spacer()
+                                    Button("Setup ZFS Pool") {
+                                        NotificationCenter.default.post(name: .navigateToZFS, object: nil)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                }
+                            } else {
+                                Picker("ZFS Pool:", selection: $selectedPool) {
+                                    Text("Select a pool...").tag(nil as ZFSPool?)
+                                    ForEach(pools) { pool in
+                                        HStack {
+                                            Text(pool.name)
+                                            Spacer()
+                                            Text("\(pool.free) free of \(pool.size)")
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                        }
+                                        .tag(pool as ZFSPool?)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+
+                                TextField("Dataset Name:", text: $datasetName)
+                                    .textFieldStyle(.roundedBorder)
+
+                                if !zfsDataset.isEmpty {
+                                    Text("Will create: \(zfsDataset)/templates, \(zfsDataset)/media, \(zfsDataset)/containers")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                    Text("Mount path: \(basePath)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
                             }
                         }
-                        .pickerStyle(.menu)
+                    } else {
+                        Section("UFS Configuration") {
+                            TextField("Base Directory:", text: $datasetName)
+                                .textFieldStyle(.roundedBorder)
 
-                        TextField("Dataset Name:", text: $datasetName)
-                            .textFieldStyle(.roundedBorder)
-
-                        if !zfsDataset.isEmpty {
-                            Text("Will create: \(zfsDataset)/templates, \(zfsDataset)/media, \(zfsDataset)/containers")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Text("Mount path: \(basePath)")
+                            Text("Will create directories at: /\(datasetName)/templates, /\(datasetName)/media, /\(datasetName)/containers")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
                     }
                 }
-            }
-            .formStyle(.grouped)
+                .formStyle(.columns)
 
             // Action button
             HStack {
@@ -1918,7 +1950,7 @@ struct JailSetupWizardView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(isSettingUp || zfsDataset.isEmpty || selectedPool == nil)
+                .disabled(isSettingUp || datasetName.isEmpty || (useZfs && selectedPool == nil))
             }
 
             // Error display
@@ -1951,7 +1983,7 @@ struct JailSetupWizardView: View {
                             }
                         }
                     }
-                    .frame(height: 150)
+                    .frame(height: 100)
                 } label: {
                     HStack {
                         if isSettingUp {
@@ -1967,7 +1999,8 @@ struct JailSetupWizardView: View {
             Spacer()
             } // end else (bridges exist)
         }
-        .padding(40)
+        .padding(.horizontal, 40)
+        .padding(.vertical, 16)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             Task { await loadPools() }
@@ -1994,11 +2027,17 @@ struct JailSetupWizardView: View {
         setupOutput = ""
 
         do {
-            // Step 1: Create ZFS datasets if needed
+            // Step 1: Create storage (ZFS datasets or UFS directories)
             if !viewModel.jailSetupStatus.directoriesExist {
-                setupOutput += "Creating ZFS datasets at \(zfsDataset) (mount: \(basePath))...\n"
-                let output = try await viewModel.setupJailDirectories(basePath: basePath, zfsDataset: zfsDataset)
-                setupOutput += output + "\n"
+                if useZfs {
+                    setupOutput += "Creating ZFS datasets at \(zfsDataset) (mount: \(basePath))...\n"
+                    let output = try await viewModel.setupJailDirectories(basePath: basePath, zfsDataset: zfsDataset)
+                    setupOutput += output + "\n"
+                } else {
+                    setupOutput += "Creating UFS directories at \(basePath)...\n"
+                    let output = try await viewModel.setupJailDirectoriesUFS(basePath: basePath)
+                    setupOutput += output + "\n"
+                }
             }
 
             // Step 2: Ensure jail.conf exists
@@ -2239,6 +2278,10 @@ class JailsViewModel: ObservableObject {
 
     func setupJailDirectories(basePath: String, zfsDataset: String) async throws -> String {
         return try await sshManager.setupJailDirectories(basePath: basePath, zfsDataset: zfsDataset)
+    }
+
+    func setupJailDirectoriesUFS(basePath: String) async throws -> String {
+        return try await sshManager.setupJailDirectoriesUFS(basePath: basePath)
     }
 
     func createTemplate(version: String, name: String, basePath: String, zfsDataset: String) async throws -> String {

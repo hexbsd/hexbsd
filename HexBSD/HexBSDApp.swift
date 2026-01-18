@@ -43,6 +43,7 @@ struct HexBSDApp: App {
                 }
             }
         }
+        .defaultSize(width: 1400, height: 850)
         .modelContainer(sharedModelContainer)
         .commands {
             CommandGroup(replacing: .appInfo) {

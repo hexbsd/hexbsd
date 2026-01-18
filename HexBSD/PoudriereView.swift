@@ -54,6 +54,7 @@ struct PoudriereConfig: Equatable {
     var useTmpfs: String  // "all", "yes", "no", "wrkdir", "data", "localbase"
     var makeJobs: Int
     var allowMakeJobsPackages: String
+    var noZfs: Bool  // Set to true for UFS systems without ZFS
 
     static var `default`: PoudriereConfig {
         PoudriereConfig(
@@ -65,7 +66,8 @@ struct PoudriereConfig: Equatable {
             usePortlint: false,
             useTmpfs: "yes",
             makeJobs: 4,
-            allowMakeJobsPackages: "pkg ccache rust*"
+            allowMakeJobsPackages: "pkg ccache rust*",
+            noZfs: false
         )
     }
 }
@@ -1112,6 +1114,68 @@ struct PoudriereContentView: View {
                         .foregroundColor(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if viewModel.isInstalled && !viewModel.isGitInstalled {
+                // Poudriere is installed but git is missing
+                ScrollView {
+                    VStack(spacing: 20) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 72))
+                            .foregroundColor(.orange)
+                        Text("Git Required")
+                            .font(.title)
+                            .foregroundColor(.primary)
+                        Text("Git is required to create and update ports trees")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.bottom, 10)
+
+                        // Git package selection
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Select Git Package")
+                                .font(.headline)
+
+                            HStack(alignment: .top) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.red)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Picker("Git", selection: $viewModel.selectedGitPackage) {
+                                        Text("git").tag("git")
+                                        Text("git-lite").tag("git-lite")
+                                        Text("git-tiny").tag("git-tiny")
+                                    }
+                                    .pickerStyle(.radioGroup)
+
+                                    Text(gitPackageDescription(viewModel.selectedGitPackage))
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .font(.subheadline)
+                        }
+                        .padding()
+                        .frame(maxWidth: 400, alignment: .leading)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .cornerRadius(8)
+
+                        // Install button
+                        Button(action: {
+                            Task {
+                                await viewModel.installGit()
+                            }
+                        }) {
+                            Label("Install Git", systemImage: "arrow.down.circle")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+
+                        Text("This will install \(viewModel.selectedGitPackage)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if !viewModel.isInstalled {
                 ScrollView {
                     VStack(spacing: 20) {
@@ -1132,6 +1196,17 @@ struct PoudriereContentView: View {
                             Text("Requirements")
                                 .font(.headline)
 
+                            // Git package status
+                            HStack(spacing: 8) {
+                                Image(systemName: viewModel.isGitInstalled ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                    .foregroundColor(viewModel.isGitInstalled ? .green : .red)
+                                Text("Git")
+                                    .fontWeight(.medium)
+                                Text(viewModel.isGitInstalled ? "Installed" : "Not installed")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+
                             // Poudriere package status
                             HStack(spacing: 8) {
                                 Image(systemName: "xmark.circle.fill")
@@ -1148,22 +1223,49 @@ struct PoudriereContentView: View {
                         .background(Color(nsColor: .controlBackgroundColor))
                         .cornerRadius(8)
 
-                        // Package selection
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Package")
+                        // Required packages
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Required Packages")
                                 .font(.headline)
 
-                            Picker("Package", selection: $viewModel.selectedPackage) {
-                                Text("poudriere").tag("poudriere")
-                                Text("poudriere-devel").tag("poudriere-devel")
-                            }
-                            .pickerStyle(.radioGroup)
+                            // Git selection
+                            HStack(alignment: .top) {
+                                Image(systemName: viewModel.isGitInstalled ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                    .foregroundColor(viewModel.isGitInstalled ? .green : .red)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Picker("Git", selection: $viewModel.selectedGitPackage) {
+                                        Text("git").tag("git")
+                                        Text("git-lite").tag("git-lite")
+                                        Text("git-tiny").tag("git-tiny")
+                                    }
+                                    .pickerStyle(.radioGroup)
 
-                            Text(viewModel.selectedPackage == "poudriere-devel"
-                                 ? "Development version with latest features"
-                                 : "Stable release version")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                                    Text(gitPackageDescription(viewModel.selectedGitPackage))
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .font(.subheadline)
+
+                            // Poudriere selection
+                            HStack(alignment: .top) {
+                                Image(systemName: viewModel.isInstalled ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                    .foregroundColor(viewModel.isInstalled ? .green : .red)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Picker("Poudriere", selection: $viewModel.selectedPackage) {
+                                        Text("poudriere").tag("poudriere")
+                                        Text("poudriere-devel").tag("poudriere-devel")
+                                    }
+                                    .pickerStyle(.radioGroup)
+
+                                    Text(viewModel.selectedPackage == "poudriere-devel"
+                                         ? "Development version with latest features"
+                                         : "Stable release version")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .font(.subheadline)
                         }
                         .padding()
                         .frame(maxWidth: 400, alignment: .leading)
@@ -1176,12 +1278,12 @@ struct PoudriereContentView: View {
                                 await viewModel.setupPoudriere()
                             }
                         }) {
-                            Label("Install \(viewModel.selectedPackage)", systemImage: "gear")
+                            Label("Install Packages", systemImage: "gear")
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
 
-                        Text("This will install the selected poudriere package")
+                        Text("This will install git and \(viewModel.selectedPackage)")
                             .font(.caption)
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.center)
@@ -1244,6 +1346,19 @@ struct PoudriereContentView: View {
             Task {
                 await viewModel.loadPoudriere()
             }
+        }
+    }
+
+    private func gitPackageDescription(_ package: String) -> String {
+        switch package {
+        case "git":
+            return "Full git with all optional dependencies (recommended)"
+        case "git-lite":
+            return "Lightweight git without perl/python/tk"
+        case "git-tiny":
+            return "Minimal core git commands (smallest)"
+        default:
+            return ""
         }
     }
 }
@@ -2304,19 +2419,59 @@ struct PoudriereConfigView: View {
                     }
                     .padding()
                 } else {
-                    // ZFS Pool
+                    // Storage Mode Selection
                     GroupBox("Storage") {
                         VStack(alignment: .leading, spacing: 12) {
+                            // Storage mode toggle
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("ZFS Pool")
+                                Text("Storage Mode")
                                     .font(.subheadline)
-                                Picker("ZPool", selection: $config.zpool) {
-                                    ForEach(zpools, id: \.self) { pool in
-                                        Text(pool).tag(pool)
+                                Picker("Storage Mode", selection: Binding(
+                                    get: { config.noZfs ? "ufs" : "zfs" },
+                                    set: { newValue in
+                                        config.noZfs = (newValue == "ufs")
+                                        hasChanges = true
+                                    }
+                                )) {
+                                    Text("ZFS").tag("zfs")
+                                    Text("UFS").tag("ufs")
+                                }
+                                .pickerStyle(.segmented)
+                                .frame(width: 150)
+                            }
+
+                            if config.noZfs {
+                                // UFS mode info
+                                HStack {
+                                    Image(systemName: "info.circle")
+                                        .foregroundColor(.blue)
+                                    Text("UFS mode uses regular directories instead of ZFS datasets")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            } else {
+                                // ZFS Pool picker
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("ZFS Pool")
+                                        .font(.subheadline)
+                                    if zpools.isEmpty {
+                                        HStack {
+                                            Image(systemName: "exclamationmark.triangle")
+                                                .foregroundColor(.orange)
+                                            Text("No ZFS pools available")
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                        }
+                                    } else {
+                                        Picker("ZPool", selection: $config.zpool) {
+                                            ForEach(zpools, id: \.self) { pool in
+                                                Text(pool).tag(pool)
+                                            }
+                                        }
+                                        .labelsHidden()
+                                        .onChange(of: config.zpool) { _, _ in hasChanges = true }
                                     }
                                 }
-                                .labelsHidden()
-                                .onChange(of: config.zpool) { _, _ in hasChanges = true }
                             }
 
                             VStack(alignment: .leading, spacing: 4) {
@@ -2495,7 +2650,9 @@ struct PoudriereConfigView: View {
         do {
             config = try await SSHConnectionManager.shared.readPoudriereConfig()
             zpools = try await SSHConnectionManager.shared.getAvailableZpools()
-            if !zpools.contains(config.zpool) && !zpools.isEmpty {
+
+            // If ZFS mode and pool not in list, select first available
+            if !config.noZfs && !zpools.contains(config.zpool) && !zpools.isEmpty {
                 config.zpool = zpools[0]
             }
             // Check for placeholder/unconfigured mirror and default to main
@@ -2564,6 +2721,7 @@ struct PoudriereConfigView: View {
 @MainActor
 class PoudriereViewModel: ObservableObject {
     @Published var isInstalled = false
+    @Published var isGitInstalled = false
     @Published var htmlPath = ""
     @Published var dataPath = ""
     @Published var configPath: String?
@@ -2581,6 +2739,7 @@ class PoudriereViewModel: ObservableObject {
     @Published var isSettingUp = false
     @Published var setupStep = ""
     @Published var selectedPackage = "poudriere"
+    @Published var selectedGitPackage = "git"
 
     // Command output for terminal-style sheets
     @Published var showingCommandOutput = false
@@ -2597,6 +2756,10 @@ class PoudriereViewModel: ObservableObject {
         error = nil
 
         do {
+            // Check if git is installed
+            let gitCheck = try? await sshManager.executeCommand("command -v git >/dev/null 2>&1 && echo 'installed' || echo 'not-installed'")
+            isGitInstalled = gitCheck?.trimmingCharacters(in: .whitespacesAndNewlines) == "installed"
+
             let info = try await sshManager.checkPoudriere()
             isInstalled = info.isInstalled
             htmlPath = info.htmlPath
@@ -2630,25 +2793,78 @@ class PoudriereViewModel: ObservableObject {
     }
 
     func setupPoudriere() async {
-        isSettingUp = true
         error = nil
 
-        do {
-            setupStep = "Installing \(selectedPackage)..."
-            _ = try await sshManager.executeCommand("pkg install -y \(selectedPackage)")
-            isInstalled = true
+        // Setup command output sheet
+        commandOutput.reset()
+        commandTitle = "Installing Packages"
+        showingCommandOutput = true
 
-            setupStep = "Setup complete!"
+        let packages = "\(selectedGitPackage) \(selectedPackage)"
+        let command = "pkg install -y \(packages)"
 
-            // Reload poudriere data
-            await loadPoudriere()
+        let task = Task {
+            do {
+                commandOutput.appendOutput("Installing packages: \(packages)\n")
+                commandOutput.appendOutput("Running: \(command)\n\n")
 
-        } catch {
-            self.error = "Setup failed: \(error.localizedDescription)"
+                let exitCode = try await sshManager.executeCommandStreaming(command) { [weak self] output in
+                    self?.commandOutput.appendOutput(output)
+                }
+
+                if exitCode == 0 {
+                    commandOutput.appendOutput("\n\nPackages installed successfully!")
+                    isInstalled = true
+                    await loadPoudriere()
+                } else {
+                    commandOutput.appendOutput("\n\nInstallation failed with exit code \(exitCode)")
+                }
+                commandOutput.complete(exitCode: exitCode)
+            } catch {
+                await MainActor.run {
+                    commandOutput.appendOutput("\n\nError: \(error.localizedDescription)")
+                    commandOutput.complete(exitCode: 1)
+                }
+            }
         }
+        commandOutput.setTask(task)
+    }
 
-        isSettingUp = false
-        setupStep = ""
+    func installGit() async {
+        error = nil
+
+        // Setup command output sheet
+        commandOutput.reset()
+        commandTitle = "Installing Git"
+        showingCommandOutput = true
+
+        let command = "pkg install -y \(selectedGitPackage)"
+
+        let task = Task {
+            do {
+                commandOutput.appendOutput("Installing package: \(selectedGitPackage)\n")
+                commandOutput.appendOutput("Running: \(command)\n\n")
+
+                let exitCode = try await sshManager.executeCommandStreaming(command) { [weak self] output in
+                    self?.commandOutput.appendOutput(output)
+                }
+
+                if exitCode == 0 {
+                    commandOutput.appendOutput("\n\nGit installed successfully!")
+                    isGitInstalled = true
+                    await loadPoudriere()
+                } else {
+                    commandOutput.appendOutput("\n\nInstallation failed with exit code \(exitCode)")
+                }
+                commandOutput.complete(exitCode: exitCode)
+            } catch {
+                await MainActor.run {
+                    commandOutput.appendOutput("\n\nError: \(error.localizedDescription)")
+                    commandOutput.complete(exitCode: 1)
+                }
+            }
+        }
+        commandOutput.setTask(task)
     }
 
     // MARK: - Jail Management

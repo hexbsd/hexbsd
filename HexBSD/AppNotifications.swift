@@ -21,4 +21,7 @@ extension Notification.Name {
 
     /// Posted when navigation to Tasks page is requested
     static let navigateToTasks = Notification.Name("navigateToTasks")
+
+    /// Posted when navigation to ZFS page is requested (opens Pools sheet)
+    static let navigateToZFS = Notification.Name("navigateToZFS")
 }

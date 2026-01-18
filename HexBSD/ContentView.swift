@@ -781,15 +781,7 @@ struct ContentView: View {
         }
         .onAppear {
             loadSavedServers()
-
-            // If already connected (e.g., in a new window), load data and navigate to status
-            if sshManager.isConnected {
-                loadDataFromServer()
-                // Navigate to status screen if no section is selected
-                if selectedSection == nil {
-                    selectedSection = .dashboard
-                }
-            }
+            // New windows always show the server list so users can connect to new servers
         }
         .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
             // Auto-refresh dashboard every 5 seconds if connected and viewing dashboard
@@ -845,6 +837,20 @@ struct ContentView: View {
             // Switch to tasks section after scheduling a task
             if sshManager.isConnected {
                 selectedSection = .tasks
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .navigateToZFS)) { _ in
+            // Switch to ZFS section for pool setup
+            if sshManager.isConnected {
+                let wasNotOnZFS = selectedSection != .zfs
+                selectedSection = .zfs
+
+                // Re-post notification after ZFSContentView loads so it can open the pools sheet
+                if wasNotOnZFS {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        NotificationCenter.default.post(name: .navigateToZFS, object: nil)
+                    }
+                }
             }
         }
     }
@@ -1052,27 +1058,6 @@ struct DetailView: View {
                                 )
                             }
 
-                            // Row 4: Uptime and Storage
-                            LazyVGrid(columns: [
-                                GridItem(.flexible(), spacing: 20),
-                                GridItem(.flexible(), spacing: 20)
-                            ], spacing: 20) {
-                                MetricCard(
-                                    title: "System Uptime",
-                                    value: systemStatus.uptime,
-                                    progress: nil,
-                                    color: .cyan,
-                                    systemImage: "clock"
-                                )
-
-                                MetricCard(
-                                    title: "Storage",
-                                    value: systemStatus.storageUsage,
-                                    progress: systemStatus.storagePercentage,
-                                    color: .purple,
-                                    systemImage: "internaldrive"
-                                )
-                            }
                         } else {
                             VStack(spacing: 20) {
                                 ProgressView()

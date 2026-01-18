@@ -291,6 +291,10 @@ struct ZFSContentView: View {
                 await viewModel.loadAll()
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .navigateToZFS)) { _ in
+            // Open pools sheet
+            showPools = true
+        }
     }
 }
 
