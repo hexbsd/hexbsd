@@ -42,23 +42,49 @@ struct CronTask: Identifiable, Hashable {
 
     var scheduleDescription: String {
         // Try to provide a human-readable description
-        if schedule == "* * * * *" {
-            return "Every minute"
-        } else if schedule == "0 * * * *" {
-            return "Every hour"
-        } else if schedule == "0 0 * * *" {
-            return "Daily at midnight"
-        } else if schedule == "0 0 * * 0" {
-            return "Weekly on Sunday"
-        } else if schedule == "0 0 1 * *" {
-            return "Monthly on the 1st"
-        } else if minute == "*" && hour == "*" {
-            return "Every minute"
-        } else if minute != "*" && hour == "*" {
-            return "Every hour at :\(minute)"
-        } else if hour != "*" && minute != "*" {
-            return "Daily at \(hour):\(minute)"
+        let days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+
+        // Handle */X patterns for minutes
+        if minute.hasPrefix("*/"), let interval = Int(minute.dropFirst(2)) {
+            if hour == "*" && dayOfMonth == "*" && month == "*" && dayOfWeek == "*" {
+                return "Every \(interval) minute\(interval == 1 ? "" : "s")"
+            }
         }
+
+        // Every minute
+        if minute == "*" && hour == "*" && dayOfMonth == "*" && month == "*" && dayOfWeek == "*" {
+            return "Every minute"
+        }
+
+        // Hourly at specific minute
+        if let min = Int(minute), hour == "*" && dayOfMonth == "*" && month == "*" && dayOfWeek == "*" {
+            return "Hourly at :\(String(format: "%02d", min))"
+        }
+
+        // Daily at specific time
+        if let min = Int(minute), let hr = Int(hour), dayOfMonth == "*" && month == "*" && dayOfWeek == "*" {
+            return "Daily at \(String(format: "%02d:%02d", hr, min))"
+        }
+
+        // Weekly on specific day
+        if let min = Int(minute), let hr = Int(hour), let dow = Int(dayOfWeek), dayOfMonth == "*" && month == "*" {
+            let dayName = dow >= 0 && dow < 7 ? days[dow] : "day \(dow)"
+            return "Weekly on \(dayName) at \(String(format: "%02d:%02d", hr, min))"
+        }
+
+        // Monthly on specific day
+        if let min = Int(minute), let hr = Int(hour), let dom = Int(dayOfMonth), month == "*" && dayOfWeek == "*" {
+            let suffix: String
+            switch dom {
+            case 1, 21, 31: suffix = "st"
+            case 2, 22: suffix = "nd"
+            case 3, 23: suffix = "rd"
+            default: suffix = "th"
+            }
+            return "Monthly on the \(dom)\(suffix) at \(String(format: "%02d:%02d", hr, min))"
+        }
+
+        // Fallback to cron syntax
         return schedule
     }
 
