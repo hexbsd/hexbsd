@@ -983,7 +983,6 @@ struct BridgesTabView: View {
     @State private var showError = false
     @State private var showRestartDialog = false
     @State private var restartMessage = ""
-    @State private var isRestarting = false
     @State private var showDeleteConfirmation = false
     @State private var bridgeToDelete: BridgeInterface?
 
@@ -1135,34 +1134,13 @@ struct BridgesTabView: View {
             }
             Button("Restart Now") {
                 Task {
-                    isRestarting = true
                     await viewModel.restartServer()
-                    // The connection will be lost, so we don't need to do anything else
+                    // Disconnect to take user back to connections screen
+                    await viewModel.disconnect()
                 }
             }
         } message: {
             Text(restartMessage)
-        }
-        .overlay {
-            if isRestarting {
-                ZStack {
-                    Color.black.opacity(0.5)
-                    VStack(spacing: 16) {
-                        ProgressView()
-                            .scaleEffect(1.5)
-                        Text("Restarting server...")
-                            .font(.headline)
-                            .foregroundColor(.white)
-                        Text("The connection will be lost. Please reconnect after the server restarts.")
-                            .font(.caption)
-                            .foregroundColor(.white.opacity(0.8))
-                            .multilineTextAlignment(.center)
-                    }
-                    .padding(32)
-                    .background(Color(nsColor: .windowBackgroundColor))
-                    .cornerRadius(16)
-                }
-            }
         }
         .onChange(of: viewModel.error) { oldValue, newValue in
             if newValue != nil {
@@ -1882,6 +1860,11 @@ class BridgesViewModel: ObservableObject {
         } catch {
             self.error = "Failed to initiate restart: \(error.localizedDescription)"
         }
+    }
+
+    /// Disconnect from the server
+    func disconnect() async {
+        await sshManager.disconnect()
     }
 }
 
