@@ -2516,6 +2516,9 @@ struct DatasetsView: View {
             nodes[dataset.name] = node
         }
 
+        // Collect names that need to be expanded (defer state modification)
+        var namesToExpand: [String] = []
+
         // Build parent-child relationships
         for node in nodes.values {
             let name = node.dataset.name
@@ -2534,8 +2537,8 @@ struct DatasetsView: View {
                 rootNodes.append(node)
                 // Expand root datasets by default
                 if !expandedDatasets.contains(name) {
-                    expandedDatasets.insert(name)
                     node.isExpanded = true
+                    namesToExpand.append(name)
                 }
             }
         }
@@ -2550,9 +2553,18 @@ struct DatasetsView: View {
             for node in nodes.values {
                 if node.dataset.isProtected && node.hasChildren {
                     if !expandedDatasets.contains(node.dataset.name) {
-                        expandedDatasets.insert(node.dataset.name)
                         node.isExpanded = true
+                        namesToExpand.append(node.dataset.name)
                     }
+                }
+            }
+        }
+
+        // Defer state modification to avoid modifying during view update
+        if !namesToExpand.isEmpty {
+            DispatchQueue.main.async {
+                for name in namesToExpand {
+                    self.expandedDatasets.insert(name)
                 }
             }
         }
@@ -2609,6 +2621,9 @@ struct DatasetsView: View {
             nodes[dataset.name] = node
         }
 
+        // Collect names that need to be expanded (defer state modification)
+        var namesToExpand: [String] = []
+
         // Build parent-child relationships
         for node in nodes.values {
             let name = node.dataset.name
@@ -2627,8 +2642,8 @@ struct DatasetsView: View {
                 rootNodes.append(node)
                 // Expand root datasets by default
                 if !expandedTargetDatasets.contains(name) {
-                    expandedTargetDatasets.insert(name)
                     node.isExpanded = true
+                    namesToExpand.append(name)
                 }
             }
         }
@@ -2636,6 +2651,15 @@ struct DatasetsView: View {
         // Sort children for each node
         for node in nodes.values {
             node.children.sort { $0.dataset.name < $1.dataset.name }
+        }
+
+        // Defer state modification to avoid modifying during view update
+        if !namesToExpand.isEmpty {
+            DispatchQueue.main.async {
+                for name in namesToExpand {
+                    self.expandedTargetDatasets.insert(name)
+                }
+            }
         }
 
         // Group snapshots by parent dataset and add as a collapsible "Snapshots" node
@@ -4618,6 +4642,9 @@ struct ReplicationPaneView: View {
             nodes[dataset.name] = node
         }
 
+        // Collect names that need to be expanded (defer state modification)
+        var namesToExpand: [String] = []
+
         // Build parent-child relationships
         for node in nodes.values {
             let name = node.dataset.name
@@ -4636,8 +4663,8 @@ struct ReplicationPaneView: View {
                 rootNodes.append(node)
                 // Expand root datasets by default
                 if !expandedDatasets.contains(name) {
-                    expandedDatasets.insert(name)
                     node.isExpanded = true
+                    namesToExpand.append(name)
                 }
             }
         }
@@ -4645,6 +4672,15 @@ struct ReplicationPaneView: View {
         // Sort children for each node
         for node in nodes.values {
             node.children.sort { $0.dataset.name < $1.dataset.name }
+        }
+
+        // Defer state modification to avoid modifying during view update
+        if !namesToExpand.isEmpty {
+            DispatchQueue.main.async {
+                for name in namesToExpand {
+                    self.expandedDatasets.insert(name)
+                }
+            }
         }
 
         // Add snapshots as children of their parent datasets
