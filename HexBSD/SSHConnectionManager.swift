@@ -6137,7 +6137,7 @@ EOFPKG
 
     // MARK: - Service Management
 
-    /// List all services from base system and ports
+    /// List services from ports
     func listServices() async throws -> [FreeBSDService] {
         guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
@@ -6171,32 +6171,9 @@ EOFPKG
         for line in runningOutput.split(separator: "\n") {
             let path = String(line).trimmingCharacters(in: .whitespaces)
             if !path.isEmpty {
-                // Extract service name from path (e.g., "/etc/rc.d/sshd" -> "sshd")
+                // Extract service name from path (e.g., "/usr/local/etc/rc.d/nginx" -> "nginx")
                 let name = (path as NSString).lastPathComponent
                 runningServices.insert(name)
-            }
-        }
-
-        // Get base system services from /etc/rc.d
-        let baseServicesOutput = try await executeCommand("ls /etc/rc.d 2>/dev/null || echo ''")
-        for line in baseServicesOutput.split(separator: "\n") {
-            let name = String(line).trimmingCharacters(in: .whitespaces)
-            if !name.isEmpty && !name.hasPrefix(".") {
-                // Get service description from script (PROVIDE line)
-                let description = try await getServiceDescription(name: name, source: .base)
-                let rcVar = "\(name)_enable"
-                let configPath = try await findServiceConfigPath(name: name, source: .base)
-
-                let service = FreeBSDService(
-                    name: name,
-                    source: .base,
-                    status: runningServices.contains(name) ? .running : .stopped,
-                    enabled: enabledServices.contains(name),
-                    description: description,
-                    rcVar: rcVar,
-                    configPath: configPath
-                )
-                services.append(service)
             }
         }
 

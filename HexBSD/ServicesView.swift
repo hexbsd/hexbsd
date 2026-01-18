@@ -2,7 +2,7 @@
 //  ServicesView.swift
 //  HexBSD
 //
-//  FreeBSD service management for base and ports services
+//  FreeBSD service management for ports services
 //
 
 import SwiftUI
@@ -72,12 +72,6 @@ struct FreeBSDService: Identifiable, Hashable {
 
 // MARK: - Filter Options
 
-enum ServiceSourceFilter: String, CaseIterable {
-    case all = "All"
-    case base = "Base"
-    case ports = "Ports"
-}
-
 enum ServiceStatusFilter: String, CaseIterable {
     case all = "All"
     case running = "Running"
@@ -100,7 +94,6 @@ enum ServiceStatusFilter: String, CaseIterable {
 
 struct ServicesContentView: View {
     @StateObject private var viewModel = ServicesViewModel()
-    @State private var sourceFilter: ServiceSourceFilter = .all
     @State private var statusFilter: ServiceStatusFilter = .all
     @State private var searchText = ""
     @State private var serviceToEdit: FreeBSDService?
@@ -108,16 +101,6 @@ struct ServicesContentView: View {
 
     var filteredServices: [FreeBSDService] {
         var services = viewModel.services
-
-        // Apply source filter
-        switch sourceFilter {
-        case .all:
-            break
-        case .base:
-            services = services.filter { $0.source == .base }
-        case .ports:
-            services = services.filter { $0.source == .ports }
-        }
 
         // Apply status filter
         switch statusFilter {
@@ -144,15 +127,6 @@ struct ServicesContentView: View {
         return services
     }
 
-    // Counts for the segmented control labels
-    var baseCount: Int {
-        viewModel.services.filter { $0.source == .base }.count
-    }
-
-    var portsCount: Int {
-        viewModel.services.filter { $0.source == .ports }.count
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             // Header bar
@@ -166,15 +140,6 @@ struct ServicesContentView: View {
                 }
 
                 Spacer()
-
-                // Source segmented picker (All / Base / Ports)
-                Picker("Source", selection: $sourceFilter) {
-                    Text("All").tag(ServiceSourceFilter.all)
-                    Text("Base (\(baseCount))").tag(ServiceSourceFilter.base)
-                    Text("Ports (\(portsCount))").tag(ServiceSourceFilter.ports)
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 260)
 
                 // Status filter dropdown
                 Picker("Status", selection: $statusFilter) {
@@ -207,13 +172,13 @@ struct ServicesContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if viewModel.services.isEmpty {
                 VStack(spacing: 20) {
-                    Image(systemName: "gearshape.2")
+                    Image(systemName: "shippingbox")
                         .font(.system(size: 72))
                         .foregroundColor(.secondary)
                     Text("No Services Found")
                         .font(.title2)
                         .foregroundColor(.secondary)
-                    Text("Unable to retrieve service information from the server")
+                    Text("Services will appear here when you install ports that provide them")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -244,18 +209,6 @@ struct ServicesContentView: View {
                         }
                     }
                     .width(min: 80, ideal: 90, max: 100)
-
-                    TableColumn("Source") { service in
-                        HStack(spacing: 4) {
-                            Image(systemName: service.source.icon)
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
-                            Text(service.source.rawValue)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    .width(min: 90, ideal: 100, max: 120)
 
                     TableColumn("Service") { service in
                         VStack(alignment: .leading, spacing: 2) {
@@ -384,7 +337,7 @@ struct ServiceConfigView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
-                        Image(systemName: service.source.icon)
+                        Image(systemName: "gearshape")
                             .foregroundColor(.secondary)
                         Text("Configure \(service.name)")
                             .font(.title2)
