@@ -2820,7 +2820,8 @@ struct DatasetsView: View {
                                 if retentionSeconds > 0 {
                                     // Add pruning command using base FreeBSD tools with epoch timestamps
                                     // Prunes snapshots matching 'auto-' prefix older than specified seconds
-                                    let pruneScript = " && cutoff=$(($(date +%s) - \(retentionSeconds))); zfs list -H -t snapshot -o name,creation | grep '@auto-' | while read snap creation; do snap_epoch=$(date -j -f '%a %b %d %H:%M %Y' \"$creation\" +%s 2>/dev/null || echo 0); if [ \"$snap_epoch\" -lt \"$cutoff\" ]; then zfs destroy \"$snap\"; fi; done"
+                                    // NOTE: % must be escaped as \% in crontab (% means newline in cron)
+                                    let pruneScript = " && cutoff=$(($(date +\\%s) - \(retentionSeconds))); zfs list -H -t snapshot -o name,creation | grep '@auto-' | while read snap creation; do snap_epoch=$(date -j -f '\\%a \\%b \\%d \\%H:\\%M \\%Y' \"$creation\" +\\%s 2>/dev/null || echo 0); if [ \"$snap_epoch\" -lt \"$cutoff\" ]; then zfs destroy \"$snap\"; fi; done"
                                     fullCommand += pruneScript
                                 }
                             }

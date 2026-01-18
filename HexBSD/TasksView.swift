@@ -95,6 +95,91 @@ struct CronTask: Identifiable, Hashable {
     static func == (lhs: CronTask, rhs: CronTask) -> Bool {
         lhs.originalLine == rhs.originalLine
     }
+
+    // MARK: - Replication Task Detection
+
+    /// Checks if this is a ZFS replication task created by HexBSD
+    var isReplicationTask: Bool {
+        command.contains("zfs snapshot") && command.contains("zfs send") && command.contains("zfs receive")
+    }
+
+    /// Parsed replication task details (nil if not a replication task)
+    var replicationDetails: ReplicationTaskDetails? {
+        guard isReplicationTask else { return nil }
+
+        // Extract source dataset from: SNAP="dataset@auto-
+        var sourceDataset: String?
+        if let range = command.range(of: #"SNAP="([^@]+)@auto-"#, options: .regularExpression) {
+            let match = String(command[range])
+            sourceDataset = match
+                .replacingOccurrences(of: "SNAP=\"", with: "")
+                .replacingOccurrences(of: "@auto-", with: "")
+        }
+
+        // Extract target server from: ssh ... user@server 'zfs receive
+        var targetServer: String?
+        if let range = command.range(of: #"ssh [^']+?(\S+@\S+)\s+'zfs receive"#, options: .regularExpression) {
+            let match = String(command[range])
+            // Extract user@server part
+            if let serverRange = match.range(of: #"\S+@\S+(?=\s+'zfs)"#, options: .regularExpression) {
+                targetServer = String(match[serverRange])
+            }
+        }
+
+        // Extract target dataset from: zfs receive -F dataset'
+        var targetDataset: String?
+        if let range = command.range(of: #"zfs receive -F ([^']+)'"#, options: .regularExpression) {
+            let match = String(command[range])
+            targetDataset = match
+                .replacingOccurrences(of: "zfs receive -F ", with: "")
+                .replacingOccurrences(of: "'", with: "")
+        }
+
+        // Extract retention seconds from: - SECONDS)); (note: two closing parens)
+        var retentionSeconds: Int?
+        if let range = command.range(of: #"- (\d+)\)\);"#, options: .regularExpression) {
+            let match = String(command[range])
+            let digits = match.filter { $0.isNumber }
+            retentionSeconds = Int(digits)
+        }
+
+        return ReplicationTaskDetails(
+            sourceDataset: sourceDataset ?? "Unknown",
+            targetServer: targetServer ?? "Local",
+            targetDataset: targetDataset ?? "Unknown",
+            retentionSeconds: retentionSeconds
+        )
+    }
+}
+
+/// Details parsed from a replication task command
+struct ReplicationTaskDetails {
+    let sourceDataset: String
+    let targetServer: String
+    let targetDataset: String
+    let retentionSeconds: Int?
+
+    var retentionDescription: String {
+        guard let seconds = retentionSeconds else { return "Forever" }
+        switch seconds {
+        case 0: return "Forever"
+        case 3600: return "1 Hour"
+        case 86400: return "1 Day"
+        case 604800: return "1 Week"
+        case 2592000: return "1 Month"
+        case 7776000: return "3 Months"
+        case 31536000: return "1 Year"
+        default:
+            // Fallback for other values
+            if seconds < 3600 {
+                return "\(seconds / 60) minutes"
+            } else if seconds < 86400 {
+                return "\(seconds / 3600) hours"
+            } else {
+                return "\(seconds / 86400) days"
+            }
+        }
+    }
 }
 
 // MARK: - Main View
@@ -195,13 +280,47 @@ struct TasksContentView: View {
                     }
                     .width(min: 120, ideal: 150)
 
-                    TableColumn("Command") { task in
-                        Text(task.command)
-                            .font(.system(size: 11))
-                            .lineLimit(2)
+                    TableColumn("Task") { task in
+                        if let details = task.replicationDetails {
+                            // Replication task - show friendly details
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "arrow.triangle.2.circlepath")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.blue)
+                                    Text("ZFS Replication")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(.blue)
+                                }
+                                HStack(spacing: 4) {
+                                    Text(details.sourceDataset)
+                                        .font(.system(size: 11))
+                                    Image(systemName: "arrow.right")
+                                        .font(.system(size: 9))
+                                        .foregroundColor(.secondary)
+                                    Text(details.targetServer)
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.secondary)
+                                }
+                                HStack(spacing: 4) {
+                                    Image(systemName: "clock")
+                                        .font(.system(size: 9))
+                                        .foregroundColor(.secondary)
+                                    Text("Keep: \(details.retentionDescription)")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.secondary)
+                                }
+                            }
                             .help(task.command)
+                        } else {
+                            // Regular command
+                            Text(task.command)
+                                .font(.system(size: 11))
+                                .lineLimit(2)
+                                .help(task.command)
+                        }
                     }
-                    .width(min: 200, ideal: 300)
+                    .width(min: 220, ideal: 320)
 
                     TableColumn("User", value: \.user)
                         .width(min: 60, ideal: 80)
