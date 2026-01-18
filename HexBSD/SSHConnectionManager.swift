@@ -4148,9 +4148,13 @@ extension SSHConnectionManager {
             // Continue with empty array
         }
 
-        // Get ZFS ARC stats
-        let arcStats = try await executeCommand("sysctl -n kstat.zfs.misc.arcstats.size kstat.zfs.misc.arcstats.c_max")
-        let (arcUsed, arcMax) = parseARCStats(arcStats)
+        // Get ZFS ARC stats (returns empty on non-ZFS systems)
+        var arcUsed: Double = 0
+        var arcMax: Double = 0
+        let arcStats = try await executeCommand("sysctl -n kstat.zfs.misc.arcstats.size kstat.zfs.misc.arcstats.c_max 2>/dev/null || echo ''")
+        if !arcStats.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            (arcUsed, arcMax) = parseARCStats(arcStats)
+        }
 
         // Get swap usage
         let swapOutput = try await executeCommand("swapinfo -k | tail -1")
