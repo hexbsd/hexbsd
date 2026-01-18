@@ -82,50 +82,29 @@ enum NetworkRole {
 
 enum HomeDirectoryStyle: String, CaseIterable {
     case unix = "unix"
-    case gnustep = "gnustep"
 
     var displayName: String {
-        switch self {
-        case .unix: return "Traditional Unix"
-        case .gnustep: return "Gershwin (GNUstep)"
-        }
+        return "Traditional Unix"
     }
 
     func description(forRole role: NetworkRole) -> String {
-        switch self {
-        case .gnustep:
-            return role == .none ? "/Local/Users" : "/Network/Users"
-        case .unix:
-            return "/home"
-        }
+        return "/home"
     }
 
     var localUsersPath: String {
-        switch self {
-        case .gnustep: return "/Local/Users"
-        case .unix: return "/home"
-        }
+        return "/home"
     }
 
     var networkUsersPath: String {
-        switch self {
-        case .gnustep: return "/Network/Users"
-        case .unix: return "/home"
-        }
+        return "/home"
     }
 
     var icon: String {
-        switch self {
-        case .gnustep: return "folder.badge.gearshape"
-        case .unix: return "house"
-        }
+        return "house"
     }
 
     var defaultShell: String {
-        switch self {
-        case .gnustep: return "/usr/local/bin/zsh"
-        case .unix: return "/bin/sh"
-        }
+        return "/bin/sh"
     }
 }
 
@@ -245,15 +224,9 @@ struct UsersAndGroupsState {
 
     // Returns only the datasets relevant for the current home directory style
     var relevantZFSDatasets: [ZFSDatasetStatus] {
-        switch homeDirectoryStyle {
-        case .gnustep:
-            // GNUstep needs /System, /Local, and /Network
-            return zfsDatasets
-        case .unix:
-            // Traditional Unix doesn't need any special ZFS datasets
-            // It uses /home which FreeBSD manages natively
-            return []
-        }
+        // Traditional Unix doesn't need any special ZFS datasets
+        // It uses /home which FreeBSD manages natively
+        return []
     }
 
     var overallProgress: Double {
@@ -589,28 +562,6 @@ class UsersAndGroupsViewModel: ObservableObject {
             guard let bootEnv = setupState.bootEnvironment,
                   let zpoolRoot = setupState.zpoolRoot else {
                 throw NSError(domain: "UsersAndGroups", code: 1, userInfo: [NSLocalizedDescriptionKey: "Boot environment not detected"])
-            }
-
-            // GNUstep style requires /System, /Local, and /Network datasets
-            // Traditional Unix doesn't need any of these
-            if setupState.homeDirectoryStyle == .gnustep {
-                // Create /System dataset in boot environment
-                let systemDataset = setupState.zfsDatasets.first { $0.name == "/System" }
-                if let system = systemDataset, !system.exists {
-                    _ = try await sshManager.executeCommand("zfs create -o mountpoint=/System \(bootEnv)/System")
-                }
-
-                // Create /Local dataset in zpool root
-                let localDataset = setupState.zfsDatasets.first { $0.name == "/Local" }
-                if let local = localDataset, !local.exists {
-                    _ = try await sshManager.executeCommand("zfs create -o mountpoint=/Local \(zpoolRoot)/Local")
-                }
-
-                // Create /Network dataset in zpool root
-                let networkDataset = setupState.zfsDatasets.first { $0.name == "/Network" }
-                if let network = networkDataset, !network.exists {
-                    _ = try await sshManager.executeCommand("zfs create -o mountpoint=/Network \(zpoolRoot)/Network")
-                }
             }
 
             // Reload state (don't update network role - preserve user's selection during setup)
@@ -950,19 +901,11 @@ SAVEHIST=10000
         result = try await sshManager.executeCommand("sysrc nfsuserd_enable=\"YES\"")
         print("DEBUG NIS Server: sysrc nfsuserd_enable result: \(result)")
 
-        // Create directories for network shares
+        // Create /home directory for network shares
         networkConfigStep = "Creating network directories..."
-        if setupState.homeDirectoryStyle == .gnustep {
-            // GNUstep: Create /Network/Users and /Network/Applications
-            print("DEBUG NIS Server: Creating /Network/Users and /Network/Applications directories...")
-            result = try await sshManager.executeCommand("mkdir -p /Network/Users /Network/Applications")
-            print("DEBUG NIS Server: mkdir result: \(result)")
-        } else {
-            // Traditional Unix: Create /home
-            print("DEBUG NIS Server: Creating /home directory...")
-            result = try await sshManager.executeCommand("mkdir -p /home")
-            print("DEBUG NIS Server: mkdir result: \(result)")
-        }
+        print("DEBUG NIS Server: Creating /home directory...")
+        result = try await sshManager.executeCommand("mkdir -p /home")
+        print("DEBUG NIS Server: mkdir result: \(result)")
 
         // Ensure /etc/exports exists with NFSv4 root line (required for NFSv4)
         networkConfigStep = "Configuring NFS exports..."
@@ -974,21 +917,12 @@ SAVEHIST=10000
             print("DEBUG NIS Server: Added V4 root line to /etc/exports: \(result)")
         }
 
-        // Configure ZFS NFS sharing using sharenfs property
-        if setupState.homeDirectoryStyle == .gnustep {
-            // GNUstep: Share /Network (contains /Network/Users and /Network/Applications)
-            print("DEBUG NIS Server: Configuring ZFS sharenfs property on zroot/Network...")
-            result = try await sshManager.executeCommand("zfs set sharenfs='-maproot=root -alldirs' zroot/Network")
-            print("DEBUG NIS Server: Set sharenfs on zroot/Network: \(result)")
-        } else {
-            // Traditional Unix: Share /home for network user home directories
-            print("DEBUG NIS Server: Configuring NFS export for /home...")
-            // Add /home to /etc/exports for NFS sharing
-            let exportsContent = try await sshManager.executeCommand("cat /etc/exports 2>/dev/null || echo ''")
-            if !exportsContent.contains("/home") {
-                result = try await sshManager.executeCommand("echo '/home -alldirs -maproot=root' >> /etc/exports")
-                print("DEBUG NIS Server: Added /home to /etc/exports: \(result)")
-            }
+        // Configure NFS export for /home
+        print("DEBUG NIS Server: Configuring NFS export for /home...")
+        let exportsContent = try await sshManager.executeCommand("cat /etc/exports 2>/dev/null || echo ''")
+        if !exportsContent.contains("/home") {
+            result = try await sshManager.executeCommand("echo '/home -alldirs -maproot=root' >> /etc/exports")
+            print("DEBUG NIS Server: Added /home to /etc/exports: \(result)")
         }
 
         // Set up NIS database directory
@@ -1152,10 +1086,6 @@ SAVEHIST=10000
         print("DEBUG NIS Server: Enabling domain firewall rules...")
         try await sshManager.enableDomainFirewallRules(role: "server")
 
-        let nfsShareInfo = setupState.homeDirectoryStyle == .gnustep
-            ? "✓ /Network shared via ZFS sharenfs"
-            : "✓ /home shared via /etc/exports"
-
         confirmationMessage = """
         NIS/NFS server configured and started successfully!
 
@@ -1164,7 +1094,7 @@ SAVEHIST=10000
         ✓ NIS server configured and started
         ✓ NIS client configured (server binds to itself)
         ✓ NFS server configured and started
-        \(nfsShareInfo)
+        ✓ /home shared via /etc/exports
 
         Service status:
         ypserv: \(ypservStatus.contains("running") ? "running" : "check status")
@@ -1241,45 +1171,26 @@ SAVEHIST=10000
         _ = try await sshManager.executeCommand("echo '+sudo-users ALL=(ALL) ALL' > /usr/local/etc/sudoers.d/network-users")
         _ = try await sshManager.executeCommand("chmod 440 /usr/local/etc/sudoers.d/network-users")
 
-        // Create mount point directories and configure fstab based on home directory style
+        // Create mount point directories and configure fstab
         networkConfigStep = "Creating mount points..."
         let nfsOptions = "rw,\(selectedNFSVersion.mountOption)"
 
-        if setupState.homeDirectoryStyle == .gnustep {
-            // GNUstep: Mount /Network from server (contains /Network/Users and /Network/Applications)
-            print("DEBUG CLIENT: Creating /Network mount point...")
-            _ = try await sshManager.executeCommand("mkdir -p /Network")
+        // Mount /home from server for network user home directories
+        print("DEBUG CLIENT: Creating /home mount point...")
+        _ = try await sshManager.executeCommand("mkdir -p /home")
 
-            networkConfigStep = "Configuring /etc/fstab..."
-            print("DEBUG CLIENT: Configuring /etc/fstab for /Network...")
-            let fstabContent = try await sshManager.executeCommand("cat /etc/fstab 2>/dev/null || echo ''")
-            print("DEBUG CLIENT: Current fstab content:\n\(fstabContent)")
+        networkConfigStep = "Configuring /etc/fstab..."
+        print("DEBUG CLIENT: Configuring /etc/fstab for /home...")
+        let fstabContent = try await sshManager.executeCommand("cat /etc/fstab 2>/dev/null || echo ''")
+        print("DEBUG CLIENT: Current fstab content:\n\(fstabContent)")
 
-            if !fstabContent.contains("/Network") {
-                let fstabEntry = "\(nisServerAddress):/Network\t/Network\tnfs\t\(nfsOptions)\t0\t0"
-                print("DEBUG CLIENT: Adding fstab entry: \(fstabEntry)")
-                _ = try await sshManager.executeCommand("echo '\(fstabEntry)' >> /etc/fstab")
-            } else {
-                print("DEBUG CLIENT: /Network entry already exists in fstab")
-            }
+        // Add /home mount
+        if !fstabContent.contains(":/home") {
+            let homeEntry = "\(nisServerAddress):/home\t/home\tnfs\t\(nfsOptions)\t0\t0"
+            print("DEBUG CLIENT: Adding fstab entry for /home: \(homeEntry)")
+            _ = try await sshManager.executeCommand("echo '\(homeEntry)' >> /etc/fstab")
         } else {
-            // Traditional Unix: Mount /home from server for network user home directories
-            print("DEBUG CLIENT: Creating /home mount point...")
-            _ = try await sshManager.executeCommand("mkdir -p /home")
-
-            networkConfigStep = "Configuring /etc/fstab..."
-            print("DEBUG CLIENT: Configuring /etc/fstab for /home...")
-            let fstabContent = try await sshManager.executeCommand("cat /etc/fstab 2>/dev/null || echo ''")
-            print("DEBUG CLIENT: Current fstab content:\n\(fstabContent)")
-
-            // Add /home mount
-            if !fstabContent.contains(":/home") {
-                let homeEntry = "\(nisServerAddress):/home\t/home\tnfs\t\(nfsOptions)\t0\t0"
-                print("DEBUG CLIENT: Adding fstab entry for /home: \(homeEntry)")
-                _ = try await sshManager.executeCommand("echo '\(homeEntry)' >> /etc/fstab")
-            } else {
-                print("DEBUG CLIENT: /home entry already exists in fstab")
-            }
+            print("DEBUG CLIENT: /home entry already exists in fstab")
         }
 
         // Save NFS version preference
@@ -1311,19 +1222,11 @@ SAVEHIST=10000
         let nfsuserdResult = try await sshManager.executeCommand("service nfsuserd onestart 2>&1 || true")
         print("DEBUG CLIENT: nfsuserd start result: \(nfsuserdResult)")
 
-        // Mount the network shares
-        if setupState.homeDirectoryStyle == .gnustep {
-            networkConfigStep = "Mounting /Network..."
-            print("DEBUG CLIENT: Mounting /Network...")
-            let mountResult = try await sshManager.executeCommand("mount /Network 2>&1 || true")
-            print("DEBUG CLIENT: mount /Network result: \(mountResult)")
-        } else {
-            // Traditional Unix: Mount /home only
-            networkConfigStep = "Mounting /home..."
-            print("DEBUG CLIENT: Mounting /home...")
-            let homeResult = try await sshManager.executeCommand("mount /home 2>&1 || true")
-            print("DEBUG CLIENT: mount /home result: \(homeResult)")
-        }
+        // Mount /home
+        networkConfigStep = "Mounting /home..."
+        print("DEBUG CLIENT: Mounting /home...")
+        let homeResult = try await sshManager.executeCommand("mount /home 2>&1 || true")
+        print("DEBUG CLIENT: mount /home result: \(homeResult)")
 
         // Verify NIS connectivity
         networkConfigStep = "Verifying NIS connectivity..."
@@ -1349,16 +1252,12 @@ SAVEHIST=10000
             }
         }
 
-        let mountInfo = setupState.homeDirectoryStyle == .gnustep
-            ? "✓ /Network mounted from \(nisServerAddress)"
-            : "✓ /home mounted from \(nisServerAddress)"
-
         let configSteps = """
         Configuration completed:
         ✓ NIS domain: \(nisDomainName)
         ✓ NIS server: \(nisServerAddress)
         ✓ Services started (ypbind, nfsclient, lockd)
-        \(mountInfo)
+        ✓ /home mounted from \(nisServerAddress)
         """
 
         print("DEBUG CLIENT: NIS client setup completed successfully!")
@@ -1399,23 +1298,13 @@ SAVEHIST=10000
             _ = try await sshManager.executeCommand("service lockd stop 2>&1 || true")
             _ = try await sshManager.executeCommand("service nfsclient stop 2>&1 || true")
 
-            // Unmount NFS shares based on home directory style
-            if setupState.homeDirectoryStyle == .gnustep {
-                networkConfigStep = "Unmounting /Network..."
-                _ = try await sshManager.executeCommand("umount /Network 2>&1 || true")
+            // Unmount /home NFS share
+            networkConfigStep = "Unmounting /home..."
+            _ = try await sshManager.executeCommand("umount /home 2>&1 || true")
 
-                // Remove /Network from /etc/fstab
-                networkConfigStep = "Removing /Network from fstab..."
-                _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/:\\/Network/d' /etc/fstab")
-            } else {
-                // Traditional Unix: Unmount /home only
-                networkConfigStep = "Unmounting /home..."
-                _ = try await sshManager.executeCommand("umount /home 2>&1 || true")
-
-                // Remove /home from /etc/fstab
-                networkConfigStep = "Removing /home from fstab..."
-                _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/:\\/home/d' /etc/fstab")
-            }
+            // Remove /home from /etc/fstab
+            networkConfigStep = "Removing /home from fstab..."
+            _ = try await sshManager.executeCommand("/usr/bin/sed -i '' '/:\\/home/d' /etc/fstab")
 
             // Disable NIS client in rc.conf
             networkConfigStep = "Disabling NIS client..."
@@ -1447,12 +1336,6 @@ SAVEHIST=10000
             // Remove sudoers network-users config
             _ = try await sshManager.executeCommand("rm -f /usr/local/etc/sudoers.d/network-users 2>/dev/null || true")
 
-            // Remount /Network ZFS dataset (GNUstep only)
-            if setupState.homeDirectoryStyle == .gnustep {
-                networkConfigStep = "Remounting /Network ZFS dataset..."
-                _ = try await sshManager.executeCommand("zfs mount /Network 2>&1 || true")
-            }
-
             // Remove domain firewall rules if firewall is active
             networkConfigStep = "Removing firewall rules..."
             try await sshManager.disableDomainFirewallRules()
@@ -1462,17 +1345,13 @@ SAVEHIST=10000
             // Reload state
             await loadSetupState()
 
-            let unmountInfo = setupState.homeDirectoryStyle == .gnustep
-                ? "✓ /Network NFS unmounted and removed from fstab\n✓ /Network ZFS dataset remounted"
-                : "✓ /home NFS unmounted and removed from fstab"
-
             confirmationMessage = """
             Successfully left the network domain.
 
             Configuration removed:
             ✓ NIS client disabled
             ✓ NFS client disabled
-            \(unmountInfo)
+            ✓ /home NFS unmounted and removed from fstab
             ✓ nsswitch.conf restored to default
 
             This system is now configured as a standalone machine.
@@ -2590,33 +2469,19 @@ struct UsersAndGroupsContentView: View {
             return true
         }
 
-        // For Traditional Unix standalone, no setup required - ready to use immediately
-        if homeStyle == .unix && networkRole == .none {
+        // For standalone, no setup required - ready to use immediately
+        if networkRole == .none {
             return true
         }
 
-        // For Gershwin Standalone, check ZFS + user config
-        if networkRole == .none {
-            return zfsConfigured && userConfigured
-        }
-
-        // For Server/Client, also check network domain status
+        // For Server/Client, check network domain status
         let networkConfigured = viewModel.setupState.networkDomain?.status == .configured
-
-        // Traditional Unix Server/Client only needs ZFS + network (no zsh user config)
-        if homeStyle == .unix {
-            return zfsConfigured && networkConfigured
-        }
-
-        // Gershwin Server/Client needs ZFS + user config + network
-        return zfsConfigured && userConfigured && networkConfigured
+        return zfsConfigured && networkConfigured
     }
 
     private func domainStatus() -> SetupStatus {
         let zfsConfigured = viewModel.setupState.relevantZFSDatasets.allSatisfy { $0.status == .configured }
-        let userConfigured = viewModel.setupState.userConfig?.status == .configured
         let networkRole = viewModel.selectedNetworkRole
-        let homeStyle = viewModel.selectedHomeDirectoryStyle
 
         // If users already exist with UID >= 1001 and home in /home, system is already set up
         let hasExistingUnixUsers = viewModel.setupState.localUsers.contains { user in
@@ -2626,40 +2491,16 @@ struct UsersAndGroupsContentView: View {
             return .configured
         }
 
-        // For Traditional Unix standalone, no setup required - ready to use immediately
-        if homeStyle == .unix && networkRole == .none {
-            return .configured
-        }
-
-        // For Gershwin Standalone, check ZFS + user config
+        // For standalone, no setup required - ready to use immediately
         if networkRole == .none {
-            if zfsConfigured && userConfigured {
-                return .configured
-            } else if viewModel.setupState.relevantZFSDatasets.isEmpty && viewModel.setupState.userConfig == nil {
-                return .pending
-            } else {
-                return .partiallyConfigured
-            }
-        }
-
-        // For Server/Client, also check network domain status
-        let networkConfigured = viewModel.setupState.networkDomain?.status == .configured
-
-        // Traditional Unix Server/Client only needs ZFS + network (no zsh user config)
-        if homeStyle == .unix {
-            if zfsConfigured && networkConfigured {
-                return .configured
-            } else if viewModel.setupState.relevantZFSDatasets.isEmpty {
-                return .pending
-            } else {
-                return .partiallyConfigured
-            }
-        }
-
-        // Gershwin Server/Client needs ZFS + user config + network
-        if zfsConfigured && userConfigured && networkConfigured {
             return .configured
-        } else if viewModel.setupState.relevantZFSDatasets.isEmpty && viewModel.setupState.userConfig == nil {
+        }
+
+        // For Server/Client, check network domain status
+        let networkConfigured = viewModel.setupState.networkDomain?.status == .configured
+        if zfsConfigured && networkConfigured {
+            return .configured
+        } else if viewModel.setupState.relevantZFSDatasets.isEmpty {
             return .pending
         } else {
             return .partiallyConfigured
@@ -2908,37 +2749,24 @@ struct SystemSetupTab: View {
 
 struct DomainPhase: View {
     @ObservedObject var viewModel: UsersAndGroupsViewModel
-    @State private var packagesExpanded = false
-    @State private var userConfigExpanded = false
 
-    // Traditional Unix style check
+    // Traditional Unix style - always true since that's the only style now
     private var isTraditionalUnix: Bool {
-        viewModel.selectedHomeDirectoryStyle == .unix
+        true
     }
 
     private var packagesConfigured: Bool {
-        guard let config = viewModel.setupState.userConfig else { return false }
-        // Traditional Unix needs no packages, Gershwin needs zsh packages (sudo is optional via Netgroups)
-        if isTraditionalUnix {
-            return true
-        }
-        return config.zshInstalled && config.zshAutosuggestionsInstalled &&
-               config.zshCompletionsInstalled
+        // Traditional Unix needs no special packages
+        true
     }
 
     private var userConfigConfigured: Bool {
-        // Traditional Unix doesn't need user config (uses /bin/sh)
-        if isTraditionalUnix {
-            return true
-        }
-        guard let config = viewModel.setupState.userConfig else { return false }
-        // Only check relevant datasets based on home directory style
-        let zfsConfigured = viewModel.setupState.relevantZFSDatasets.allSatisfy { $0.status == .configured }
-        return zfsConfigured && config.status == .configured
+        // Traditional Unix doesn't need special user config (uses /bin/sh)
+        true
     }
 
     private var localConfigured: Bool {
-        packagesConfigured && userConfigConfigured
+        true
     }
 
     private var isConfiguredAsServer: Bool {
@@ -2995,38 +2823,6 @@ struct DomainPhase: View {
                     }
 
                 Divider()
-
-                // Home Directory Style picker
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Home Directory Style:")
-                        .font(.headline)
-
-                    Picker("Style", selection: $viewModel.selectedHomeDirectoryStyle) {
-                        ForEach(HomeDirectoryStyle.allCases, id: \.self) { style in
-                            HStack {
-                                Image(systemName: style.icon)
-                                Text("\(style.displayName) (\(style.description(forRole: viewModel.selectedNetworkRole)))")
-                            }
-                            .tag(style)
-                        }
-                    }
-                    .pickerStyle(.radioGroup)
-                    .disabled(viewModel.isHomeDirectoryStyleLocked)
-                    .onChange(of: viewModel.selectedHomeDirectoryStyle) { oldValue, newValue in
-                        Task {
-                            await viewModel.saveHomeDirectoryStyle()
-                            await viewModel.loadSetupState(updateNetworkRole: false)
-                        }
-                    }
-
-                    if let reason = viewModel.homeDirectoryStyleLockReason {
-                        Label(reason, systemImage: "lock.fill")
-                            .font(.caption)
-                            .foregroundColor(.orange)
-                    }
-                }
-
-                Divider()
             }
 
             // Show current role info if already configured
@@ -3071,54 +2867,6 @@ struct DomainPhase: View {
                 }
 
                 Divider()
-            }
-
-            // Required Packages Section (only shown for Gershwin style)
-            if !isTraditionalUnix {
-                ExpandableConfigSection(
-                    title: "Required Packages",
-                    isConfigured: packagesConfigured,
-                    isExpanded: $packagesExpanded
-                ) {
-                    if let config = viewModel.setupState.userConfig {
-                        // Gershwin needs zsh packages (sudo is optional via Netgroups section)
-                        ConfigDetailRow(label: "zsh", isConfigured: config.zshInstalled)
-                        ConfigDetailRow(label: "zsh-autosuggestions", isConfigured: config.zshAutosuggestionsInstalled)
-                        ConfigDetailRow(label: "zsh-completions", isConfigured: config.zshCompletionsInstalled)
-                    }
-                }
-
-                // User Configuration Section
-                ExpandableConfigSection(
-                    title: "User Configuration",
-                    isConfigured: userConfigConfigured,
-                    isExpanded: $userConfigExpanded
-                ) {
-                    // ZFS Datasets
-                    Text("ZFS Datasets")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .padding(.top, 4)
-
-                    ForEach(viewModel.setupState.relevantZFSDatasets, id: \.name) { dataset in
-                        ConfigDetailRow(
-                            label: dataset.name,
-                            isConfigured: dataset.status == .configured,
-                            detail: dataset.exists ? (dataset.correctLocation ? nil : "Wrong location") : "Missing"
-                        )
-                    }
-
-                    // ZSH configuration
-                    if let config = viewModel.setupState.userConfig {
-                        Text("ZSH Configuration")
-                            .font(.caption)
-                            .fontWeight(.medium)
-                            .padding(.top, 8)
-
-                        ConfigDetailRow(label: "/usr/local/etc/zshrc", isConfigured: config.zshrcConfigured)
-                        ConfigDetailRow(label: "/usr/share/skel/dot.zshrc", isConfigured: config.zshrcConfigured)
-                    }
-                }
             }
 
             // Netgroups Section (shown for server/client roles)
@@ -3166,30 +2914,12 @@ struct DomainPhase: View {
             }
 
             // Buttons based on role and state
-            // Initialize button only for Gershwin standalone (Traditional Unix doesn't need setup)
-            if viewModel.selectedNetworkRole == .none && !localConfigured && !isTraditionalUnixStandalone {
-                // Gershwin Standalone - Initialize button
-                Divider()
-                Button(action: {
-                    Task {
-                        guard await viewModel.setupZFSDatasets() else { return }
-                        await viewModel.setupUserConfig()
-                    }
-                }) {
-                    Label("Initialize", systemImage: "gear")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(viewModel.isLoading)
-            } else if viewModel.selectedNetworkRole == .server && !isConfiguredAsServer {
+            if viewModel.selectedNetworkRole == .server && !isConfiguredAsServer {
                 // Server selected but not configured
                 Divider()
                 Button(action: {
                     Task {
                         guard await viewModel.setupZFSDatasets() else { return }
-                        // Gershwin needs full user config, Traditional Unix has no required packages
-                        if !isTraditionalUnix {
-                            guard await viewModel.setupUserConfig() else { return }
-                        }
                         await viewModel.setupNetworkDomain()
                     }
                 }) {
@@ -3203,10 +2933,6 @@ struct DomainPhase: View {
                 Button(action: {
                     Task {
                         guard await viewModel.setupZFSDatasets() else { return }
-                        // Gershwin needs full user config, Traditional Unix has no required packages
-                        if !isTraditionalUnix {
-                            guard await viewModel.setupUserConfig() else { return }
-                        }
                         await viewModel.setupNetworkDomain()
                     }
                 }) {
@@ -5389,7 +5115,7 @@ struct EditGroupSheet: View {
 
 struct UserRow: View {
     let user: LocalUser
-    let privilegeLabel: String  // "wheel" for Traditional Unix, "sudo" for Gershwin/domain
+    let privilegeLabel: String  // "wheel" for standalone, "sudo" for domain
     let onFinger: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
