@@ -775,6 +775,10 @@ struct JailCreateSheet: View {
         }
         .frame(width: 600, height: 550)
         .onAppear {
+            // Default to thick for UFS mode
+            if !viewModel.jailSetupStatus.hasZFS {
+                jailType = .thick
+            }
             Task {
                 await viewModel.loadTemplates()
                 await viewModel.loadNetworkInfo()
@@ -805,41 +809,45 @@ struct JailCreateSheet: View {
                     .textFieldStyle(.roundedBorder)
             }
 
-            Section("Jail Type") {
-                Picker("Type", selection: $jailType) {
-                    ForEach(JailType.allCases) { type in
-                        HStack {
-                            Image(systemName: type.icon)
-                            Text(type.rawValue)
+            // Only show jail type picker for ZFS (UFS defaults to thick)
+            if viewModel.jailSetupStatus.hasZFS {
+                Section("Jail Type") {
+                    Picker("Type", selection: $jailType) {
+                        ForEach(JailType.allCases) { type in
+                            HStack {
+                                Image(systemName: type.icon)
+                                Text(type.rawValue)
+                            }
+                            .tag(type)
                         }
-                        .tag(type)
                     }
+                    .pickerStyle(.radioGroup)
+
+                    Text(jailType.description)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
-                .pickerStyle(.radioGroup)
 
-                Text(jailType.description)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            if jailType == .thin {
-                Section("Template") {
-                    if viewModel.templates.isEmpty {
-                        Text("No templates found. Create a template first in Setup.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    } else {
-                        Picker("Template", selection: $selectedTemplate) {
-                            Text("Select template...").tag(nil as JailTemplate?)
-                            ForEach(viewModel.templates) { template in
-                                Text("\(template.name) (\(template.version))").tag(template as JailTemplate?)
+                if jailType == .thin {
+                    Section("Template") {
+                        if viewModel.templates.isEmpty {
+                            Text("No templates found. Create a template first in Setup.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        } else {
+                            Picker("Template", selection: $selectedTemplate) {
+                                Text("Select template...").tag(nil as JailTemplate?)
+                                ForEach(viewModel.templates) { template in
+                                    Text("\(template.name) (\(template.version))").tag(template as JailTemplate?)
+                                }
                             }
                         }
                     }
                 }
             }
 
-            if jailType == .thick {
+            // Show FreeBSD version picker for thick jails or UFS mode
+            if jailType == .thick || !viewModel.jailSetupStatus.hasZFS {
                 Section("FreeBSD Version") {
                     if isLoadingReleases {
                         HStack {
@@ -1832,7 +1840,7 @@ struct JailSetupWizardView: View {
                         detail: viewModel.hasBridges ? "\(viewModel.bridges.count) bridge(s) available" : "No bridges configured"
                     )
                     StatusRow(
-                        title: "ZFS Datasets",
+                        title: useZfs ? "ZFS Datasets" : "Jail Directory",
                         isComplete: viewModel.jailSetupStatus.directoriesExist,
                         detail: viewModel.jailSetupStatus.directoriesExist ? "Created" : "Not created"
                     )
@@ -1855,18 +1863,11 @@ struct JailSetupWizardView: View {
                 // Setup form
                 Form {
                     Section("Storage Mode") {
-                        if pools.isEmpty {
-                            // Only show picker when no ZFS pools available
-                            Picker("Storage Mode", selection: $storageMode) {
-                                Text("ZFS").tag("zfs")
-                                Text("UFS").tag("ufs")
-                            }
-                            .pickerStyle(.segmented)
-                        } else {
-                            // ZFS pools available - use ZFS
-                            Text("ZFS")
-                                .font(.headline)
+                        Picker("Storage Mode", selection: $storageMode) {
+                            Text("ZFS").tag("zfs")
+                            Text("UFS").tag("ufs")
                         }
+                        .pickerStyle(.segmented)
 
                         if useZfs {
                             Text("Uses ZFS datasets for jail storage. Supports thin jails (clones) and snapshots.")
@@ -1884,7 +1885,7 @@ struct JailSetupWizardView: View {
                     }
 
                     if useZfs {
-                        Section("ZFS Configuration") {
+                        Section {
                             if isLoadingPools {
                                 HStack {
                                     ProgressView()
@@ -1937,11 +1938,11 @@ struct JailSetupWizardView: View {
                             }
                         }
                     } else {
-                        Section("UFS Configuration") {
-                            TextField("Base Directory:", text: $datasetName)
+                        Section {
+                            TextField("Directory Path:", text: $datasetName)
                                 .textFieldStyle(.roundedBorder)
 
-                            Text("Will create directories at: /\(datasetName)/templates, /\(datasetName)/media, /\(datasetName)/containers")
+                            Text("Will create directories at: /\(datasetName)/media, /\(datasetName)/containers")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -2284,7 +2285,8 @@ class JailsViewModel: ObservableObject {
             ipAddress: ipAddress,
             bridgeName: bridgeName,
             template: template,
-            freebsdVersion: freebsdVersion
+            freebsdVersion: freebsdVersion,
+            useZFS: jailSetupStatus.hasZFS
         )
         await loadJails()
     }

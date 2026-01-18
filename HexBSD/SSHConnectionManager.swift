@@ -3505,7 +3505,7 @@ extension SSHConnectionManager {
         return status
     }
 
-    /// Create a new jail (Thick or Thin ZFS-based)
+    /// Create a new jail (Thick or Thin, ZFS or UFS-based)
     func createJail(
         name: String,
         hostname: String,
@@ -3514,14 +3514,15 @@ extension SSHConnectionManager {
         ipAddress: String,
         bridgeName: String,
         template: JailTemplate?,
-        freebsdVersion: String
+        freebsdVersion: String,
+        useZFS: Bool = true
     ) async throws {
         guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
-        print("DEBUG: Creating jail '\(name)' of type \(type.rawValue)")
+        print("DEBUG: Creating jail '\(name)' of type \(type.rawValue) using \(useZFS ? "ZFS" : "UFS")")
 
         // Determine jail path
         let basePath = "/jails/containers"
@@ -3555,15 +3556,20 @@ extension SSHConnectionManager {
         _ = try await executeCommand(writeConfigCommand)
         print("DEBUG: Wrote jail config to /etc/jail.conf.d/\(name).conf")
 
-        // Create jail directory structure based on type (all use ZFS)
-        switch type {
-        case .thick:
-            // Thick jail: dedicated ZFS dataset with full copy
-            try await createThickZFSJail(name: name, path: path, template: template?.name, freebsdVersion: freebsdVersion)
+        // Create jail directory structure based on type and storage backend
+        if useZFS {
+            switch type {
+            case .thick:
+                // Thick jail: dedicated ZFS dataset with full copy
+                try await createThickZFSJail(name: name, path: path, template: template?.name, freebsdVersion: freebsdVersion)
 
-        case .thin:
-            // Thin jail: ZFS clone from template snapshot
-            try await createThinZFSJail(name: name, path: path, template: template?.name)
+            case .thin:
+                // Thin jail: ZFS clone from template snapshot
+                try await createThinZFSJail(name: name, path: path, template: template?.name)
+            }
+        } else {
+            // UFS mode - only thick jails supported
+            try await createThickUFSJail(name: name, path: path, freebsdVersion: freebsdVersion)
         }
 
         print("DEBUG: Jail '\(name)' created successfully")
@@ -3698,6 +3704,53 @@ extension SSHConnectionManager {
             cp /etc/localtime '\(path)/etc/localtime' 2>/dev/null || true
 
             echo "Thick ZFS jail '\(name)' created with dataset \(jailDataset)"
+        }
+        """
+        _ = try await executeCommand(createCommand)
+    }
+
+    /// Create a thick jail using UFS directories (no ZFS)
+    private func createThickUFSJail(name: String, path: String, freebsdVersion: String) async throws {
+        print("DEBUG: Creating thick UFS jail '\(name)' at \(path)")
+
+        let version = freebsdVersion.isEmpty ? "14.2-RELEASE" : freebsdVersion
+
+        // Detect host architecture for correct download URL
+        let archCommand = "uname -m"
+        let hostArch = try await executeCommand(archCommand).trimmingCharacters(in: .whitespacesAndNewlines)
+        let archPath: String
+        switch hostArch {
+        case "aarch64", "arm64":
+            archPath = "arm64/aarch64"
+        case "amd64", "x86_64":
+            archPath = "amd64"
+        default:
+            archPath = hostArch
+        }
+        let baseUrl = "https://download.freebsd.org/releases/\(archPath)/\(version)"
+
+        let createCommand = """
+        {
+            # Create jail directory
+            mkdir -p '\(path)'
+
+            # Download and extract base if needed
+            media_dir="/jails/media/\(version)"
+            mkdir -p "$media_dir"
+
+            if [ ! -f "$media_dir/base.txz" ]; then
+                echo "Downloading base.txz for \(version)..."
+                fetch -o "$media_dir/base.txz" "\(baseUrl)/base.txz" || exit 1
+            fi
+
+            echo "Extracting base system to \(path)..."
+            tar -xf "$media_dir/base.txz" -C '\(path)'
+
+            # Copy resolv.conf and localtime
+            cp /etc/resolv.conf '\(path)/etc/resolv.conf' 2>/dev/null || true
+            cp /etc/localtime '\(path)/etc/localtime' 2>/dev/null || true
+
+            echo "Thick UFS jail '\(name)' created at \(path)"
         }
         """
         _ = try await executeCommand(createCommand)
@@ -3882,6 +3935,7 @@ extension SSHConnectionManager {
     }
 
     /// Setup jail directories using regular UFS directories (no ZFS)
+    /// Note: Templates are not supported for UFS - only thick jails
     func setupJailDirectoriesUFS(basePath: String) async throws -> String {
         guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
@@ -3892,15 +3946,13 @@ extension SSHConnectionManager {
 
         let command = """
         {
-            # Create base directory and subdirectories
-            mkdir -p '\(basePath)/templates'
+            # Create base directory and subdirectories (no templates for UFS)
             mkdir -p '\(basePath)/media'
             mkdir -p '\(basePath)/containers'
             mkdir -p /etc/jail.conf.d
 
             echo "Created UFS directories:"
             echo "  \(basePath)"
-            echo "  \(basePath)/templates"
             echo "  \(basePath)/media"
             echo "  \(basePath)/containers"
         }
