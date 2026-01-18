@@ -2482,6 +2482,9 @@ struct DatasetsView: View {
     struct ScheduledReplicationInfo: Identifiable {
         let id = UUID()
         let command: String
+        let targetUser: String
+        let targetHost: String
+        let targetDataset: String
     }
 
     // Build hierarchical tree from flat dataset list
@@ -2814,8 +2817,22 @@ struct DatasetsView: View {
                     }
                 },
                 onSchedule: { command in
+                    // Compute the destination dataset path
+                    let sourceBaseName = info.source.name.components(separatedBy: "@")[0]
+                    let destDataset: String
+                    if let parent = info.target {
+                        let lastComponent = sourceBaseName.components(separatedBy: "/").last ?? sourceBaseName
+                        destDataset = "\(parent.name)/\(lastComponent)"
+                    } else {
+                        destDataset = sourceBaseName
+                    }
                     pendingReplicationInfo = nil
-                    pendingScheduledReplication = ScheduledReplicationInfo(command: command)
+                    pendingScheduledReplication = ScheduledReplicationInfo(
+                        command: command,
+                        targetUser: info.server.username,
+                        targetHost: info.server.host,
+                        targetDataset: destDataset
+                    )
                 },
                 onCancel: {
                     pendingReplicationInfo = nil
@@ -2846,11 +2863,19 @@ struct DatasetsView: View {
                                 }
 
                                 if retentionSeconds > 0 {
-                                    // Add pruning command using base FreeBSD tools with epoch timestamps
+                                    // Add pruning command using zfs list -p for epoch timestamps
                                     // Prunes snapshots matching 'auto-' prefix older than specified seconds
                                     // NOTE: % must be escaped as \% in crontab (% means newline in cron)
-                                    let pruneScript = " && cutoff=$(($(date +\\%s) - \(retentionSeconds))); zfs list -H -t snapshot -o name,creation | grep '@auto-' | while read snap creation; do snap_epoch=$(date -j -f '\\%a \\%b \\%d \\%H:\\%M \\%Y' \"$creation\" +\\%s 2>/dev/null || echo 0); if [ \"$snap_epoch\" -lt \"$cutoff\" ]; then zfs destroy \"$snap\"; fi; done"
-                                    fullCommand += pruneScript
+                                    // Using -p flag gives epoch timestamps directly, avoiding date parsing issues
+
+                                    // Local pruning script
+                                    let localPruneScript = " && cutoff=$(($(date +\\%s) - \(retentionSeconds))); zfs list -p -H -t snapshot -o name,creation | grep '@auto-' | while read snap creation; do if [ \"$creation\" -lt \"$cutoff\" ]; then zfs destroy \"$snap\"; fi; done"
+
+                                    // Remote pruning script - prune snapshots on the target server as well
+                                    // Uses the same id_replication SSH key used for replication
+                                    let remotePruneScript = " && ssh -i ~/.ssh/id_replication -o StrictHostKeyChecking=no \(info.targetUser)@\(info.targetHost) \"cutoff=\\$(($(date +\\%s) - \(retentionSeconds))); zfs list -p -H -t snapshot -o name,creation \(info.targetDataset) 2>/dev/null | grep @auto- | while read snap creation; do if [ \\\"\\$creation\\\" -lt \\\"\\$cutoff\\\" ]; then zfs destroy \\\"\\$snap\\\"; fi; done\""
+
+                                    fullCommand += localPruneScript + remotePruneScript
                                 }
                             }
 
