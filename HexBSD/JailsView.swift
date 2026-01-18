@@ -1854,11 +1854,18 @@ struct JailSetupWizardView: View {
                 // Setup form
                 Form {
                     Section("Storage Mode") {
-                        Picker("Storage Mode", selection: $storageMode) {
-                            Text("ZFS").tag("zfs")
-                            Text("UFS").tag("ufs")
+                        if pools.isEmpty {
+                            // Only show picker when no ZFS pools available
+                            Picker("Storage Mode", selection: $storageMode) {
+                                Text("ZFS").tag("zfs")
+                                Text("UFS").tag("ufs")
+                            }
+                            .pickerStyle(.segmented)
+                        } else {
+                            // ZFS pools available - use ZFS
+                            Text("ZFS")
+                                .font(.headline)
                         }
-                        .pickerStyle(.segmented)
 
                         if useZfs {
                             Text("Uses ZFS datasets for jail storage. Supports thin jails (clones) and snapshots.")
@@ -2012,6 +2019,11 @@ struct JailSetupWizardView: View {
         setupError = nil
 
         pools = await viewModel.listZFSPools()
+
+        // If pools exist, use ZFS mode
+        if !pools.isEmpty {
+            storageMode = "zfs"
+        }
 
         // Auto-select if only one pool
         if pools.count == 1 {
