@@ -383,6 +383,9 @@ struct JailDetailView: View {
     @State private var showConfirmDelete = false
     @State private var showEditConfig = false
     @State private var isPerformingAction = false
+    @State private var showUpdateSheet = false
+    @State private var updateOutput = ""
+    @State private var isUpdating = false
 
     var body: some View {
         ScrollView {
@@ -466,6 +469,16 @@ struct JailDetailView: View {
                                     Label("Edit Config", systemImage: "doc.text")
                                 }
                                 .buttonStyle(.bordered)
+
+                                if jail.jailType == .thick {
+                                    Button(action: {
+                                        showUpdateSheet = true
+                                    }) {
+                                        Label("Update", systemImage: "arrow.triangle.2.circlepath")
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .disabled(isPerformingAction || jail.isRunning)
+                                }
 
                                 Button(action: {
                                     showConfirmDelete = true
@@ -581,6 +594,49 @@ struct JailDetailView: View {
                 EditJailConfigSheet(jail: jail, viewModel: viewModel)
             }
         }
+        .sheet(isPresented: $showUpdateSheet) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Updating \(jail.name)...")
+                    .font(.headline)
+
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        Text(updateOutput)
+                            .font(.system(.body, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                            .id("output")
+                    }
+                    .frame(minHeight: 300)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .cornerRadius(8)
+                    .onChange(of: updateOutput) { _, _ in
+                        withAnimation {
+                            proxy.scrollTo("output", anchor: .bottom)
+                        }
+                    }
+                }
+
+                HStack {
+                    if isUpdating {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("Running freebsd-update...")
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Button("Close") {
+                        showUpdateSheet = false
+                    }
+                    .disabled(isUpdating)
+                }
+            }
+            .padding()
+            .frame(minWidth: 500)
+            .onAppear {
+                startUpdate()
+            }
+        }
         .alert("Stop Jail", isPresented: $showConfirmStop) {
             Button("Cancel", role: .cancel) {}
             Button("Stop", role: .destructive) {
@@ -649,6 +705,25 @@ struct JailDetailView: View {
             object: nil,
             userInfo: ["command": command]
         )
+    }
+
+    private func startUpdate() {
+        updateOutput = ""
+        isUpdating = true
+        viewModel.isLongRunningOperation = true
+
+        Task {
+            do {
+                try await viewModel.updateJail(jail) { output in
+                    updateOutput += output
+                }
+                updateOutput += "\n\nUpdate completed successfully."
+            } catch {
+                updateOutput += "\n\nError: \(error.localizedDescription)"
+            }
+            isUpdating = false
+            viewModel.isLongRunningOperation = false
+        }
     }
 }
 
@@ -1639,6 +1714,10 @@ struct TemplatesTabView: View {
     @State private var createError: String?
     @State private var showDeleteConfirm = false
     @State private var templateToDelete: JailTemplate?
+    @State private var updatingTemplate: JailTemplate?
+    @State private var updateOutput = ""
+    @State private var showUpdateSheet = false
+    @State private var isUpdating = false
 
     var body: some View {
         HSplitView {
@@ -1687,6 +1766,20 @@ struct TemplatesTabView: View {
                                         .foregroundColor(.secondary)
                                 }
                                 Spacer()
+                                Text(template.version)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .padding(.trailing, 8)
+                                Button(action: {
+                                    updatingTemplate = template
+                                    showUpdateSheet = true
+                                }) {
+                                    Image(systemName: "arrow.triangle.2.circlepath")
+                                        .foregroundColor(.blue)
+                                }
+                                .buttonStyle(.borderless)
+                                .help("Update template with freebsd-update")
+
                                 Button(action: {
                                     templateToDelete = template
                                     showDeleteConfirm = true
@@ -1811,6 +1904,49 @@ struct TemplatesTabView: View {
                 Text("Are you sure you want to delete the template '\(template.name)'? This cannot be undone.")
             }
         }
+        .sheet(isPresented: $showUpdateSheet) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Updating \(updatingTemplate?.name ?? "template")...")
+                    .font(.headline)
+
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        Text(updateOutput)
+                            .font(.system(.body, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                            .id("output")
+                    }
+                    .frame(minHeight: 300)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .cornerRadius(8)
+                    .onChange(of: updateOutput) { _, _ in
+                        withAnimation {
+                            proxy.scrollTo("output", anchor: .bottom)
+                        }
+                    }
+                }
+
+                HStack {
+                    if isUpdating {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("Running freebsd-update...")
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Button("Close") {
+                        showUpdateSheet = false
+                    }
+                    .disabled(isUpdating)
+                }
+            }
+            .padding()
+            .frame(minWidth: 500)
+            .onAppear {
+                startTemplateUpdate()
+            }
+        }
     }
 
     private func loadAvailableReleases() async {
@@ -1862,6 +1998,29 @@ struct TemplatesTabView: View {
             await viewModel.loadTemplates()
         } catch {
             createError = "Failed to delete template: \(error.localizedDescription)"
+        }
+    }
+
+    private func startTemplateUpdate() {
+        guard let template = updatingTemplate else { return }
+
+        updateOutput = ""
+        isUpdating = true
+        viewModel.isLongRunningOperation = true
+
+        Task {
+            do {
+                try await viewModel.updateTemplate(template) { output in
+                    updateOutput += output
+                }
+                updateOutput += "\n\nUpdate completed successfully."
+                // Reload templates to show updated version
+                await viewModel.loadTemplates()
+            } catch {
+                updateOutput += "\n\nError: \(error.localizedDescription)"
+            }
+            isUpdating = false
+            viewModel.isLongRunningOperation = false
         }
     }
 }
@@ -2448,5 +2607,13 @@ class JailsViewModel: ObservableObject {
 
     func deleteTemplate(_ template: JailTemplate) async throws {
         try await sshManager.deleteJailTemplate(template)
+    }
+
+    func updateJail(_ jail: Jail, onOutput: @escaping (String) -> Void) async throws {
+        try await sshManager.updateJailBaseStreaming(path: jail.path, onOutput: onOutput)
+    }
+
+    func updateTemplate(_ template: JailTemplate, onOutput: @escaping (String) -> Void) async throws {
+        try await sshManager.updateJailBaseStreaming(path: template.path, onOutput: onOutput)
     }
 }

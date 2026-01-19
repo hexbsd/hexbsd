@@ -3329,14 +3329,20 @@ extension SSHConnectionManager {
                     if [ -d "$template" ] && [ -x "$template/bin/sh" ]; then
                         name=$(basename "$template")
                         path="$template"
+                        # Get actual FreeBSD version from the template
+                        if [ -x "$template/bin/freebsd-version" ]; then
+                            version=$("$template/bin/freebsd-version" -u 2>/dev/null || echo "Unknown")
+                        else
+                            version="Unknown"
+                        fi
                         # Check if it's a ZFS dataset
                         zfs_info=$(zfs list -H -o name "$template" 2>/dev/null || echo "")
                         if [ -n "$zfs_info" ]; then
                             # Check for snapshot
                             snapshot=$(zfs list -H -t snapshot -o name "$zfs_info@template" 2>/dev/null || echo "")
-                            echo "TEMPLATE:$name:$path:zfs:${snapshot:+yes}"
+                            echo "TEMPLATE:$name:$path:zfs:${snapshot:+yes}:$version"
                         else
-                            echo "TEMPLATE:$name:$path:ufs:no"
+                            echo "TEMPLATE:$name:$path:ufs:no:$version"
                         fi
                     fi
                 done
@@ -3354,20 +3360,19 @@ extension SSHConnectionManager {
             guard trimmed.hasPrefix("TEMPLATE:") else { continue }
 
             let parts = trimmed.dropFirst(9).components(separatedBy: ":")
-            guard parts.count >= 4 else { continue }
+            guard parts.count >= 5 else { continue }
 
             let name = parts[0]
             let path = parts[1]
             let isZFS = parts[2] == "zfs"
-            let hasSnapshot = parts.count >= 4 && parts[3] == "yes"
-
-            // Try to extract version from path or name
-            let version = extractVersion(from: name) ?? extractVersion(from: path) ?? "Unknown"
+            let hasSnapshot = parts[3] == "yes"
+            // Version is in parts[4], may contain colons so join remaining parts
+            let version = parts[4...].joined(separator: ":").trimmingCharacters(in: .whitespacesAndNewlines)
 
             templates.append(JailTemplate(
                 name: name,
                 path: path,
-                version: version,
+                version: version.isEmpty ? "Unknown" : version,
                 isZFS: isZFS,
                 hasSnapshot: hasSnapshot
             ))
@@ -4362,6 +4367,25 @@ extension SSHConnectionManager {
         """
         _ = try await executeCommand(command)
         print("DEBUG: Template deleted")
+    }
+
+    /// Update a jail or template base system using freebsd-update
+    /// Works for both thick jails and templates
+    func updateJailBaseStreaming(path: String, onOutput: @escaping (String) -> Void) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        print("DEBUG: Running freebsd-update for path: \(path)")
+
+        // Set PAGER=cat to prevent freebsd-update from using interactive pager
+        let command = "PAGER=cat freebsd-update -b '\(path)' fetch install"
+        let exitCode = try await executeCommandStreaming(command, onOutput: onOutput)
+        if exitCode != 0 {
+            throw NSError(domain: "SSHConnectionManager", code: exitCode,
+                         userInfo: [NSLocalizedDescriptionKey: "freebsd-update failed with exit code \(exitCode)"])
+        }
     }
 
     /// Enable jails in rc.conf
