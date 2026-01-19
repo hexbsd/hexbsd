@@ -2672,6 +2672,11 @@ struct PoudriereConfigView: View {
             }
             // Check if distfiles cache directory exists
             await checkDistfilesCacheExists()
+
+            // Enable save button if distfiles doesn't exist (needs initial setup)
+            if !distfilesCacheExists {
+                hasChanges = true
+            }
         } catch {
             viewModel.error = "Failed to load configuration: \(error.localizedDescription)"
         }
