@@ -472,14 +472,14 @@ struct JailDetailView: View {
                                 }
                                 .buttonStyle(.bordered)
 
-                                if jail.jailType == .thick {
+                                if jail.jailType != nil {
                                     Button(action: {
                                         showUpdateSheet = true
                                     }) {
                                         Label("Update", systemImage: "arrow.triangle.2.circlepath")
                                     }
                                     .buttonStyle(.bordered)
-                                    .disabled(isPerformingAction || jail.isRunning)
+                                    .disabled(isPerformingAction)
                                 }
 
                                 Button(action: {
@@ -725,7 +725,11 @@ struct JailDetailView: View {
                 try await viewModel.updateJail(jail) { output in
                     updateOutput += output
                 }
-                updateOutput += "\n\nUpdate completed successfully."
+                if jail.isRunning {
+                    updateOutput += "\n\nUpdate completed successfully.\nRestart the jail for changes to take effect."
+                } else {
+                    updateOutput += "\n\nUpdate completed successfully."
+                }
                 // Reload jails to show updated version
                 await viewModel.loadJails()
             } catch {
@@ -2648,6 +2652,6 @@ class JailsViewModel: ObservableObject {
     }
 
     func updateTemplate(_ template: JailTemplate, onOutput: @escaping (String) -> Void) async throws {
-        try await sshManager.updateJailBaseStreaming(path: template.path, onOutput: onOutput)
+        try await sshManager.updateTemplateStreaming(path: template.path, onOutput: onOutput)
     }
 }

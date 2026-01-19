@@ -3400,9 +3400,8 @@ extension SSHConnectionManager {
                         # Check if it's a ZFS dataset
                         zfs_info=$(zfs list -H -o name "$template" 2>/dev/null || echo "")
                         if [ -n "$zfs_info" ]; then
-                            # Check for snapshot
-                            snapshot=$(zfs list -H -t snapshot -o name "$zfs_info@template" 2>/dev/null || echo "")
-                            echo "TEMPLATE:$name:$path:zfs:${snapshot:+yes}:$version"
+                            # ZFS templates can always create thin jails (snapshots are created on-demand)
+                            echo "TEMPLATE:$name:$path:zfs:yes:$version"
                         else
                             echo "TEMPLATE:$name:$path:ufs:no:$version"
                         fi
@@ -4063,18 +4062,23 @@ extension SSHConnectionManager {
         print("DEBUG: Template dataset: \(templateDataset)")
         print("DEBUG: Jail dataset: \(jailDataset)")
 
-        // Clone from template snapshot
+        // Clone from template - create a unique snapshot for this jail
+        let snapshotName = "clone-\(name)"
         let cloneCommand = """
         {
-            # Check if template snapshot exists
-            if ! zfs list -H -t snapshot '\(templateDataset)@template' >/dev/null 2>&1; then
-                echo "ERROR: Template snapshot \(templateDataset)@template does not exist" >&2
+            # Check if template dataset exists
+            if ! zfs list -H '\(templateDataset)' >/dev/null 2>&1; then
+                echo "ERROR: Template dataset \(templateDataset) does not exist" >&2
                 exit 1
             fi
 
+            # Create a unique snapshot for this jail
+            echo "Creating snapshot \(templateDataset)@\(snapshotName)..."
+            zfs snapshot '\(templateDataset)@\(snapshotName)' 2>&1
+
             # Clone the snapshot
-            echo "Cloning \(templateDataset)@template to \(jailDataset)..."
-            zfs clone '\(templateDataset)@template' '\(jailDataset)' 2>&1
+            echo "Cloning \(templateDataset)@\(snapshotName) to \(jailDataset)..."
+            zfs clone '\(templateDataset)@\(snapshotName)' '\(jailDataset)' 2>&1
 
             # Set mountpoint
             zfs set mountpoint='\(path)' '\(jailDataset)' 2>&1
@@ -4310,15 +4314,10 @@ extension SSHConnectionManager {
         cp /etc/resolv.conf '\(templatePath)/etc/resolv.conf' 2>/dev/null || true
         cp /etc/localtime '\(templatePath)/etc/localtime' 2>/dev/null || true
 
-        # Create template snapshot for thin jails
-        echo "Creating template snapshot..."
-        zfs snapshot "$template_ds@template"
-
         echo ""
         echo "Template '\(name)' created successfully:"
         echo "  Dataset: $template_ds"
         echo "  Path: \(templatePath)"
-        echo "  Snapshot: $template_ds@template"
         """
 
         let exitCode = try await executeCommandStreaming(zfsCommand, onOutput: onOutput)
@@ -4380,15 +4379,10 @@ extension SSHConnectionManager {
             cp /etc/resolv.conf '\(templatePath)/etc/resolv.conf' 2>/dev/null || true
             cp /etc/localtime '\(templatePath)/etc/localtime' 2>/dev/null || true
 
-            # Create template snapshot for thin jails
-            echo "Creating template snapshot..."
-            zfs snapshot "$template_ds@template"
-
             echo ""
             echo "Template '\(name)' created successfully:"
             echo "  Dataset: $template_ds"
             echo "  Path: \(templatePath)"
-            echo "  Snapshot: $template_ds@template"
         }
         """
         return try await executeCommand(zfsCommand)
@@ -4404,23 +4398,39 @@ extension SSHConnectionManager {
         print("DEBUG: Deleting template '\(template.name)' at \(template.path)")
 
         // Try to find and destroy the ZFS dataset, then remove the directory
+        let templatePathClean = template.path.hasSuffix("/") ? String(template.path.dropLast()) : template.path
         let command = """
         {
             # Try to find ZFS dataset for this template
-            dataset=$(zfs list -H -o name,mountpoint 2>/dev/null | grep '\(template.path)$' | cut -f1)
+            template_path="\(templatePathClean)"
+            dataset=$(zfs list -H -o name "$template_path" 2>/dev/null)
 
             if [ -n "$dataset" ]; then
-                # Destroy any snapshots first
-                zfs list -H -t snapshot -o name -r "$dataset" 2>/dev/null | while read snap; do
-                    zfs destroy "$snap" 2>/dev/null || true
-                done
-                # Destroy the dataset
+                echo "Found ZFS dataset: $dataset"
+
+                # Get all snapshots and promote any clones (makes thin jails independent)
+                snapshots=$(zfs list -H -t snapshot -o name -r "$dataset" 2>/dev/null | grep "^$dataset@")
+                if [ -n "$snapshots" ]; then
+                    for snap in $snapshots; do
+                        clones=$(zfs list -H -o clones "$snap" 2>/dev/null | tr ',' '\\n' | grep -v '^-$' | grep -v '^$')
+                        if [ -n "$clones" ]; then
+                            echo "Promoting thin jails to independent datasets..."
+                            for clone in $clones; do
+                                echo "  Promoting: $clone"
+                                zfs promote "$clone"
+                            done
+                        fi
+                    done
+                fi
+
+                # Destroy the dataset recursively (includes any remaining snapshots)
+                echo "Destroying dataset: $dataset"
                 zfs destroy -r "$dataset"
-                echo "Destroyed ZFS dataset: $dataset"
-            elif [ -d '\(template.path)' ]; then
-                # Fallback: just remove the directory
-                rm -rf '\(template.path)'
-                echo "Removed directory: \(template.path)"
+                echo "Template deleted successfully."
+            elif [ -d '$template_path' ]; then
+                # Fallback: just remove the directory (UFS)
+                rm -rf '$template_path'
+                echo "Removed directory: $template_path"
             else
                 echo "Template not found"
                 exit 1
@@ -4431,8 +4441,7 @@ extension SSHConnectionManager {
         print("DEBUG: Template deleted")
     }
 
-    /// Update a jail or template base system using freebsd-update
-    /// Works for both thick jails and templates
+    /// Update a jail base system using freebsd-update
     func updateJailBaseStreaming(path: String, onOutput: @escaping (String) -> Void) async throws {
         guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
@@ -4447,6 +4456,33 @@ extension SSHConnectionManager {
         if exitCode != 0 {
             throw NSError(domain: "SSHConnectionManager", code: exitCode,
                          userInfo: [NSLocalizedDescriptionKey: "freebsd-update failed with exit code \(exitCode)"])
+        }
+    }
+
+    /// Update a template base system using freebsd-update and recreate the ZFS snapshot
+    /// This ensures thin jails created from this template will have the updated version
+    func updateTemplateStreaming(path: String, onOutput: @escaping (String) -> Void) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        print("DEBUG: Running freebsd-update for template at path: \(path)")
+
+        // Set PAGER=cat to prevent freebsd-update from using interactive pager
+        let command = "PAGER=cat freebsd-update -b '\(path)' fetch install"
+        let exitCode = try await executeCommandStreaming(command, onOutput: onOutput)
+        if exitCode != 0 {
+            throw NSError(domain: "SSHConnectionManager", code: exitCode,
+                         userInfo: [NSLocalizedDescriptionKey: "freebsd-update failed with exit code \(exitCode)"])
+        }
+
+        // Note: With per-jail snapshots, we don't need to recreate a shared @template snapshot.
+        // Each new thin jail will create its own snapshot from the current template state.
+        await MainActor.run {
+            onOutput("\n\nTemplate updated successfully.\n")
+            onOutput("New thin jails will use the updated base system.\n")
+            onOutput("Existing thin jails keep their version - update them individually if needed.\n")
         }
     }
 
