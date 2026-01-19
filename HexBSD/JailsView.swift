@@ -1036,8 +1036,17 @@ struct JailCreateSheet: View {
                 .pickerStyle(.segmented)
 
                 if ipMode == .staticIP {
-                    TextField("IP Address (e.g., 192.168.1.100/24)", text: $ipAddress)
+                    TextField("IP Address", text: $ipAddress)
                         .textFieldStyle(.roundedBorder)
+                    if !ipAddress.isEmpty && !ipAddress.contains("/") {
+                        Text("Netmask is required (e.g., 192.168.1.100/24)")
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    } else {
+                        Text("Enter IP with CIDR netmask (e.g., 192.168.1.100/24)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
 
@@ -1114,10 +1123,22 @@ struct JailCreateSheet: View {
     private var canProceed: Bool {
         switch currentStep {
         case 0:
-            return !jailName.isEmpty && jailName.range(of: "^[a-zA-Z0-9_-]+$", options: .regularExpression) != nil
+            guard !jailName.isEmpty && jailName.range(of: "^[a-zA-Z0-9_-]+$", options: .regularExpression) != nil else {
+                return false
+            }
+            // Thin jails require a template with a snapshot
+            if jailType == .thin {
+                guard let template = selectedTemplate, template.hasSnapshot else {
+                    return false
+                }
+            }
+            return true
         case 1:
+            // Bridge selection is required
+            guard selectedBridge != nil else { return false }
             if ipMode == .staticIP {
-                return !ipAddress.isEmpty
+                // Require IP address with netmask (e.g., 192.168.1.100/24)
+                return !ipAddress.isEmpty && ipAddress.contains("/")
             }
             return true
         default:
@@ -1127,6 +1148,9 @@ struct JailCreateSheet: View {
 
     private var canCreate: Bool {
         guard canProceed && !jailName.isEmpty else { return false }
+
+        // Bridge selection is required
+        guard selectedBridge != nil else { return false }
 
         // Thin jails require a template with a snapshot
         if jailType == .thin {
