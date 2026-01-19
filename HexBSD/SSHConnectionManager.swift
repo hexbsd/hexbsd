@@ -7323,6 +7323,13 @@ EOFPKG
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
+        // Check if bridge already exists
+        let existingBridges = try await executeCommand("ifconfig -l 2>/dev/null")
+        if existingBridges.components(separatedBy: .whitespaces).contains(name) {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Bridge \(name) already exists"])
+        }
+
         // Read existing configurations for member interfaces to determine bridge settings
         var primaryMemberUsesDHCP = false
         var primaryMemberIPv6Config: String?
@@ -7337,6 +7344,8 @@ EOFPKG
             }
         }
 
+        // Configure rc.conf - let service netif restart handle the actual creation
+
         // Reconfigure member interfaces for bridging
         for member in members {
             // Configure member interface for bridging - strip IP config, just bring it up
@@ -7347,36 +7356,7 @@ EOFPKG
             _ = try await executeCommand("sysrc -x ifconfig_\(member)_ipv6 2>/dev/null || true")
         }
 
-        // Create the bridge interface for immediate use
-        var output = try await executeCommand("ifconfig \(name) create 2>&1")
-        if output.contains("Permission denied") {
-            throw NSError(domain: "SSHConnectionManager", code: 1,
-                         userInfo: [NSLocalizedDescriptionKey: "Permission denied. Root access required."])
-        }
-        if output.contains("already exists") {
-            throw NSError(domain: "SSHConnectionManager", code: 1,
-                         userInfo: [NSLocalizedDescriptionKey: "Bridge \(name) already exists"])
-        }
-
-        // Add member interfaces
-        for member in members {
-            output = try await executeCommand("ifconfig \(name) addm \(member) 2>&1")
-        }
-
-        // Enable STP if requested
-        if stp {
-            _ = try await executeCommand("ifconfig \(name) stp \(members.first ?? "") 2>&1")
-        }
-
-        // Set IP address if provided, otherwise inherit from member
-        if let ip = ipAddress, let mask = netmask {
-            _ = try await executeCommand("ifconfig \(name) inet \(ip) netmask \(mask) 2>&1")
-        }
-
-        // Bring up the bridge
-        _ = try await executeCommand("ifconfig \(name) up 2>&1")
-
-        // Make persistent in rc.conf
+        // Add bridge to cloned_interfaces
         _ = try await executeCommand("sysrc cloned_interfaces+=\"\(name)\" 2>&1")
 
         // Build create_args for the bridge (used at boot time)
@@ -7412,7 +7392,30 @@ EOFPKG
             _ = try await executeCommand("sysrc ifconfig_\(name)_ipv6=\"\(ipv6Config)\" 2>&1")
         }
 
-        // Return true to indicate restart is required for proper boot configuration
+        // Verify rc.conf was actually updated before proceeding
+        let rcConf = try await executeCommand("cat /etc/rc.conf")
+
+        // Check that cloned_interfaces contains our bridge
+        if !rcConf.contains("cloned_interfaces=") || !rcConf.contains(name) {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Failed to add bridge to cloned_interfaces in rc.conf"])
+        }
+
+        // Check that bridge ifconfig is set
+        if !rcConf.contains("ifconfig_\(name)=") {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Failed to configure bridge interface in rc.conf"])
+        }
+
+        // Check that member interface is configured for bridging
+        if let firstMember = members.first {
+            if !rcConf.contains("ifconfig_\(firstMember)=") {
+                throw NSError(domain: "SSHConnectionManager", code: 1,
+                             userInfo: [NSLocalizedDescriptionKey: "Failed to configure member interface in rc.conf"])
+            }
+        }
+
+        // Return true to indicate network restart is required to apply changes
         return true
     }
 

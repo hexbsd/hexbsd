@@ -1011,6 +1011,8 @@ struct BridgesTabViewImpl: View {
     @State private var showError = false
     @State private var showRestartDialog = false
     @State private var restartMessage = ""
+    @State private var restartInterface: String?  // Interface that needs DHCP after restart
+    @State private var destroyInterface: String?  // Interface to destroy before restart (bridge deletion)
     @State private var showDeleteConfirmation = false
     @State private var bridgeToDelete: BridgeInterface?
 
@@ -1093,8 +1095,9 @@ struct BridgesTabViewImpl: View {
                             BridgeDetailView(bridge: bridge, viewModel: viewModel, onDeleteRequested: { bridgeToRemove in
                                 bridgeToDelete = bridgeToRemove
                                 showDeleteConfirmation = true
-                            }, onRestartNeeded: { message in
+                            }, onRestartNeeded: { message, dhcpInterface in
                                 restartMessage = message
+                                restartInterface = dhcpInterface
                                 showRestartDialog = true
                             })
                         } else {
@@ -1114,8 +1117,9 @@ struct BridgesTabViewImpl: View {
             }
         }
         .sheet(isPresented: $showCreateSheet) {
-            CreateBridgeSheet(viewModel: viewModel, onRestartNeeded: { message in
+            CreateBridgeSheet(viewModel: viewModel, onRestartNeeded: { message, dhcpInterface in
                 restartMessage = message
+                restartInterface = dhcpInterface
                 showRestartDialog = true
             })
         }
@@ -1133,13 +1137,18 @@ struct BridgesTabViewImpl: View {
             Button("Delete and Restart", role: .destructive) {
                 if let bridge = bridgeToDelete {
                     Task {
-                        let restartNeeded = await viewModel.deleteBridge(bridge.name)
-                        if selectedBridge?.name == bridge.name {
+                        // Store bridge and member info before deleting config
+                        let bridgeName = bridge.name
+                        let memberInterface = bridge.members.first
+                        let restartNeeded = await viewModel.deleteBridge(bridgeName)
+                        if selectedBridge?.name == bridgeName {
                             selectedBridge = nil
                         }
                         bridgeToDelete = nil
                         if restartNeeded {
-                            restartMessage = "Bridge configuration removed. Network settings have been configured for the member interface(s) in rc.conf.\n\nThe server will now restart to apply the changes. The IP address may change after restart."
+                            restartMessage = "Bridge configuration removed. Network settings have been configured for the member interface(s) in rc.conf.\n\nA network restart is required to apply the changes. The IP address may change."
+                            destroyInterface = bridgeName  // Bridge needs to be destroyed
+                            restartInterface = memberInterface  // DHCP will restart on the member interface
                             showRestartDialog = true
                         }
                     }
@@ -1150,19 +1159,23 @@ struct BridgesTabViewImpl: View {
                 if bridge.members.isEmpty {
                     Text("Are you sure you want to delete bridge '\(bridge.name)'?")
                 } else {
-                    Text("Deleting bridge '\(bridge.name)' will transfer its network settings to the member interface (\(bridge.members.first ?? "")).\n\nThis requires a server restart. The IP address may change.")
+                    Text("Deleting bridge '\(bridge.name)' will transfer its network settings to the member interface (\(bridge.members.first ?? "")).\n\nThis requires a network restart. The IP address may change.")
                 }
             } else {
                 Text("Are you sure you want to delete this bridge?")
             }
         }
-        .alert("Restart Required", isPresented: $showRestartDialog) {
-            Button("Restart Later", role: .cancel) {
+        .alert("Network Restart Required", isPresented: $showRestartDialog) {
+            Button("Later", role: .cancel) {
                 showRestartDialog = false
+                restartInterface = nil
+                destroyInterface = nil
             }
-            Button("Restart Now") {
+            Button("Restart Network") {
                 Task {
-                    await viewModel.restartServer()
+                    await viewModel.restartNetworking(dhcpInterface: restartInterface, destroyInterface: destroyInterface)
+                    restartInterface = nil
+                    destroyInterface = nil
                     // Disconnect to take user back to connections screen
                     await viewModel.disconnect()
                 }
@@ -1230,7 +1243,7 @@ struct BridgeDetailView: View {
     let bridge: BridgeInterface
     @ObservedObject var viewModel: BridgesViewModel
     var onDeleteRequested: ((BridgeInterface) -> Void)?
-    var onRestartNeeded: ((String) -> Void)?
+    var onRestartNeeded: ((String, String?) -> Void)?  // (message, interfaceForDHCP)
 
     var body: some View {
         ScrollView {
@@ -1332,7 +1345,7 @@ struct BridgeDetailView: View {
 struct CreateBridgeSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var viewModel: BridgesViewModel
-    var onRestartNeeded: ((String) -> Void)?
+    var onRestartNeeded: ((String, String?) -> Void)?  // (message, interfaceForDHCP)
 
     @State private var bridgeName = ""
     @State private var selectedMembers: Set<String> = []
@@ -1462,8 +1475,9 @@ struct CreateBridgeSheet: View {
             dismiss()
 
             if restartNeeded && !selectedMembers.isEmpty {
-                // Notify parent that restart is needed
-                onRestartNeeded?("Bridge created successfully. Network settings have been migrated from the member interface(s) to the bridge.\n\nA restart is required for the changes to take effect at boot time. The server's IP address may change after restart if DHCP is used.")
+                // Notify parent that network restart is needed
+                // Always pass bridge name - dhclient restart is harmless on static IP interfaces
+                onRestartNeeded?("Bridge configured successfully. Network settings have been migrated from the member interface(s) to the bridge.\n\nA network restart is required to apply the changes. The server's IP address may change if DHCP is used.", bridgeName)
             }
         } catch {
             createError = error.localizedDescription
@@ -1901,14 +1915,33 @@ class BridgesViewModel: ObservableObject {
         }
     }
 
-    /// Restart the server to apply network changes
-    func restartServer() async {
+    /// Restart networking services to apply network changes
+    /// - Parameter dhcpInterface: Optional interface name that needs dhclient restarted (nil for static IP)
+    /// - Parameter destroyInterface: Optional interface to destroy before restart (for bridge deletion)
+    func restartNetworking(dhcpInterface: String? = nil, destroyInterface: String? = nil) async {
         do {
-            // Use shutdown -r now for a clean restart
-            _ = try await sshManager.executeCommand("shutdown -r now 2>&1 &")
+            // Use daemon to run commands detached from our session
+            // This ensures the restart completes even after SSH disconnects
+            var commands: [String] = []
+
+            // Destroy interface first if specified (for bridge deletion)
+            if let iface = destroyInterface {
+                commands.append("ifconfig \(iface) destroy")
+            }
+
+            // Always restart netif
+            commands.append("service netif restart")
+
+            // Restart dhclient on specific interface if needed
+            if let iface = dhcpInterface {
+                commands.append("service dhclient restart \(iface)")
+            }
+
+            let command = "daemon -f sh -c '\(commands.joined(separator: "; "))'"
+            _ = try await sshManager.executeCommand(command)
             pendingRestartRequired = false
         } catch {
-            self.error = "Failed to initiate restart: \(error.localizedDescription)"
+            self.error = "Failed to initiate network restart: \(error.localizedDescription)"
         }
     }
 
