@@ -712,57 +712,140 @@ class SSHConnectionManager {
         progressCallback?("Download complete")
     }
 
-    /// Upload a directory recursively to the remote server
+    /// Upload a directory recursively to the remote server (legacy callback)
     func uploadDirectory(
         localURL: URL,
         remotePath: String,
         progressCallback: ((String) -> Void)?
     ) async throws {
-        guard let keyPath = connectedKeyPath else {
+        // Wrap the simple callback into the detailed callback format
+        try await uploadDirectory(
+            localURL: localURL,
+            remotePath: remotePath,
+            detailedProgressCallback: { _, _, _, fileName in
+                progressCallback?(fileName)
+            },
+            cancelCheck: nil
+        )
+    }
+
+    /// Upload a directory recursively to the remote server with detailed progress
+    /// Progress callback parameters: (bytesTransferred, totalBytes, transferRate, currentFileName)
+    func uploadDirectory(
+        localURL: URL,
+        remotePath: String,
+        detailedProgressCallback: ((Int64, Int64, String, String) -> Void)?,
+        cancelCheck: (() -> Bool)?
+    ) async throws {
+        guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
-                         userInfo: [NSLocalizedDescriptionKey: "No SSH key configured"])
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
-        guard let host = connectedHost else {
-            throw NSError(domain: "SSHConnectionManager", code: 1,
-                         userInfo: [NSLocalizedDescriptionKey: "Not connected"])
+        // Step 1: Enumerate all files and calculate total size
+        let fileManager = FileManager.default
+        var filesToUpload: [(localPath: URL, relativePath: String, size: Int64)] = []
+        var totalSize: Int64 = 0
+
+        let directoryName = localURL.lastPathComponent
+
+        // Enumerate directory contents synchronously to avoid Swift 6 async iterator issue
+        let contents = try fileManager.contentsOfDirectory(at: localURL, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .isDirectoryKey], options: [.skipsHiddenFiles])
+
+        // Recursively collect all files
+        func collectFiles(in directory: URL, relativeTo base: String) throws {
+            let items = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .isDirectoryKey], options: [.skipsHiddenFiles])
+            for item in items {
+                let resourceValues = try item.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .isDirectoryKey])
+                if resourceValues.isDirectory == true {
+                    let newBase = base + "/" + item.lastPathComponent
+                    try collectFiles(in: item, relativeTo: newBase)
+                } else if resourceValues.isRegularFile == true {
+                    let size = Int64(resourceValues.fileSize ?? 0)
+                    let relativePath = base + "/" + item.lastPathComponent
+                    filesToUpload.append((localPath: item, relativePath: relativePath, size: size))
+                    totalSize += size
+                }
+            }
         }
 
-        let user = connectedUsername ?? "root"
-        let portNum = connectedPort ?? 22
-
-        print("DEBUG: Starting recursive SCP upload from \(localURL.path) to \(user)@\(host):\(remotePath)")
-        progressCallback?("Uploading directory...")
-
-        // Create remote directory first
-        _ = try await executeCommand("mkdir -p \"\(remotePath)\"")
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/scp")
-        process.arguments = [
-            "-r",  // Recursive
-            "-P", String(portNum),
-            "-i", keyPath,
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "BatchMode=yes",
-            localURL.path,  // Source directory
-            "\(user)@\(host):\(remotePath)"  // Destination path
-        ]
-
-        let pipe = Pipe()
-        process.standardError = pipe
-
-        try process.run()
-        process.waitUntilExit()
-
-        if process.terminationStatus != 0 {
-            let errorData = pipe.fileHandleForReading.readDataToEndOfFile()
-            let errorStr = String(data: errorData, encoding: .utf8) ?? "Unknown error"
-            throw NSError(domain: "SSHConnectionManager", code: Int(process.terminationStatus),
-                         userInfo: [NSLocalizedDescriptionKey: "SCP failed: \(errorStr)"])
+        // Process top-level items
+        for item in contents {
+            let resourceValues = try item.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .isDirectoryKey])
+            if resourceValues.isDirectory == true {
+                try collectFiles(in: item, relativeTo: "/" + item.lastPathComponent)
+            } else if resourceValues.isRegularFile == true {
+                let size = Int64(resourceValues.fileSize ?? 0)
+                let relativePath = "/" + item.lastPathComponent
+                filesToUpload.append((localPath: item, relativePath: relativePath, size: size))
+                totalSize += size
+            }
         }
 
-        progressCallback?("Upload complete")
+        if filesToUpload.isEmpty {
+            // Empty directory - just create it remotely
+            let remoteDir = remotePath.hasSuffix("/") ? remotePath + directoryName : remotePath + "/" + directoryName
+            _ = try await executeCommand("mkdir -p \"\(remoteDir)\"")
+            detailedProgressCallback?(0, 0, "", "Upload complete")
+            return
+        }
+
+        // Step 2: Create remote directory structure
+        let remoteBaseDir = remotePath.hasSuffix("/") ? remotePath + directoryName : remotePath + "/" + directoryName
+        _ = try await executeCommand("mkdir -p \"\(remoteBaseDir)\"")
+
+        // Collect unique subdirectories and create them
+        var subdirs = Set<String>()
+        for file in filesToUpload {
+            let dir = (file.relativePath as NSString).deletingLastPathComponent
+            if !dir.isEmpty && dir != "/" {
+                subdirs.insert(dir)
+            }
+        }
+
+        for subdir in subdirs.sorted() {
+            let fullRemoteDir = remoteBaseDir + subdir
+            _ = try await executeCommand("mkdir -p \"\(fullRemoteDir)\"")
+        }
+
+        // Step 3: Upload files one by one with progress tracking
+        var bytesUploaded: Int64 = 0
+        let startTime = Date()
+
+        for file in filesToUpload {
+            // Check for cancellation
+            if cancelCheck?() == true {
+                throw NSError(domain: "SSHConnectionManager", code: 100,
+                             userInfo: [NSLocalizedDescriptionKey: "Transfer cancelled"])
+            }
+
+            let fileName = file.localPath.lastPathComponent
+            let remoteFilePath = remoteBaseDir + file.relativePath
+
+            // Upload with per-file progress that adds to cumulative total
+            let fileStartBytes = bytesUploaded
+
+            try await uploadFile(
+                localURL: file.localPath,
+                remotePath: remoteFilePath,
+                detailedProgressCallback: { fileTransferred, fileTotal, rate in
+                    let cumulativeTransferred = fileStartBytes + fileTransferred
+                    let elapsed = Date().timeIntervalSince(startTime)
+                    let overallRate = elapsed > 0 ? Double(cumulativeTransferred) / elapsed : 0
+                    let rateStr = self.formatTransferRate(overallRate)
+                    detailedProgressCallback?(cumulativeTransferred, totalSize, rateStr, fileName)
+                },
+                cancelCheck: cancelCheck,
+                forceSCP: true  // Always use SCP for directory uploads to avoid channel exhaustion
+            )
+
+            bytesUploaded += file.size
+        }
+
+        // Final progress update
+        let elapsed = Date().timeIntervalSince(startTime)
+        let rate = elapsed > 0 ? Double(totalSize) / elapsed : 0
+        detailedProgressCallback?(totalSize, totalSize, formatTransferRate(rate), "Upload complete")
     }
 
     private func formatTransferRate(_ bytesPerSecond: Double) -> String {
@@ -784,11 +867,13 @@ class SSHConnectionManager {
     }
 
     /// Upload a file to the remote server with detailed progress reporting
+    /// Set forceSCP to true to always use SCP (avoids SSH channel exhaustion during bulk uploads)
     func uploadFile(
         localURL: URL,
         remotePath: String,
         detailedProgressCallback: ((Int64, Int64, String) -> Void)?,
-        cancelCheck: (() -> Bool)?
+        cancelCheck: (() -> Bool)?,
+        forceSCP: Bool = false
     ) async throws {
         guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
@@ -802,16 +887,13 @@ class SSHConnectionManager {
                          userInfo: [NSLocalizedDescriptionKey: "Could not determine file size"])
         }
 
-        print("DEBUG: Uploading file of size: \(fileSize) bytes (\(Double(fileSize) / 1_000_000_000.0) GB)")
-
-        // For large files (> 5MB), use scp which is much faster
-        if fileSize > 5_000_000 {
-            print("DEBUG: Using SCP for large file upload")
+        // For large files (> 5MB) or when forceSCP is true, use scp which is much faster
+        // forceSCP is used during directory uploads to avoid exhausting the SSH channel
+        if fileSize > 5_000_000 || forceSCP {
             return try await uploadWithSCPProgress(localURL: localURL, remotePath: remotePath, fileSize: fileSize, progressCallback: detailedProgressCallback, cancelCheck: cancelCheck)
         }
 
         // For small files (< 5MB), use single command method
-        print("DEBUG: Using single-command upload for small file")
         detailedProgressCallback?(0, fileSize, "")
 
         // Check for cancellation
@@ -847,8 +929,6 @@ class SSHConnectionManager {
         let user = connectedUsername ?? "root"
         let portNum = connectedPort ?? 22
 
-        print("DEBUG: Starting SSH upload to \(user)@\(host):\(remotePath)")
-
         // Use SSH with cat to stream data - we can track bytes written to stdin
         let sshArgs = [
             "-i", keyPath,
@@ -878,7 +958,6 @@ class SSHConnectionManager {
 
         let chunkSize = 64 * 1024 // 64KB chunks
         var totalBytesWritten: Int64 = 0
-        var lastReportTime = startTime
 
         while true {
             // Check for cancellation
@@ -902,12 +981,6 @@ class SSHConnectionManager {
             let rateStr = formatTransferRate(rate)
 
             progressCallback?(totalBytesWritten, fileSize, rateStr)
-
-            // Throttle progress updates to avoid flooding
-            if now.timeIntervalSince(lastReportTime) > 0.1 {
-                print("DEBUG: Upload progress: \(totalBytesWritten)/\(fileSize) bytes (\(rateStr))")
-                lastReportTime = now
-            }
         }
 
         // Close stdin to signal end of data

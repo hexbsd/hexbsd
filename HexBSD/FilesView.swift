@@ -308,15 +308,20 @@ struct FilesContentViewImpl: View {
                 let localURL = URL(fileURLWithPath: file.path)
 
                 if file.isDirectory {
-                    // Upload directory recursively
+                    // Upload directory recursively with detailed progress
                     try await sshManager.uploadDirectory(
                         localURL: localURL,
                         remotePath: remoteVM.currentPath,
-                        progressCallback: { status in
+                        detailedProgressCallback: { transferred, total, rate, currentFile in
                             Task { @MainActor in
-                                self.transferFileName = "Uploading: \(file.name) - \(status)"
+                                self.transferredBytes = transferred
+                                self.totalTransferBytes = total
+                                self.transferProgress = total > 0 ? Double(transferred) / Double(total) : 0
+                                self.transferRate = rate
+                                self.transferFileName = "Uploading: \(file.name)/\(currentFile)"
                             }
-                        }
+                        },
+                        cancelCheck: { self.transferCancelled }
                     )
                 } else {
                     // Upload single file
