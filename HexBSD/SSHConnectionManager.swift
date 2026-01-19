@@ -7349,8 +7349,7 @@ EOFPKG
         // Reconfigure member interfaces for bridging
         for member in members {
             // Configure member interface for bridging - strip IP config, just bring it up
-            // Using -tso -vlanhwtso for better bridge compatibility
-            _ = try await executeCommand("sysrc ifconfig_\(member)=\"up -tso -vlanhwtso\" 2>&1")
+            _ = try await executeCommand("sysrc ifconfig_\(member)=\"up\" 2>&1")
 
             // Remove IPv6 config from member (it will be on the bridge now)
             _ = try await executeCommand("sysrc -x ifconfig_\(member)_ipv6 2>/dev/null || true")
