@@ -2985,7 +2985,61 @@ extension SSHConnectionManager {
         // Get list of jails configured in rc.conf
         let rcConfJails = try await getManagedJails()
 
-        return parseJails(output, managedJails: rcConfJails)
+        // Get managed jail details (path, type) from config files
+        let managedJailDetails = try await getManagedJailDetails()
+
+        return parseJails(output, managedJails: rcConfJails, managedJailDetails: managedJailDetails)
+    }
+
+    /// Get details for managed jails from config files (path, type, version)
+    private func getManagedJailDetails() async throws -> [String: (path: String, jailType: JailType?, version: String?)] {
+        let command = """
+        {
+            # For each jail config file, extract name, path and check if thin/thick
+            for conf in /etc/jail.conf.d/*.conf; do
+                [ -f "$conf" ] || continue
+                name=$(awk '/^[[:space:]]*[a-zA-Z0-9_-]+[[:space:]]*{/ {gsub(/[[:space:]]*{.*/, ""); print; exit}' "$conf")
+                [ -z "$name" ] && continue
+                path=$(awk -F'=' '/path[[:space:]]*=/ {gsub(/[";[:space:]]/, "", $2); print $2; exit}' "$conf")
+                [ -z "$path" ] && continue
+
+                # Determine jail type - check if it's a ZFS clone (thin) or not
+                jail_type="thick"
+                if zfs list -H -o origin "$path" 2>/dev/null | grep -q '@'; then
+                    jail_type="thin"
+                fi
+
+                # Get FreeBSD version from the jail
+                version="Unknown"
+                if [ -x "$path/bin/freebsd-version" ]; then
+                    version=$("$path/bin/freebsd-version" -u 2>/dev/null || echo "Unknown")
+                fi
+
+                echo "JAIL_DETAIL:$name:$path:$jail_type:$version"
+            done
+        }
+        """
+        let output = try await executeCommand(command)
+        print("DEBUG: Managed jail details: \(output)")
+
+        var details: [String: (path: String, jailType: JailType?, version: String?)] = [:]
+
+        for line in output.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("JAIL_DETAIL:") else { continue }
+
+            let parts = trimmed.dropFirst(12).components(separatedBy: ":")
+            guard parts.count >= 4 else { continue }
+
+            let name = parts[0]
+            let path = parts[1]
+            let jailType: JailType? = parts[2] == "thin" ? .thin : .thick
+            let version = parts[3...].joined(separator: ":").trimmingCharacters(in: .whitespacesAndNewlines)
+
+            details[name] = (path: path, jailType: jailType, version: version.isEmpty ? nil : version)
+        }
+
+        return details
     }
 
     /// Get list of jails configured in /etc/jail.conf and /etc/jail.conf.d/
@@ -3152,7 +3206,7 @@ extension SSHConnectionManager {
 
     // MARK: - Helpers
 
-    private func parseJails(_ output: String, managedJails: Set<String>) -> [Jail] {
+    private func parseJails(_ output: String, managedJails: Set<String>, managedJailDetails: [String: (path: String, jailType: JailType?, version: String?)]) -> [Jail] {
         var jails: [Jail] = []
         var runningJailNames: Set<String> = []
 
@@ -3190,6 +3244,9 @@ extension SSHConnectionManager {
                 print("DEBUG: Running jail \(name) isManaged: \(isManaged)")
                 runningJailNames.insert(name)
 
+                // Get additional details from config if available
+                let details = managedJailDetails[name]
+
                 jails.append(Jail(
                     id: name,
                     jid: jid,
@@ -3198,7 +3255,9 @@ extension SSHConnectionManager {
                     path: path,
                     ip: ip,
                     status: .running,
-                    isManaged: isManaged
+                    isManaged: isManaged,
+                    jailType: details?.jailType,
+                    version: details?.version
                 ))
             }
         }
@@ -3207,15 +3266,18 @@ extension SSHConnectionManager {
         for managedJailName in managedJails {
             if !runningJailNames.contains(managedJailName) {
                 print("DEBUG: Adding stopped jail: \(managedJailName)")
+                let details = managedJailDetails[managedJailName]
                 jails.append(Jail(
                     id: managedJailName,
                     jid: "",  // No JID for stopped jails
                     name: managedJailName,
                     hostname: "",
-                    path: "",
+                    path: details?.path ?? "",
                     ip: "",
                     status: .stopped,
-                    isManaged: true  // By definition, it's from the config
+                    isManaged: true,  // By definition, it's from the config
+                    jailType: details?.jailType,
+                    version: details?.version
                 ))
             }
         }

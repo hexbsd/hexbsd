@@ -50,8 +50,9 @@ struct Jail: Identifiable, Hashable {
     let isManaged: Bool
     var jailType: JailType?
     var template: String?
+    var version: String?
 
-    init(id: String = UUID().uuidString, jid: String, name: String, hostname: String, path: String, ip: String, status: JailStatus, isManaged: Bool, jailType: JailType? = nil, template: String? = nil) {
+    init(id: String = UUID().uuidString, jid: String, name: String, hostname: String, path: String, ip: String, status: JailStatus, isManaged: Bool, jailType: JailType? = nil, template: String? = nil, version: String? = nil) {
         self.id = id
         self.jid = jid
         self.name = name
@@ -62,6 +63,7 @@ struct Jail: Identifiable, Hashable {
         self.isManaged = isManaged
         self.jailType = jailType
         self.template = template
+        self.version = version
     }
 
     var isRunning: Bool {
@@ -538,6 +540,12 @@ struct JailDetailView: View {
                         if !jail.jid.isEmpty && jail.jid != "0" {
                             JailInfoRow(label: "JID", value: jail.jid)
                         }
+                        if let jailType = jail.jailType {
+                            JailInfoRow(label: "Type", value: jailType.rawValue)
+                        }
+                        if let version = jail.version {
+                            JailInfoRow(label: "FreeBSD Version", value: version)
+                        }
                         if !jail.path.isEmpty {
                             JailInfoRow(label: "Path", value: jail.path)
                         }
@@ -718,6 +726,8 @@ struct JailDetailView: View {
                     updateOutput += output
                 }
                 updateOutput += "\n\nUpdate completed successfully."
+                // Reload jails to show updated version
+                await viewModel.loadJails()
             } catch {
                 updateOutput += "\n\nError: \(error.localizedDescription)"
             }
