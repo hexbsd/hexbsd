@@ -93,7 +93,21 @@ enum ServiceStatusFilter: String, CaseIterable {
 // MARK: - Main View
 
 struct ServicesContentView: View {
-    @StateObject private var viewModel = ServicesViewModel()
+    @Environment(\.sshManager) private var sshManager
+
+    var body: some View {
+        ServicesContentViewImpl(sshManager: sshManager)
+    }
+}
+
+struct ServicesContentViewImpl: View {
+    let sshManager: SSHConnectionManager
+    @StateObject private var viewModel: ServicesViewModel
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+        _viewModel = StateObject(wrappedValue: ServicesViewModel(sshManager: sshManager))
+    }
     @State private var statusFilter: ServiceStatusFilter = .all
     @State private var searchText = ""
     @State private var serviceToEdit: FreeBSDService?
@@ -495,7 +509,11 @@ class ServicesViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var error: String?
 
-    private let sshManager = SSHConnectionManager.shared
+    private let sshManager: SSHConnectionManager
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+    }
 
     func loadServices() async {
         isLoading = true

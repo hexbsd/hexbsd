@@ -57,11 +57,9 @@ struct SSHAuthMethod {
 }
 
 /// SSH connection manager for FreeBSD systems
+/// Each window should create its own instance for independent server connections
 @Observable
 class SSHConnectionManager {
-    // Singleton instance shared across all windows
-    static let shared = SSHConnectionManager()
-
     // Connection state
     var isConnected: Bool = false
     var serverAddress: String = ""

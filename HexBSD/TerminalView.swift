@@ -13,7 +13,21 @@ import AppKit
 
 /// Main terminal content view that manages the terminal session
 struct TerminalContentView: View {
-    @StateObject private var coordinator = TerminalCoordinator(sshManager: SSHConnectionManager.shared)
+    @Environment(\.sshManager) private var sshManager
+
+    var body: some View {
+        TerminalContentViewImpl(sshManager: sshManager)
+    }
+}
+
+struct TerminalContentViewImpl: View {
+    let sshManager: SSHConnectionManager
+    @StateObject private var coordinator: TerminalCoordinator
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+        _coordinator = StateObject(wrappedValue: TerminalCoordinator(sshManager: sshManager))
+    }
     @State private var showError = false
     @State private var pendingCommand: String?
 

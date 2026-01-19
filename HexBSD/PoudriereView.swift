@@ -1022,8 +1022,24 @@ enum PoudriereTab: String, CaseIterable {
 // MARK: - Poudriere Content View
 
 struct PoudriereContentView: View {
+    @Environment(\.sshManager) private var sshManager
     @Environment(\.windowID) private var windowId
-    @StateObject private var viewModel = PoudriereViewModel()
+
+    var body: some View {
+        PoudriereContentViewImpl(sshManager: sshManager, windowId: windowId)
+    }
+}
+
+struct PoudriereContentViewImpl: View {
+    let sshManager: SSHConnectionManager
+    let windowId: UUID
+    @StateObject private var viewModel: PoudriereViewModel
+
+    init(sshManager: SSHConnectionManager, windowId: UUID) {
+        self.sshManager = sshManager
+        self.windowId = windowId
+        _viewModel = StateObject(wrappedValue: PoudriereViewModel(sshManager: sshManager))
+    }
     @State private var showError = false
     @State private var selectedTab: PoudriereTab = .status
 
@@ -1397,7 +1413,7 @@ struct PoudriereBuildStatusView: View {
                 htmlContent: htmlContent,
                 basePath: viewModel.htmlPath,
                 dataPath: viewModel.dataPath,
-                sshManager: SSHConnectionManager.shared
+                sshManager: viewModel.sshManager
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
@@ -1792,15 +1808,15 @@ struct CreateJailSheet: View {
         isLoadingReleases = true
         do {
             // Get host architecture first to set as default
-            hostArch = try await SSHConnectionManager.shared.getHostArchitecture()
+            hostArch = try await viewModel.sshManager.getHostArchitecture()
             print("DEBUG: Host architecture detected: '\(hostArch)'")
 
             // Check if QEMU is installed
-            qemuInstalled = try await SSHConnectionManager.shared.checkQemuInstalled()
+            qemuInstalled = try await viewModel.sshManager.checkQemuInstalled()
             print("DEBUG: QEMU installed: \(qemuInstalled)")
 
             // Fetch available architectures
-            availableArchitectures = try await SSHConnectionManager.shared.getAvailableArchitectures()
+            availableArchitectures = try await viewModel.sshManager.getAvailableArchitectures()
             print("DEBUG: Available architectures: \(availableArchitectures)")
 
             // Default to host architecture if available, otherwise first in list
@@ -1818,7 +1834,7 @@ struct CreateJailSheet: View {
             }
 
             // Fetch versions for the selected architecture
-            availableVersions = try await SSHConnectionManager.shared.getAvailableFreeBSDReleases(arch: options.arch)
+            availableVersions = try await viewModel.sshManager.getAvailableFreeBSDReleases(arch: options.arch)
             print("DEBUG: Available versions for \(options.arch): \(availableVersions)")
 
             // Set default version
@@ -1838,13 +1854,13 @@ struct CreateJailSheet: View {
 
     private func loadVersionsForArch(_ arch: String) async {
         do {
-            availableVersions = try await SSHConnectionManager.shared.getAvailableFreeBSDReleases(arch: arch)
+            availableVersions = try await viewModel.sshManager.getAvailableFreeBSDReleases(arch: arch)
             // Update selected version if current one isn't available for this arch
             if !availableVersions.contains(options.version), let firstVersion = availableVersions.first {
                 options.version = firstVersion
             }
             // Re-check QEMU status when arch changes
-            qemuInstalled = try await SSHConnectionManager.shared.checkQemuInstalled()
+            qemuInstalled = try await viewModel.sshManager.checkQemuInstalled()
         } catch {
             // Keep current versions on error
         }
@@ -1853,7 +1869,7 @@ struct CreateJailSheet: View {
     private func installQemu() async {
         isInstallingQemu = true
         do {
-            _ = try await SSHConnectionManager.shared.installQemu()
+            _ = try await viewModel.sshManager.installQemu()
             qemuInstalled = true
         } catch {
             viewModel.error = "Failed to install QEMU: \(error.localizedDescription)"
@@ -2268,14 +2284,14 @@ struct PoudriereBulkBuildView: View {
 
         do {
             if buildOptions.buildAll {
-                _ = try await SSHConnectionManager.shared.startPoudriereBulkAll(
+                _ = try await viewModel.sshManager.startPoudriereBulkAll(
                     jail: jail.name,
                     portsTree: tree.name,
                     clean: buildOptions.cleanBuild,
                     test: buildOptions.testBuild
                 )
             } else if !buildOptions.packageListFile.isEmpty {
-                _ = try await SSHConnectionManager.shared.startPoudriereBulkFromFile(
+                _ = try await viewModel.sshManager.startPoudriereBulkFromFile(
                     jail: jail.name,
                     portsTree: tree.name,
                     listFile: buildOptions.packageListFile,
@@ -2283,7 +2299,7 @@ struct PoudriereBulkBuildView: View {
                     test: buildOptions.testBuild
                 )
             } else if !buildOptions.packages.isEmpty {
-                _ = try await SSHConnectionManager.shared.startPoudriereBulkPackages(
+                _ = try await viewModel.sshManager.startPoudriereBulkPackages(
                     jail: jail.name,
                     portsTree: tree.name,
                     packages: buildOptions.packages,
@@ -2645,15 +2661,13 @@ struct PoudriereConfigView: View {
     private func loadConfig() async {
         isLoading = true
         do {
-            config = try await SSHConnectionManager.shared.readPoudriereConfig()
-            zpools = try await SSHConnectionManager.shared.getAvailableZpools()
+            config = try await viewModel.sshManager.readPoudriereConfig()
+            zpools = try await viewModel.sshManager.getAvailableZpools()
 
-            // When zpools exist, use ZFS mode and select a pool
-            if !zpools.isEmpty {
-                config.noZfs = false
-                if !zpools.contains(config.zpool) {
-                    config.zpool = zpools[0]
-                }
+            // Default to ZFS mode (encourage users to create a pool if none exist)
+            config.noZfs = false
+            if !zpools.isEmpty && !zpools.contains(config.zpool) {
+                config.zpool = zpools[0]
             }
             // Check for placeholder/unconfigured mirror and default to main
             if config.freebsdHost.contains("CHANGE_THIS") ||
@@ -2662,7 +2676,7 @@ struct PoudriereConfigView: View {
                 selectedMirror = .main
                 config.freebsdHost = FreeBSDMirror.main.rawValue
                 // Auto-save the fixed config
-                try await SSHConnectionManager.shared.writePoudriereConfig(config)
+                try await viewModel.sshManager.writePoudriereConfig(config)
             } else {
                 // Set mirror selection based on loaded config
                 selectedMirror = FreeBSDMirror.fromURL(config.freebsdHost)
@@ -2689,13 +2703,15 @@ struct PoudriereConfigView: View {
             // Auto-create distfiles cache directory if it doesn't exist
             if !config.distfilesCache.isEmpty && !distfilesCacheExists {
                 let mkdirCommand = "mkdir -p '\(config.distfilesCache)'"
-                _ = try await SSHConnectionManager.shared.executeCommand(mkdirCommand)
+                _ = try await viewModel.sshManager.executeCommand(mkdirCommand)
                 distfilesCacheExists = true
             }
-            try await SSHConnectionManager.shared.writePoudriereConfig(config)
+            try await viewModel.sshManager.writePoudriereConfig(config)
             hasChanges = false
             // Mark as configured now that distfiles exists
             viewModel.isConfigured = true
+            // Navigate to Jails tab after saving
+            viewModel.requestedTab = .jails
         } catch {
             viewModel.error = "Failed to save configuration: \(error.localizedDescription)"
         }
@@ -2709,7 +2725,7 @@ struct PoudriereConfigView: View {
         }
         do {
             let command = "test -d '\(config.distfilesCache)' && echo 'exists' || echo 'missing'"
-            let result = try await SSHConnectionManager.shared.executeCommand(command)
+            let result = try await viewModel.sshManager.executeCommand(command)
             distfilesCacheExists = result.trimmingCharacters(in: .whitespacesAndNewlines) == "exists"
         } catch {
             distfilesCacheExists = false
@@ -2751,7 +2767,11 @@ class PoudriereViewModel: ObservableObject {
     // Tab navigation request (set to non-nil to request tab change)
     @Published var requestedTab: PoudriereTab?
 
-    private let sshManager = SSHConnectionManager.shared
+    let sshManager: SSHConnectionManager
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+    }
 
     func loadPoudriere() async {
         isLoading = true

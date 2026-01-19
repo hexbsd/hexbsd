@@ -137,7 +137,21 @@ struct PackageMirror: Identifiable, Hashable {
 // MARK: - Main View
 
 struct PackagesContentView: View {
-    @StateObject private var viewModel = PackagesViewModel()
+    @Environment(\.sshManager) private var sshManager
+
+    var body: some View {
+        PackagesContentViewImpl(sshManager: sshManager)
+    }
+}
+
+struct PackagesContentViewImpl: View {
+    let sshManager: SSHConnectionManager
+    @StateObject private var viewModel: PackagesViewModel
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+        _viewModel = StateObject(wrappedValue: PackagesViewModel(sshManager: sshManager))
+    }
     @State private var showError = false
     @State private var searchText = ""
     @State private var showSwitchRepo = false
@@ -1705,7 +1719,11 @@ class PackagesViewModel: ObservableObject {
     @Published var availableMirrors: [PackageMirror] = [.automatic]
     @Published var customRepoURL: String?
 
-    private let sshManager = SSHConnectionManager.shared
+    private let sshManager: SSHConnectionManager
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+    }
 
     func loadPackages() async {
         isLoading = true

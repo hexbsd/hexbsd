@@ -199,6 +199,7 @@ class ZFSToolbarState: ObservableObject {
 
 struct ReplicationServerPickerView: View {
     @ObservedObject var toolbarState: ZFSToolbarState
+    let sshManager: SSHConnectionManager
     @State private var serverCheckTimer: Timer?
 
     var body: some View {
@@ -279,7 +280,7 @@ struct ReplicationServerPickerView: View {
         if let data = UserDefaults.standard.data(forKey: "savedServers"),
            let decoded = try? JSONDecoder().decode([SavedServer].self, from: data) {
             // Filter out the currently connected server
-            toolbarState.savedServers = decoded.filter { $0.host != SSHConnectionManager.shared.serverAddress }
+            toolbarState.savedServers = decoded.filter { $0.host != sshManager.serverAddress }
         }
     }
 
@@ -354,9 +355,25 @@ struct ReplicationServerPickerView: View {
 }
 
 struct ZFSContentView: View {
-    @StateObject private var viewModel = ZFSViewModel()
-    @StateObject private var toolbarState = ZFSToolbarState()
+    @Environment(\.sshManager) private var sshManager
     @Environment(\.windowID) private var windowId
+
+    var body: some View {
+        ZFSContentViewImpl(sshManager: sshManager, windowId: windowId)
+    }
+}
+
+struct ZFSContentViewImpl: View {
+    let sshManager: SSHConnectionManager
+    let windowId: UUID
+    @StateObject private var viewModel: ZFSViewModel
+    @StateObject private var toolbarState = ZFSToolbarState()
+
+    init(sshManager: SSHConnectionManager, windowId: UUID) {
+        self.sshManager = sshManager
+        self.windowId = windowId
+        _viewModel = StateObject(wrappedValue: ZFSViewModel(sshManager: sshManager))
+    }
     @State private var showError = false
     @State private var showBootEnvironments = false
     @State private var showPools = false
@@ -421,7 +438,7 @@ struct ZFSContentView: View {
                     .buttonStyle(.plain)
                     .disabled(viewModel.pools.isEmpty)
                     .popover(isPresented: $toolbarState.showServerPicker, arrowEdge: .bottom) {
-                        ReplicationServerPickerView(toolbarState: toolbarState)
+                        ReplicationServerPickerView(toolbarState: toolbarState, sshManager: sshManager)
                     }
                 }
             }
@@ -511,6 +528,8 @@ struct PoolsSheet: View {
     @State private var isLoadingDisks = false
     @State private var showCreatePool = false
     @State private var scrubRefreshTimer: Timer?
+
+    private var sshManager: SSHConnectionManager { viewModel.sshManager }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -618,9 +637,9 @@ struct PoolsSheet: View {
                 onWipe: { diskName in
                     do {
                         // Destroy all partitions on the disk
-                        let _ = try await SSHConnectionManager.shared.executeCommand("gpart destroy -F /dev/\(diskName) 2>/dev/null || true")
+                        let _ = try await sshManager.executeCommand("gpart destroy -F /dev/\(diskName) 2>/dev/null || true")
                         // Also clear the first few sectors to remove any residual partition table
-                        let _ = try await SSHConnectionManager.shared.executeCommand("dd if=/dev/zero of=/dev/\(diskName) bs=512 count=2048 2>/dev/null || true")
+                        let _ = try await sshManager.executeCommand("dd if=/dev/zero of=/dev/\(diskName) bs=512 count=2048 2>/dev/null || true")
                         await loadAvailableDisks()
                     } catch {
                         // Ignore errors, disk list will be refreshed
@@ -638,10 +657,10 @@ struct PoolsSheet: View {
 
         do {
             // Get all disks in the system
-            let geomOutput = try await SSHConnectionManager.shared.executeCommand("geom disk list")
+            let geomOutput = try await sshManager.executeCommand("geom disk list")
 
             // Get disks currently used by ZFS - get both full paths and extract base disk names
-            let zpoolOutput = try await SSHConnectionManager.shared.executeCommand("zpool status 2>/dev/null | grep -E '^\\s+(ada|da|nvd|nda|vtbd|diskid)' | awk '{print $1}'")
+            let zpoolOutput = try await sshManager.executeCommand("zpool status 2>/dev/null | grep -E '^\\s+(ada|da|nvd|nda|vtbd|diskid)' | awk '{print $1}'")
             var usedDisks = Set<String>()
             for line in zpoolOutput.components(separatedBy: .newlines) {
                 let diskName = line.trimmingCharacters(in: .whitespaces)
@@ -655,7 +674,7 @@ struct PoolsSheet: View {
             }
 
             // Get mounted disks
-            let mountOutput = try await SSHConnectionManager.shared.executeCommand("mount | grep '^/dev/' | awk '{print $1}' | sed 's|/dev/||'")
+            let mountOutput = try await sshManager.executeCommand("mount | grep '^/dev/' | awk '{print $1}' | sed 's|/dev/||'")
             var mountedDisks = Set<String>()
             for line in mountOutput.components(separatedBy: .newlines) {
                 let diskName = line.trimmingCharacters(in: .whitespaces)
@@ -669,7 +688,7 @@ struct PoolsSheet: View {
             }
 
             // Get partition info for all disks
-            let gpartOutput = try await SSHConnectionManager.shared.executeCommand("gpart show 2>/dev/null || true")
+            let gpartOutput = try await sshManager.executeCommand("gpart show 2>/dev/null || true")
             var partitionedDisks: [String: String] = [:]  // diskName -> scheme (GPT, MBR, etc.)
             for line in gpartOutput.components(separatedBy: .newlines) {
                 // Lines like "=>      40  41942960  da0  GPT  (20G)"
@@ -1127,6 +1146,7 @@ struct ReplicationChoiceSheet: View {
     let sourceDataset: ZFSDataset
     let targetParent: ZFSDataset?
     let targetServer: SavedServer
+    let sshManager: SSHConnectionManager
     let onOneTime: () -> Void
     let onSchedule: (String) -> Void
     let onCancel: () -> Void
@@ -1157,7 +1177,7 @@ struct ReplicationChoiceSheet: View {
 
             // Step 1: Check if source server has id_replication key
             print("DEBUG: Checking for replication key at \(replicationKeyPath)")
-            let keyCheckResult = try await SSHConnectionManager.shared.executeCommand(
+            let keyCheckResult = try await sshManager.executeCommand(
                 "test -f \(replicationKeyPath) && echo 'KEY_EXISTS' || echo 'NO_KEY'"
             )
             print("DEBUG: Key check result: \(keyCheckResult)")
@@ -1168,7 +1188,7 @@ struct ReplicationChoiceSheet: View {
                 // Create id_replication key on source server
                 print("DEBUG: Creating replication key...")
                 sshSetupStatus = "Creating replication key on source server..."
-                let createResult = try await SSHConnectionManager.shared.executeCommand(
+                let createResult = try await sshManager.executeCommand(
                     "mkdir -p ~/.ssh && chmod 700 ~/.ssh && ssh-keygen -t ed25519 -f \(replicationKeyPath) -N '' -C 'HexBSD-replication' -q && echo 'KEY_CREATED'"
                 )
                 print("DEBUG: Key creation result: \(createResult)")
@@ -1176,7 +1196,7 @@ struct ReplicationChoiceSheet: View {
 
             // Get the public key
             sshSetupStatus = "Reading replication public key..."
-            sourcePubKey = try await SSHConnectionManager.shared.executeCommand("cat \(replicationPubKeyPath)")
+            sourcePubKey = try await sshManager.executeCommand("cat \(replicationPubKeyPath)")
             sourcePubKey = sourcePubKey.trimmingCharacters(in: .whitespacesAndNewlines)
             print("DEBUG: Public key: \(sourcePubKey.prefix(50))...")
 
@@ -1187,14 +1207,14 @@ struct ReplicationChoiceSheet: View {
             // Step 2: Update known_hosts on source server (add target's host key)
             sshSetupStatus = "Updating known_hosts for \(targetHost)..."
             print("DEBUG: Updating known_hosts for \(targetHost)")
-            let _ = try await SSHConnectionManager.shared.executeCommand(
+            let _ = try await sshManager.executeCommand(
                 "ssh-keygen -R \(targetHost) 2>/dev/null; ssh-keyscan -H \(targetHost) >> ~/.ssh/known_hosts 2>/dev/null"
             )
 
             // Step 3: Test if SSH connection works from source to target using the replication key
             sshSetupStatus = "Testing SSH to \(targetHost)..."
             print("DEBUG: Testing SSH connection to \(targetUser)@\(targetHost)")
-            let testResult = try await SSHConnectionManager.shared.executeCommand(
+            let testResult = try await sshManager.executeCommand(
                 "ssh -i \(replicationKeyPath) -o BatchMode=yes -o ConnectTimeout=5 \(targetUser)@\(targetHost) 'echo SSH_OK' 2>&1; true"
             )
             print("DEBUG: SSH test result: \(testResult)")
@@ -1211,7 +1231,7 @@ struct ReplicationChoiceSheet: View {
 
                 // Test again after setting up auth
                 sshSetupStatus = "Verifying SSH connection..."
-                let retestResult = try await SSHConnectionManager.shared.executeCommand(
+                let retestResult = try await sshManager.executeCommand(
                     "ssh -i \(replicationKeyPath) -o BatchMode=yes -o ConnectTimeout=5 \(targetUser)@\(targetHost) 'echo SSH_OK' 2>&1; true"
                 )
                 print("DEBUG: Retest result: \(retestResult)")
@@ -1709,6 +1729,8 @@ struct PoolsView: View {
     @State private var isLoadingDisks = false
     @State private var showCreatePool = false
 
+    private var sshManager: SSHConnectionManager { viewModel.sshManager }
+
     var body: some View {
         VStack(spacing: 0) {
             // Toolbar
@@ -1796,9 +1818,9 @@ struct PoolsView: View {
                 onWipe: { diskName in
                     do {
                         // Destroy all partitions on the disk
-                        let _ = try await SSHConnectionManager.shared.executeCommand("gpart destroy -F /dev/\(diskName) 2>/dev/null || true")
+                        let _ = try await sshManager.executeCommand("gpart destroy -F /dev/\(diskName) 2>/dev/null || true")
                         // Also clear the first few sectors to remove any residual partition table
-                        let _ = try await SSHConnectionManager.shared.executeCommand("dd if=/dev/zero of=/dev/\(diskName) bs=512 count=2048 2>/dev/null || true")
+                        let _ = try await sshManager.executeCommand("dd if=/dev/zero of=/dev/\(diskName) bs=512 count=2048 2>/dev/null || true")
                         await loadAvailableDisks()
                     } catch {
                         // Ignore errors, disk list will be refreshed
@@ -1816,10 +1838,10 @@ struct PoolsView: View {
 
         do {
             // Get all disks in the system
-            let geomOutput = try await SSHConnectionManager.shared.executeCommand("geom disk list")
+            let geomOutput = try await sshManager.executeCommand("geom disk list")
 
             // Get disks currently used by ZFS - get both full paths and extract base disk names
-            let zpoolOutput = try await SSHConnectionManager.shared.executeCommand("zpool status 2>/dev/null | grep -E '^\\s+(ada|da|nvd|nda|vtbd|diskid)' | awk '{print $1}'")
+            let zpoolOutput = try await sshManager.executeCommand("zpool status 2>/dev/null | grep -E '^\\s+(ada|da|nvd|nda|vtbd|diskid)' | awk '{print $1}'")
             var usedDisks = Set<String>()
             for line in zpoolOutput.components(separatedBy: .newlines) {
                 let diskName = line.trimmingCharacters(in: .whitespaces)
@@ -1833,7 +1855,7 @@ struct PoolsView: View {
             }
 
             // Get mounted disks
-            let mountOutput = try await SSHConnectionManager.shared.executeCommand("mount | grep '^/dev/' | awk '{print $1}' | sed 's|/dev/||'")
+            let mountOutput = try await sshManager.executeCommand("mount | grep '^/dev/' | awk '{print $1}' | sed 's|/dev/||'")
             var mountedDisks = Set<String>()
             for line in mountOutput.components(separatedBy: .newlines) {
                 let diskName = line.trimmingCharacters(in: .whitespaces)
@@ -1847,7 +1869,7 @@ struct PoolsView: View {
             }
 
             // Get partition info for all disks
-            let gpartOutput = try await SSHConnectionManager.shared.executeCommand("gpart show 2>/dev/null || true")
+            let gpartOutput = try await sshManager.executeCommand("gpart show 2>/dev/null || true")
             var partitionedDisks: [String: String] = [:]  // diskName -> scheme (GPT, MBR, etc.)
             for line in gpartOutput.components(separatedBy: .newlines) {
                 // Lines like "=>      40  41942960  da0  GPT  (20G)"
@@ -1925,7 +1947,21 @@ struct PoolsView: View {
 // MARK: - Boot Environments Section
 
 struct BootEnvironmentsSection: View {
-    @StateObject private var viewModel = BootEnvironmentsViewModel()
+    @Environment(\.sshManager) private var sshManager
+
+    var body: some View {
+        BootEnvironmentsSectionImpl(sshManager: sshManager)
+    }
+}
+
+struct BootEnvironmentsSectionImpl: View {
+    let sshManager: SSHConnectionManager
+    @StateObject private var viewModel: BootEnvironmentsViewModel
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+        _viewModel = StateObject(wrappedValue: BootEnvironmentsViewModel(sshManager: sshManager))
+    }
     @State private var showError = false
     @State private var showCreateBE = false
     @State private var showRenameBE = false
@@ -2137,6 +2173,8 @@ struct PoolCard: View {
     @State private var showExportConfirm = false
     @State private var showDestroyConfirm = false
     @State private var destroyConfirmText = ""
+
+    private var sshManager: SSHConnectionManager { viewModel.sshManager }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2429,6 +2467,8 @@ struct DatasetsView: View {
     @State private var selectedDataset: ZFSDataset?
     @State private var showCreateSnapshot = false
     @State private var showCloneDataset = false
+
+    private var sshManager: SSHConnectionManager { viewModel.sshManager }
     @State private var showCreateDataset = false
     @State private var showCreateZvol = false
     @State private var showShareDataset = false
@@ -2806,6 +2846,7 @@ struct DatasetsView: View {
                 sourceDataset: info.source,
                 targetParent: info.target,
                 targetServer: info.server,
+                sshManager: sshManager,
                 onOneTime: {
                     pendingReplicationInfo = nil
                     Task {
@@ -2875,7 +2916,7 @@ struct DatasetsView: View {
                                 }
                             }
 
-                            try await SSHConnectionManager.shared.addCronTask(
+                            try await sshManager.addCronTask(
                                 minute: minute,
                                 hour: hour,
                                 dayOfMonth: dayOfMonth,
@@ -3383,7 +3424,7 @@ struct DatasetsView: View {
         if let data = UserDefaults.standard.data(forKey: "savedServers"),
            let decoded = try? JSONDecoder().decode([SavedServer].self, from: data) {
             // Filter out the currently connected server
-            savedServers = decoded.filter { $0.host != SSHConnectionManager.shared.serverAddress }
+            savedServers = decoded.filter { $0.host != sshManager.serverAddress }
         }
     }
 
@@ -3488,7 +3529,7 @@ struct DatasetsView: View {
 
             // Step 1: Ensure source server has id_replication key
             serverToServerSetupStatus = "Checking replication key..."
-            let keyCheckResult = try await SSHConnectionManager.shared.executeCommand(
+            let keyCheckResult = try await sshManager.executeCommand(
                 "test -f \(replicationKeyPath) && echo 'KEY_EXISTS' || echo 'NO_KEY'"
             )
 
@@ -3496,13 +3537,13 @@ struct DatasetsView: View {
 
             if keyCheckResult.contains("NO_KEY") {
                 serverToServerSetupStatus = "Creating replication key..."
-                let _ = try await SSHConnectionManager.shared.executeCommand(
+                let _ = try await sshManager.executeCommand(
                     "mkdir -p ~/.ssh && chmod 700 ~/.ssh && ssh-keygen -t ed25519 -f \(replicationKeyPath) -N '' -C 'HexBSD-replication' -q"
                 )
             }
 
             // Get the public key
-            sourcePubKey = try await SSHConnectionManager.shared.executeCommand("cat \(replicationPubKeyPath)")
+            sourcePubKey = try await sshManager.executeCommand("cat \(replicationPubKeyPath)")
             sourcePubKey = sourcePubKey.trimmingCharacters(in: .whitespacesAndNewlines)
 
             if sourcePubKey.isEmpty {
@@ -3511,7 +3552,7 @@ struct DatasetsView: View {
 
             // Step 2: Test SSH from source to target (with StrictHostKeyChecking=no to handle host key changes)
             serverToServerSetupStatus = "Testing connection to \(targetHost)..."
-            let testResult = try await SSHConnectionManager.shared.executeCommand(
+            let testResult = try await sshManager.executeCommand(
                 "ssh -i \(replicationKeyPath) -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 \(targetUser)@\(targetHost) 'echo SSH_OK' 2>&1; true"
             )
 
@@ -3522,7 +3563,7 @@ struct DatasetsView: View {
                     try await addSourceKeyToTarget(pubKey: sourcePubKey, server: server)
 
                     // Verify it works now
-                    let retestResult = try await SSHConnectionManager.shared.executeCommand(
+                    let retestResult = try await sshManager.executeCommand(
                         "ssh -i \(replicationKeyPath) -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 \(targetUser)@\(targetHost) 'echo SSH_OK' 2>&1; true"
                     )
 
@@ -3563,7 +3604,7 @@ struct DatasetsView: View {
             // Step 1: Check if source server has id_replication key
             print("DEBUG: Checking for replication key on source server...")
             serverToServerSetupStatus = "Checking replication key on source server..."
-            let keyCheckResult = try await SSHConnectionManager.shared.executeCommand(
+            let keyCheckResult = try await sshManager.executeCommand(
                 "test -f \(replicationKeyPath) && echo 'KEY_EXISTS' || echo 'NO_KEY'"
             )
             print("DEBUG: Key check result: \(keyCheckResult)")
@@ -3574,7 +3615,7 @@ struct DatasetsView: View {
                 // Create id_replication key on source server
                 print("DEBUG: Creating replication key on source server...")
                 serverToServerSetupStatus = "Creating replication key on source server..."
-                let createResult = try await SSHConnectionManager.shared.executeCommand(
+                let createResult = try await sshManager.executeCommand(
                     "mkdir -p ~/.ssh && chmod 700 ~/.ssh && ssh-keygen -t ed25519 -f \(replicationKeyPath) -N '' -C 'HexBSD-replication' -q && echo 'KEY_CREATED'"
                 )
                 print("DEBUG: Key creation result: \(createResult)")
@@ -3582,7 +3623,7 @@ struct DatasetsView: View {
 
             // Get the public key
             serverToServerSetupStatus = "Reading replication public key..."
-            sourcePubKey = try await SSHConnectionManager.shared.executeCommand("cat \(replicationPubKeyPath)")
+            sourcePubKey = try await sshManager.executeCommand("cat \(replicationPubKeyPath)")
             sourcePubKey = sourcePubKey.trimmingCharacters(in: .whitespacesAndNewlines)
             print("DEBUG: Source public key: \(sourcePubKey.prefix(50))...")
 
@@ -3594,7 +3635,7 @@ struct DatasetsView: View {
             // Remove old entries for hostname, FQDN, and IP, then add fresh ones
             serverToServerSetupStatus = "Updating known_hosts for \(targetHost)..."
             print("DEBUG: Updating known_hosts for \(targetHost)...")
-            let _ = try await SSHConnectionManager.shared.executeCommand(
+            let _ = try await sshManager.executeCommand(
                 """
                 # Get IP and FQDN for the host
                 HOST_IP=$(getent hosts \(targetHost) 2>/dev/null | awk '{print $1}' | head -1)
@@ -3615,7 +3656,7 @@ struct DatasetsView: View {
             // so we can check the output for specific error messages
             serverToServerSetupStatus = "Testing SSH to \(targetHost)..."
             print("DEBUG: Testing SSH from source to \(targetUser)@\(targetHost)...")
-            let testResult = try await SSHConnectionManager.shared.executeCommand(
+            let testResult = try await sshManager.executeCommand(
                 "ssh -i \(replicationKeyPath) -o BatchMode=yes -o ConnectTimeout=5 \(targetUser)@\(targetHost) 'echo SSH_OK' 2>&1; true"
             )
             print("DEBUG: SSH test result: \(testResult)")
@@ -3631,7 +3672,7 @@ struct DatasetsView: View {
                 // Use StrictHostKeyChecking=no to accept the new key and update known_hosts automatically
                 // This is safe here because we're explicitly handling a known host key change scenario
                 serverToServerSetupStatus = "Retrying SSH connection with new host key..."
-                let retestResult = try await SSHConnectionManager.shared.executeCommand(
+                let retestResult = try await sshManager.executeCommand(
                     "ssh -i \(replicationKeyPath) -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 \(targetUser)@\(targetHost) 'echo SSH_OK' 2>&1; true"
                 )
                 print("DEBUG: Retest with StrictHostKeyChecking=no: \(retestResult)")
@@ -3647,7 +3688,7 @@ struct DatasetsView: View {
                     // Final verification - use StrictHostKeyChecking=no since we just handled a host key change
                     serverToServerSetupStatus = "Verifying SSH connection..."
                     print("DEBUG: Final verification SSH from source to target...")
-                    let finalResult = try await SSHConnectionManager.shared.executeCommand(
+                    let finalResult = try await sshManager.executeCommand(
                         "ssh -i \(replicationKeyPath) -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 \(targetUser)@\(targetHost) 'echo SSH_OK' 2>&1; true"
                     )
                     print("DEBUG: Final verification result: \(finalResult)")
@@ -3667,7 +3708,7 @@ struct DatasetsView: View {
 
                 // Verify it works now
                 serverToServerSetupStatus = "Verifying SSH connection..."
-                let retestResult = try await SSHConnectionManager.shared.executeCommand(
+                let retestResult = try await sshManager.executeCommand(
                     "ssh -i \(replicationKeyPath) -o BatchMode=yes -o ConnectTimeout=5 \(targetUser)@\(targetHost) 'echo SSH_OK' 2>&1; true"
                 )
                 print("DEBUG: Retest result: \(retestResult)")
@@ -3864,7 +3905,7 @@ struct DatasetsView: View {
             } else {
                 let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
                 let snapshotName = "replication-\(timestamp)"
-                try await SSHConnectionManager.shared.createZFSSnapshot(dataset: source.name, snapshotName: snapshotName)
+                try await sshManager.createZFSSnapshot(dataset: source.name, snapshotName: snapshotName)
                 snapshotToReplicate = "\(source.name)@\(snapshotName)"
             }
 
@@ -3895,7 +3936,7 @@ struct DatasetsView: View {
             'zfs receive -F \(destinationPath)'
             """
 
-            _ = try await SSHConnectionManager.shared.executeCommand(replicationCommand)
+            _ = try await sshManager.executeCommand(replicationCommand)
 
             // Refresh target datasets and pools
             await loadTargetData()
@@ -4405,6 +4446,8 @@ struct ReplicationView: View {
     @State private var isLoadingTargetData = false
     @State private var draggedDataset: ZFSDataset?
 
+    private var sshManager: SSHConnectionManager { viewModel.sshManager }
+
     var body: some View {
         VStack(spacing: 0) {
             // Toolbar
@@ -4484,7 +4527,7 @@ struct ReplicationView: View {
                     // Local (source) datasets
                     ReplicationPaneView(
                         title: "Local (Source)",
-                        subtitle: SSHConnectionManager.shared.serverAddress,
+                        subtitle: sshManager.serverAddress,
                         datasets: viewModel.datasets,
                         isLoading: viewModel.isLoadingDatasets,
                         isSource: true,
@@ -4533,7 +4576,7 @@ struct ReplicationView: View {
         if let data = UserDefaults.standard.data(forKey: "savedServers"),
            let servers = try? JSONDecoder().decode([SavedServer].self, from: data) {
             // Exclude the current connected server
-            savedServers = servers.filter { $0.host != SSHConnectionManager.shared.serverAddress }
+            savedServers = servers.filter { $0.host != sshManager.serverAddress }
         }
     }
 
@@ -4600,7 +4643,7 @@ struct ReplicationView: View {
         guard let manager = targetManager, let target = selectedTargetServer else { return }
 
         do {
-            try await SSHConnectionManager.shared.replicateDataset(
+            try await sshManager.replicateDataset(
                 dataset: dataset.name,
                 targetHost: target.host,
                 targetManager: manager
@@ -4622,8 +4665,8 @@ struct ReplicationView: View {
         do {
             try await manager.replicateDataset(
                 dataset: dataset.name,
-                targetHost: SSHConnectionManager.shared.serverAddress,
-                targetManager: SSHConnectionManager.shared
+                targetHost: sshManager.serverAddress,
+                targetManager: sshManager
             )
             await MainActor.run {
                 viewModel.error = nil
@@ -5258,7 +5301,11 @@ class ZFSViewModel: ObservableObject {
     @Published var isLoadingScrub = false
     @Published var error: String?
 
-    private let sshManager = SSHConnectionManager.shared
+    let sshManager: SSHConnectionManager
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+    }
 
     func loadAll() async {
         await withTaskGroup(of: Void.self) { group in

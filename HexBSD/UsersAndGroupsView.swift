@@ -323,7 +323,11 @@ class UsersAndGroupsViewModel: ObservableObject {
         "Remove all network users before removing the domain"
     }
 
-    private let sshManager = SSHConnectionManager.shared
+    private let sshManager: SSHConnectionManager
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+    }
 
     func loadSetupState(updateNetworkRole: Bool = true) async {
         isLoading = true
@@ -2452,7 +2456,21 @@ struct UsersAndGroupsView: View {
 }
 
 struct UsersAndGroupsContentView: View {
-    @StateObject private var viewModel = UsersAndGroupsViewModel()
+    @Environment(\.sshManager) private var sshManager
+
+    var body: some View {
+        UsersAndGroupsContentViewImpl(sshManager: sshManager)
+    }
+}
+
+struct UsersAndGroupsContentViewImpl: View {
+    let sshManager: SSHConnectionManager
+    @StateObject private var viewModel: UsersAndGroupsViewModel
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+        _viewModel = StateObject(wrappedValue: UsersAndGroupsViewModel(sshManager: sshManager))
+    }
 
     private var isSystemSetupComplete: Bool {
         let zfsConfigured = viewModel.setupState.relevantZFSDatasets.allSatisfy { $0.status == .configured }

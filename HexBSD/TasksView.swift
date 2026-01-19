@@ -185,7 +185,21 @@ struct ReplicationTaskDetails {
 // MARK: - Main View
 
 struct TasksContentView: View {
-    @StateObject private var viewModel = TasksViewModel()
+    @Environment(\.sshManager) private var sshManager
+
+    var body: some View {
+        TasksContentViewImpl(sshManager: sshManager)
+    }
+}
+
+struct TasksContentViewImpl: View {
+    let sshManager: SSHConnectionManager
+    @StateObject private var viewModel: TasksViewModel
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+        _viewModel = StateObject(wrappedValue: TasksViewModel(sshManager: sshManager))
+    }
     @State private var showAddTask = false
     @State private var selectedTask: CronTask?
     @State private var showError = false
@@ -661,7 +675,11 @@ class TasksViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var error: String?
 
-    private let sshManager = SSHConnectionManager.shared
+    private let sshManager: SSHConnectionManager
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+    }
 
     func loadTasks() async {
         isLoading = true

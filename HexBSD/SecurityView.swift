@@ -134,7 +134,21 @@ struct SecurityStatus {
 // MARK: - Audit Tab View
 
 struct AuditTabView: View {
-    @StateObject private var viewModel = AuditViewModel()
+    @Environment(\.sshManager) private var sshManager
+
+    var body: some View {
+        AuditTabViewImpl(sshManager: sshManager)
+    }
+}
+
+struct AuditTabViewImpl: View {
+    let sshManager: SSHConnectionManager
+    @StateObject private var viewModel: AuditViewModel
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+        _viewModel = StateObject(wrappedValue: AuditViewModel(sshManager: sshManager))
+    }
     @State private var showError = false
     @State private var selectedVulnerability: Vulnerability?
     @State private var searchText = ""
@@ -570,7 +584,11 @@ class AuditViewModel: ObservableObject {
     @Published var error: String?
     @Published var hasScanned = false
 
-    private let sshManager = SSHConnectionManager.shared
+    private let sshManager: SSHConnectionManager
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+    }
 
     func scanVulnerabilities() async {
         isLoading = true
@@ -658,7 +676,21 @@ struct NetworkConnection: Identifiable, Hashable {
 // MARK: - Connections Tab View
 
 struct ConnectionsTabView: View {
-    @StateObject private var viewModel = ConnectionsViewModel()
+    @Environment(\.sshManager) private var sshManager
+
+    var body: some View {
+        ConnectionsTabViewImpl(sshManager: sshManager)
+    }
+}
+
+struct ConnectionsTabViewImpl: View {
+    let sshManager: SSHConnectionManager
+    @StateObject private var viewModel: ConnectionsViewModel
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+        _viewModel = StateObject(wrappedValue: ConnectionsViewModel(sshManager: sshManager))
+    }
     @State private var showError = false
     @State private var searchText = ""
     @State private var selectedProtocol = "all"
@@ -865,7 +897,11 @@ class ConnectionsViewModel: ObservableObject {
     @Published var error: String?
     @Published var autoRefresh: Bool = false
 
-    private let sshManager = SSHConnectionManager.shared
+    private let sshManager: SSHConnectionManager
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+    }
 
     func loadConnections() async {
         isLoading = true
@@ -983,7 +1019,21 @@ struct FirewallService: Identifiable, Hashable {
 // MARK: - Firewall Tab View
 
 struct FirewallTabView: View {
-    @StateObject private var viewModel = FirewallViewModel()
+    @Environment(\.sshManager) private var sshManager
+
+    var body: some View {
+        FirewallTabViewImpl(sshManager: sshManager)
+    }
+}
+
+struct FirewallTabViewImpl: View {
+    let sshManager: SSHConnectionManager
+    @StateObject private var viewModel: FirewallViewModel
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+        _viewModel = StateObject(wrappedValue: FirewallViewModel(sshManager: sshManager))
+    }
     @State private var showError = false
     @State private var showEnableConfirmation = false
     @State private var showDisableConfirmation = false
@@ -1670,7 +1720,11 @@ class FirewallViewModel: ObservableObject {
     @Published var error: String?
     @Published var domainRole: String? = nil
 
-    private let sshManager = SSHConnectionManager.shared
+    private let sshManager: SSHConnectionManager
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+    }
 
     // Ports that are always protected
     private let alwaysProtectedPorts: Set<Int> = [22]  // SSH

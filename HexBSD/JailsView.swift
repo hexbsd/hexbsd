@@ -125,7 +125,21 @@ enum JailsTab: String, CaseIterable {
 }
 
 struct JailsContentView: View {
-    @StateObject private var viewModel = JailsViewModel()
+    @Environment(\.sshManager) private var sshManager
+
+    var body: some View {
+        JailsContentViewImpl(sshManager: sshManager)
+    }
+}
+
+struct JailsContentViewImpl: View {
+    let sshManager: SSHConnectionManager
+    @StateObject private var viewModel: JailsViewModel
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+        _viewModel = StateObject(wrappedValue: JailsViewModel(sshManager: sshManager))
+    }
     @State private var showError = false
     @State private var selectedJail: Jail?
     @State private var searchText = ""
@@ -379,7 +393,15 @@ struct JailRowView: View {
 struct JailDetailView: View {
     let jail: Jail
     @ObservedObject var viewModel: JailsViewModel
-    @StateObject private var detailViewModel = JailDetailViewModel()
+    @StateObject private var detailViewModel: JailDetailViewModel
+
+    private var sshManager: SSHConnectionManager { viewModel.sshManager }
+
+    init(jail: Jail, viewModel: JailsViewModel) {
+        self.jail = jail
+        self.viewModel = viewModel
+        _detailViewModel = StateObject(wrappedValue: JailDetailViewModel(sshManager: viewModel.sshManager))
+    }
     @State private var showConfirmStop = false
     @State private var showConfirmRestart = false
     @State private var showConfirmDelete = false
@@ -1237,7 +1259,7 @@ struct JailCreateSheet: View {
     private func loadAvailableReleases() async {
         isLoadingReleases = true
         do {
-            availableReleases = try await SSHConnectionManager.shared.getAvailableFreeBSDReleases()
+            availableReleases = try await viewModel.sshManager.getAvailableFreeBSDReleases()
             if freebsdVersion.isEmpty, let first = availableReleases.first {
                 freebsdVersion = first
             }
@@ -1407,7 +1429,7 @@ struct EditJailConfigSheet: View {
     private func loadConfig() async {
         isLoading = true
         do {
-            configContent = try await SSHConnectionManager.shared.getJailConfigFile(name: jail.name)
+            configContent = try await viewModel.sshManager.getJailConfigFile(name: jail.name)
             originalContent = configContent
         } catch {
             configContent = "# Failed to load configuration: \(error.localizedDescription)"
@@ -1420,7 +1442,7 @@ struct EditJailConfigSheet: View {
         saveError = nil
 
         do {
-            try await SSHConnectionManager.shared.saveJailConfigFile(name: jail.name, content: configContent)
+            try await viewModel.sshManager.saveJailConfigFile(name: jail.name, content: configContent)
             originalContent = configContent
             dismiss()
         } catch {
@@ -1990,7 +2012,7 @@ struct TemplatesTabView: View {
     private func loadAvailableReleases() async {
         isLoadingReleases = true
         do {
-            availableReleases = try await SSHConnectionManager.shared.getAvailableFreeBSDReleases()
+            availableReleases = try await viewModel.sshManager.getAvailableFreeBSDReleases()
             if selectedVersion.isEmpty, let first = availableReleases.first {
                 selectedVersion = first
             }
@@ -2414,7 +2436,11 @@ class JailDetailViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var error: String?
 
-    private let sshManager = SSHConnectionManager.shared
+    private let sshManager: SSHConnectionManager
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+    }
 
     func loadDetails(for jail: Jail) async {
         isLoading = true
@@ -2452,7 +2478,11 @@ class JailsViewModel: ObservableObject {
     @Published var isLongRunningOperation = false  // Locks navigation during template creation, etc.
     @Published var initialCheckComplete = false  // Tracks if initial setup check has completed
 
-    private let sshManager = SSHConnectionManager.shared
+    let sshManager: SSHConnectionManager
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+    }
 
     /// Check if any bridges exist (required before jail setup)
     var hasBridges: Bool {

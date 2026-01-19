@@ -55,7 +55,21 @@ struct BootEnvironment: Identifiable, Hashable {
 // MARK: - Main View
 
 struct BootEnvironmentsContentView: View {
-    @StateObject private var viewModel = BootEnvironmentsViewModel()
+    @Environment(\.sshManager) private var sshManager
+
+    var body: some View {
+        BootEnvironmentsContentViewImpl(sshManager: sshManager)
+    }
+}
+
+struct BootEnvironmentsContentViewImpl: View {
+    let sshManager: SSHConnectionManager
+    @StateObject private var viewModel: BootEnvironmentsViewModel
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+        _viewModel = StateObject(wrappedValue: BootEnvironmentsViewModel(sshManager: sshManager))
+    }
     @State private var showError = false
     @State private var showCreateBE = false
     @State private var showRenameBE = false
@@ -419,7 +433,11 @@ class BootEnvironmentsViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var error: String?
 
-    private let sshManager = SSHConnectionManager.shared
+    private let sshManager: SSHConnectionManager
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+    }
 
     func loadBootEnvironments() async {
         isLoading = true

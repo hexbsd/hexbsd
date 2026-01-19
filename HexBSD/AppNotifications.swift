@@ -23,6 +23,21 @@ extension EnvironmentValues {
     }
 }
 
+// MARK: - SSH Connection Manager Environment Key
+
+/// Environment key for passing window-specific SSH connection manager
+/// Each window gets its own manager for independent server connections
+struct SSHConnectionManagerKey: EnvironmentKey {
+    static let defaultValue: SSHConnectionManager = SSHConnectionManager()
+}
+
+extension EnvironmentValues {
+    var sshManager: SSHConnectionManager {
+        get { self[SSHConnectionManagerKey.self] }
+        set { self[SSHConnectionManagerKey.self] = newValue }
+    }
+}
+
 // MARK: - Notification Names
 
 extension Notification.Name {

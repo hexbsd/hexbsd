@@ -106,8 +106,22 @@ private func formatFileSizeHelper(_ bytes: Int64) -> String {
 // MARK: - Main Split View
 
 struct FilesContentView: View {
+    @Environment(\.sshManager) private var sshManager
+
+    var body: some View {
+        FilesContentViewImpl(sshManager: sshManager)
+    }
+}
+
+struct FilesContentViewImpl: View {
+    let sshManager: SSHConnectionManager
     @StateObject private var localVM = LocalFilesViewModel()
-    @StateObject private var remoteVM = RemoteFilesViewModel()
+    @StateObject private var remoteVM: RemoteFilesViewModel
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+        _remoteVM = StateObject(wrappedValue: RemoteFilesViewModel(sshManager: sshManager))
+    }
     @State private var showError = false
     @State private var errorMessage = ""
     @State private var isTransferring = false
@@ -269,7 +283,7 @@ struct FilesContentView: View {
             transferProgress = 0.0
         }
 
-        let sshManager = SSHConnectionManager.shared
+        let sshManager = self.sshManager
 
         for fileId in localVM.selectedFiles {
             // Check for cancellation before each file
@@ -344,7 +358,7 @@ struct FilesContentView: View {
             transferProgress = 0.0
         }
 
-        let sshManager = SSHConnectionManager.shared
+        let sshManager = self.sshManager
 
         for fileId in remoteVM.selectedFiles {
             // Check for cancellation before each file
@@ -436,7 +450,7 @@ struct FilesContentView: View {
             transferProgress = 0.0
         }
 
-        let sshManager = SSHConnectionManager.shared
+        let sshManager = self.sshManager
 
         let remotePath: String
         if remoteVM.currentPath.hasSuffix("/") {
@@ -488,7 +502,7 @@ struct FilesContentView: View {
             transferProgress = 0.0
         }
 
-        let sshManager = SSHConnectionManager.shared
+        let sshManager = self.sshManager
 
         let localPath: String
         if localVM.currentPath.hasSuffix("/") {
@@ -1065,7 +1079,11 @@ class RemoteFilesViewModel: ObservableObject {
     @Published var selectedFiles: Set<UUID> = []
     @Published var error: String?
 
-    private let sshManager = SSHConnectionManager.shared
+    private let sshManager: SSHConnectionManager
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+    }
 
     func loadInitialDirectory() async {
         // Resolve ~ to actual home directory path

@@ -99,7 +99,21 @@ struct HighlightedText: View {
 // MARK: - Logs Content View
 
 struct LogsContentView: View {
-    @StateObject private var viewModel = LogsViewModel()
+    @Environment(\.sshManager) private var sshManager
+
+    var body: some View {
+        LogsContentViewImpl(sshManager: sshManager)
+    }
+}
+
+struct LogsContentViewImpl: View {
+    let sshManager: SSHConnectionManager
+    @StateObject private var viewModel: LogsViewModel
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+        _viewModel = StateObject(wrappedValue: LogsViewModel(sshManager: sshManager))
+    }
     @State private var showError = false
     @FocusState private var isSearchFocused: Bool
 
@@ -425,7 +439,11 @@ class LogsViewModel: ObservableObject {
         searchResults.reduce(0) { $0 + $1.matchCount }
     }
 
-    private let sshManager = SSHConnectionManager.shared
+    private let sshManager: SSHConnectionManager
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+    }
 
     func loadLogFiles() async {
         isLoadingList = true

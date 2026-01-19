@@ -659,8 +659,8 @@ struct ContentView: View {
     // Unique ID for this window instance - used to scope notifications
     @State private var windowId = UUID()
 
-    // Use shared SSH connection manager across all windows
-    var sshManager = SSHConnectionManager.shared
+    // Per-window SSH connection manager for independent server connections
+    @State private var sshManager = SSHConnectionManager()
 
     // Real data from SSH
     @State private var systemStatus: SystemStatus?
@@ -798,6 +798,7 @@ struct ContentView: View {
         .sheet(isPresented: $showAbout) {
             AboutView()
         }
+        .environment(\.sshManager, sshManager)
         .onAppear {
             loadSavedServers()
             // New windows always show the server list so users can connect to new servers
@@ -1139,11 +1140,9 @@ struct DetailView: View {
 // MARK: - Connect View
 struct ConnectView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.sshManager) private var sshManager
     let onConnected: () -> Void
     let onServerSaved: (SavedServer) -> Void
-
-    // Use shared SSH connection manager
-    var sshManager = SSHConnectionManager.shared
 
     @State private var serverName = ""
     @State private var inputAddress = ""

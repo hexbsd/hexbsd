@@ -289,7 +289,21 @@ struct NetworkContentView: View {
 // MARK: - Interfaces Tab View
 
 struct InterfacesTabView: View {
-    @StateObject private var viewModel = InterfacesViewModel()
+    @Environment(\.sshManager) private var sshManager
+
+    var body: some View {
+        InterfacesTabViewImpl(sshManager: sshManager)
+    }
+}
+
+struct InterfacesTabViewImpl: View {
+    let sshManager: SSHConnectionManager
+    @StateObject private var viewModel: InterfacesViewModel
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+        _viewModel = StateObject(wrappedValue: InterfacesViewModel(sshManager: sshManager))
+    }
     @State private var typeFilter: InterfaceTypeFilter = .all
     @State private var statusFilter: InterfaceStatusFilter = .all
     @State private var searchText = ""
@@ -977,7 +991,21 @@ struct ConfigureInterfaceSheet: View {
 // MARK: - Bridges Tab View
 
 struct BridgesTabView: View {
-    @StateObject private var viewModel = BridgesViewModel()
+    @Environment(\.sshManager) private var sshManager
+
+    var body: some View {
+        BridgesTabViewImpl(sshManager: sshManager)
+    }
+}
+
+struct BridgesTabViewImpl: View {
+    let sshManager: SSHConnectionManager
+    @StateObject private var viewModel: BridgesViewModel
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+        _viewModel = StateObject(wrappedValue: BridgesViewModel(sshManager: sshManager))
+    }
     @State private var selectedBridge: BridgeInterface?
     @State private var showCreateSheet = false
     @State private var showError = false
@@ -1448,7 +1476,21 @@ struct CreateBridgeSheet: View {
 // MARK: - Routing Tab View
 
 struct RoutingTabView: View {
-    @StateObject private var viewModel = RoutingViewModel()
+    @Environment(\.sshManager) private var sshManager
+
+    var body: some View {
+        RoutingTabViewImpl(sshManager: sshManager)
+    }
+}
+
+struct RoutingTabViewImpl: View {
+    let sshManager: SSHConnectionManager
+    @StateObject private var viewModel: RoutingViewModel
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+        _viewModel = StateObject(wrappedValue: RoutingViewModel(sshManager: sshManager))
+    }
     @State private var showAddRoute = false
     @State private var showError = false
     @State private var searchText = ""
@@ -1703,7 +1745,11 @@ class InterfacesViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var error: String?
 
-    private let sshManager = SSHConnectionManager.shared
+    private let sshManager: SSHConnectionManager
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+    }
 
     func loadInterfaces() async {
         isLoading = true
@@ -1788,7 +1834,11 @@ class BridgesViewModel: ObservableObject {
     @Published var error: String?
     @Published var pendingRestartRequired = false
 
-    private let sshManager = SSHConnectionManager.shared
+    private let sshManager: SSHConnectionManager
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+    }
 
     /// Suggests the next available bridge name (bridge0, bridge1, etc.)
     var suggestedBridgeName: String {
@@ -1875,7 +1925,11 @@ class RoutingViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var error: String?
 
-    private let sshManager = SSHConnectionManager.shared
+    private let sshManager: SSHConnectionManager
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+    }
 
     func loadRoutes() async {
         isLoading = true
