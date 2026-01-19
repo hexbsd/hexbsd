@@ -1022,6 +1022,7 @@ enum PoudriereTab: String, CaseIterable {
 // MARK: - Poudriere Content View
 
 struct PoudriereContentView: View {
+    @Environment(\.windowID) private var windowId
     @StateObject private var viewModel = PoudriereViewModel()
     @State private var showError = false
     @State private var selectedTab: PoudriereTab = .status
@@ -1345,6 +1346,10 @@ struct PoudriereContentView: View {
         .onAppear {
             Task {
                 await viewModel.loadPoudriere()
+                // Default to config tab if poudriere is installed but not configured
+                if viewModel.isInstalled && !viewModel.isConfigured {
+                    selectedTab = .config
+                }
             }
         }
     }
@@ -2386,19 +2391,19 @@ enum FreeBSDMirror: String, CaseIterable {
 
 struct PoudriereConfigView: View {
     @ObservedObject var viewModel: PoudriereViewModel
+    @Environment(\.windowID) private var windowId
     @State private var config = PoudriereConfig.default
     @State private var zpools: [String] = []
     @State private var isLoading = true
     @State private var isSaving = false
     @State private var hasChanges = false
     @State private var distfilesCacheExists = true
-    @State private var isCreatingDistfilesCache = false
     @State private var selectedMirror: FreeBSDMirror = .main
     @State private var customMirrorURL: String = ""
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text("Poudriere Configuration")
                         .font(.title2)
@@ -2419,57 +2424,67 @@ struct PoudriereConfigView: View {
                     }
                     .padding()
                 } else {
-                    // Storage Mode Selection
+                    // Storage Configuration
                     GroupBox("Storage") {
-                        VStack(alignment: .leading, spacing: 12) {
-                            // Storage mode toggle
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Storage Mode")
-                                    .font(.subheadline)
-                                Picker("Storage Mode", selection: Binding(
-                                    get: { config.noZfs ? "ufs" : "zfs" },
-                                    set: { newValue in
-                                        config.noZfs = (newValue == "ufs")
-                                        hasChanges = true
-                                    }
-                                )) {
-                                    Text("ZFS").tag("zfs")
-                                    Text("UFS").tag("ufs")
-                                }
-                                .pickerStyle(.segmented)
-                                .frame(width: 150)
-                            }
-
-                            if config.noZfs {
-                                // UFS mode info
-                                HStack {
-                                    Image(systemName: "info.circle")
-                                        .foregroundColor(.blue)
-                                    Text("UFS mode uses regular directories instead of ZFS datasets")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            } else {
-                                // ZFS Pool picker
+                        VStack(alignment: .leading, spacing: 4) {
+                            if !zpools.isEmpty {
+                                // ZFS pools available - just show pool picker
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text("ZFS Pool")
                                         .font(.subheadline)
-                                    if zpools.isEmpty {
-                                        HStack {
-                                            Image(systemName: "exclamationmark.triangle")
-                                                .foregroundColor(.orange)
-                                            Text("No ZFS pools available")
-                                                .font(.caption)
-                                                .foregroundColor(.secondary)
+                                    Picker("ZPool", selection: $config.zpool) {
+                                        ForEach(zpools, id: \.self) { pool in
+                                            Text(pool).tag(pool)
                                         }
-                                    } else {
-                                        Picker("ZPool", selection: $config.zpool) {
-                                            ForEach(zpools, id: \.self) { pool in
-                                                Text(pool).tag(pool)
-                                            }
+                                    }
+                                    .labelsHidden()
+                                    .onChange(of: config.zpool) { _, _ in hasChanges = true }
+                                }
+                            } else {
+                                // No ZFS pools - show storage mode toggle, default to ZFS
+                                Text("Storage Mode")
+                                    .font(.subheadline)
+                                HStack(spacing: 8) {
+                                    Picker("Storage Mode", selection: Binding(
+                                        get: { config.noZfs ? "ufs" : "zfs" },
+                                        set: { newValue in
+                                            config.noZfs = (newValue == "ufs")
+                                            hasChanges = true
                                         }
-                                        .labelsHidden()
-                                        .onChange(of: config.zpool) { _, _ in hasChanges = true }
+                                    )) {
+                                        Text("ZFS (Recommended)").tag("zfs")
+                                        Text("UFS").tag("ufs")
+                                    }
+                                    .pickerStyle(.segmented)
+                                    .fixedSize()
+
+                                    if !config.noZfs {
+                                        Button("Setup ZFS Pool") {
+                                            NotificationCenter.default.post(name: .navigateToZFS, object: nil, userInfo: ["windowId": windowId])
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                    }
+                                }
+                                .fixedSize(horizontal: false, vertical: true)
+
+                                if config.noZfs {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "info.circle")
+                                            .foregroundColor(.blue)
+                                            .font(.caption)
+                                        Text("UFS mode uses regular directories instead of ZFS datasets")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                } else {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "exclamationmark.triangle")
+                                            .foregroundColor(.orange)
+                                            .font(.caption)
+                                        Text("No ZFS pools available")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
                                     }
                                 }
                             }
@@ -2493,51 +2508,33 @@ struct PoudriereConfigView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Distfiles Cache")
                                     .font(.subheadline)
-                                HStack {
-                                    TextField("/usr/ports/distfiles", text: $config.distfilesCache)
-                                        .textFieldStyle(.roundedBorder)
-                                        .onChange(of: config.distfilesCache) { _, _ in
-                                            hasChanges = true
-                                            // Check if new path exists
-                                            Task {
-                                                await checkDistfilesCacheExists()
-                                            }
+                                TextField("/usr/ports/distfiles", text: $config.distfilesCache)
+                                    .textFieldStyle(.roundedBorder)
+                                    .onChange(of: config.distfilesCache) { _, _ in
+                                        hasChanges = true
+                                        // Check if new path exists
+                                        Task {
+                                            await checkDistfilesCacheExists()
                                         }
-                                    if !distfilesCacheExists {
-                                        Button(action: {
-                                            Task {
-                                                await createDistfilesCache()
-                                            }
-                                        }) {
-                                            if isCreatingDistfilesCache {
-                                                ProgressView()
-                                                    .scaleEffect(0.7)
-                                            } else {
-                                                Text("Create")
-                                            }
-                                        }
-                                        .buttonStyle(.bordered)
-                                        .disabled(isCreatingDistfilesCache)
                                     }
-                                }
-                                if !distfilesCacheExists {
+                                if !distfilesCacheExists && !config.distfilesCache.isEmpty {
                                     HStack(spacing: 4) {
-                                        Image(systemName: "exclamationmark.triangle.fill")
-                                            .foregroundColor(.orange)
+                                        Image(systemName: "info.circle.fill")
+                                            .foregroundColor(.blue)
                                             .font(.caption)
-                                        Text("Directory does not exist")
+                                        Text("Directory will be created when saving")
                                             .font(.caption)
-                                            .foregroundColor(.orange)
+                                            .foregroundColor(.secondary)
                                     }
                                 }
                             }
                         }
-                        .padding(.vertical, 4)
                     }
+                    .fixedSize(horizontal: false, vertical: true)
 
                     // Build settings
                     GroupBox("Build Settings") {
-                        VStack(alignment: .leading, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("FreeBSD Mirror")
                                     .font(.subheadline)
@@ -2636,7 +2633,7 @@ struct PoudriereConfigView: View {
                     }
                 }
             }
-            .padding()
+            .padding(12)
         }
         .onAppear {
             Task {
@@ -2651,9 +2648,12 @@ struct PoudriereConfigView: View {
             config = try await SSHConnectionManager.shared.readPoudriereConfig()
             zpools = try await SSHConnectionManager.shared.getAvailableZpools()
 
-            // If ZFS mode and pool not in list, select first available
-            if !config.noZfs && !zpools.contains(config.zpool) && !zpools.isEmpty {
-                config.zpool = zpools[0]
+            // When zpools exist, use ZFS mode and select a pool
+            if !zpools.isEmpty {
+                config.noZfs = false
+                if !zpools.contains(config.zpool) {
+                    config.zpool = zpools[0]
+                }
             }
             // Check for placeholder/unconfigured mirror and default to main
             if config.freebsdHost.contains("CHANGE_THIS") ||
@@ -2681,8 +2681,16 @@ struct PoudriereConfigView: View {
     private func saveConfig() async {
         isSaving = true
         do {
+            // Auto-create distfiles cache directory if it doesn't exist
+            if !config.distfilesCache.isEmpty && !distfilesCacheExists {
+                let mkdirCommand = "mkdir -p '\(config.distfilesCache)'"
+                _ = try await SSHConnectionManager.shared.executeCommand(mkdirCommand)
+                distfilesCacheExists = true
+            }
             try await SSHConnectionManager.shared.writePoudriereConfig(config)
             hasChanges = false
+            // Mark as configured now that distfiles exists
+            viewModel.isConfigured = true
         } catch {
             viewModel.error = "Failed to save configuration: \(error.localizedDescription)"
         }
@@ -2702,18 +2710,6 @@ struct PoudriereConfigView: View {
             distfilesCacheExists = false
         }
     }
-
-    private func createDistfilesCache() async {
-        isCreatingDistfilesCache = true
-        do {
-            let command = "mkdir -p '\(config.distfilesCache)'"
-            _ = try await SSHConnectionManager.shared.executeCommand(command)
-            distfilesCacheExists = true
-        } catch {
-            viewModel.error = "Failed to create directory: \(error.localizedDescription)"
-        }
-        isCreatingDistfilesCache = false
-    }
 }
 
 // MARK: - View Model
@@ -2721,6 +2717,7 @@ struct PoudriereConfigView: View {
 @MainActor
 class PoudriereViewModel: ObservableObject {
     @Published var isInstalled = false
+    @Published var isConfigured = false  // True if distfiles directory exists
     @Published var isGitInstalled = false
     @Published var htmlPath = ""
     @Published var dataPath = ""
@@ -2779,6 +2776,15 @@ class PoudriereViewModel: ObservableObject {
             if isInstalled {
                 jails = try await sshManager.listPoudriereJails()
                 portsTrees = try await sshManager.listPoudrierePortsTrees()
+
+                // Check if poudriere is configured (distfiles directory exists)
+                let config = try await sshManager.readPoudriereConfig()
+                if !config.distfilesCache.isEmpty {
+                    let distfilesCheck = try await sshManager.executeCommand("test -d '\(config.distfilesCache)' && echo 'exists' || echo 'missing'")
+                    isConfigured = distfilesCheck.trimmingCharacters(in: .whitespacesAndNewlines) == "exists"
+                } else {
+                    isConfigured = false
+                }
             }
         } catch {
             self.error = "Failed to load Poudriere: \(error.localizedDescription)"
