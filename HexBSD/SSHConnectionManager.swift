@@ -5695,7 +5695,8 @@ extension SSHConnectionManager {
 
         // Use pkg query to get package information in a parseable format
         // %R gives the repository name (e.g., "FreeBSD-ports", "FreeBSD-ports-kmods", "FreeBSD-base")
-        let output = try await executeCommand("pkg query -a '%n\t%v\t%c\t%sh\t%R'")
+        // Handle case where pkg is not installed or no packages are installed
+        let output = try await executeCommand("pkg query -a '%n\t%v\t%c\t%sh\t%R' 2>/dev/null || echo ''")
 
         var packages: [Package] = []
 
@@ -5806,12 +5807,12 @@ extension SSHConnectionManager {
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
-        // Get cache directory size
-        let sizeOutput = try await executeCommand("du -sh /var/cache/pkg 2>/dev/null | cut -f1")
+        // Get cache directory size (handle case where pkg cache doesn't exist)
+        let sizeOutput = try await executeCommand("du -sh /var/cache/pkg 2>/dev/null | cut -f1 || echo '0B'")
         let size = sizeOutput.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Get count of cached packages
-        let countOutput = try await executeCommand("ls -1 /var/cache/pkg/*.pkg 2>/dev/null | wc -l")
+        let countOutput = try await executeCommand("ls -1 /var/cache/pkg/*.pkg 2>/dev/null | wc -l || echo '0'")
         let count = Int(countOutput.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
 
         return (size: size.isEmpty ? "0B" : size, count: count)
@@ -5875,7 +5876,7 @@ extension SSHConnectionManager {
         }
 
         // Query DNS SRV records for pkg.freebsd.org
-        let output = try await executeCommand("host -t SRV _http._tcp.pkg.freebsd.org 2>/dev/null | grep 'has SRV record' | awk '{print $NF}' | sed 's/\\.$//' | sort -u")
+        let output = try await executeCommand("host -t SRV _http._tcp.pkg.freebsd.org 2>/dev/null | grep 'has SRV record' | awk '{print $NF}' | sed 's/\\.$//' | sort -u || echo ''")
 
         var mirrors: [String] = []
         for line in output.split(separator: "\n") {
@@ -6386,13 +6387,13 @@ EOFPKG
         info.description = descOutput.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Get dependencies
-        let depsOutput = try await executeCommand("pkg info -d '\(name)' 2>/dev/null | grep -v '^\(name)' | head -20")
+        let depsOutput = try await executeCommand("pkg info -d '\(name)' 2>/dev/null | grep -v '^\(name)' | head -20 || echo ''")
         info.dependencies = depsOutput.split(separator: "\n")
             .map { String($0).trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && !$0.contains("depends on") }
 
         // Get required by (reverse dependencies)
-        let reqByOutput = try await executeCommand("pkg info -r '\(name)' 2>/dev/null | grep -v '^\(name)' | head -20")
+        let reqByOutput = try await executeCommand("pkg info -r '\(name)' 2>/dev/null | grep -v '^\(name)' | head -20 || echo ''")
         info.requiredBy = reqByOutput.split(separator: "\n")
             .map { String($0).trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && !$0.contains("required by") }
@@ -6469,7 +6470,7 @@ EOFPKG
         var info = PackageInfo(name: name)
 
         // Get basic info
-        let queryOutput = try await executeCommand("pkg rquery '%n\t%v\t%c\t%sh\t%w\t%L\t%o' '\(name)' 2>/dev/null | head -1")
+        let queryOutput = try await executeCommand("pkg rquery '%n\t%v\t%c\t%sh\t%w\t%L\t%o' '\(name)' 2>/dev/null | head -1 || echo ''")
         let components = queryOutput.split(separator: "\t").map { String($0) }
 
         if components.count >= 7 {
@@ -6487,7 +6488,7 @@ EOFPKG
         info.description = descOutput.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Get dependencies
-        let depsOutput = try await executeCommand("pkg rquery '%dn-%dv' '\(name)' 2>/dev/null | head -20")
+        let depsOutput = try await executeCommand("pkg rquery '%dn-%dv' '\(name)' 2>/dev/null | head -20 || echo ''")
         info.dependencies = depsOutput.split(separator: "\n")
             .map { String($0).trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
