@@ -56,6 +56,13 @@ struct SSHAuthMethod {
     let privateKeyURL: URL
 }
 
+/// Protocol for interactive shell delegates (used by TerminalCoordinator and JailConsoleCoordinator)
+protocol InteractiveShellDelegate: AnyObject {
+    func setStdinWriter(_ writer: @escaping (ByteBuffer) async throws -> Void)
+    func receiveOutput(_ data: Data)
+    func shellDidExit()
+}
+
 /// SSH connection manager for FreeBSD systems
 /// Each window should create its own instance for independent server connections
 @Observable
@@ -586,6 +593,64 @@ class SSHConnectionManager {
                     }
                 }
             }
+        }
+    }
+
+    /// Start an interactive command session with PTY (e.g., for jail console)
+    /// The command is executed in a PTY and the delegate is notified when it exits
+    @available(macOS 15.0, *)
+    func startInteractiveCommand(_ command: String, delegate: InteractiveShellDelegate) async throws {
+        guard let client = client else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Configure PTY request
+        let ptyRequest = SSHChannelRequestEvent.PseudoTerminalRequest(
+            wantReply: true,
+            term: "xterm-256color",
+            terminalCharacterWidth: 80,
+            terminalRowHeight: 24,
+            terminalPixelWidth: 0,
+            terminalPixelHeight: 0,
+            terminalModes: SSHTerminalModes([
+                .ECHO: 1,
+                .ICRNL: 1,
+                .OPOST: 1,
+                .ONLCR: 1
+            ])
+        )
+
+        // Start PTY session
+        try await client.withPTY(ptyRequest) { ttyOutput, ttyStdinWriter in
+            // Provide stdin writer to delegate
+            await MainActor.run {
+                delegate.setStdinWriter { buffer in
+                    try await ttyStdinWriter.write(buffer)
+                }
+            }
+
+            // Send the command immediately after PTY is ready
+            var commandBuffer = ByteBuffer()
+            commandBuffer.writeString(command + "\n")
+            try await ttyStdinWriter.write(commandBuffer)
+
+            // Stream output to delegate
+            for try await output in ttyOutput {
+                switch output {
+                case .stdout(let buffer), .stderr(let buffer):
+                    // Convert ByteBuffer to Data
+                    let data = Data(buffer: buffer)
+                    await MainActor.run {
+                        delegate.receiveOutput(data)
+                    }
+                }
+            }
+        }
+
+        // Notify delegate that shell has exited
+        await MainActor.run {
+            delegate.shellDidExit()
         }
     }
 

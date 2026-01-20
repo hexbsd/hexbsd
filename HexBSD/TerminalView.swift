@@ -128,7 +128,7 @@ struct SSHTerminalView: NSViewRepresentable {
 }
 
 /// Coordinator that bridges between SwiftTerm and SSH connection
-class TerminalCoordinator: NSObject, ObservableObject, TerminalViewDelegate {
+class TerminalCoordinator: NSObject, ObservableObject, TerminalViewDelegate, InteractiveShellDelegate {
     weak var terminalView: TerminalViewImpl?
     private var sshManager: SSHConnectionManager
     private var stdinWriter: ((ByteBuffer) async throws -> Void)?
@@ -192,6 +192,12 @@ class TerminalCoordinator: NSObject, ObservableObject, TerminalViewDelegate {
             self.isReady = true
             print("DEBUG: Terminal is now ready (stdin writer set)")
         }
+    }
+
+    /// Called when the shell session exits (InteractiveShellDelegate)
+    func shellDidExit() {
+        // For the main terminal, we don't need to do anything special
+        // The connection state is managed elsewhere
     }
 
     /// Send a command string to the terminal

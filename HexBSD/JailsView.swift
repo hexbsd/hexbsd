@@ -6,6 +6,9 @@
 //
 
 import SwiftUI
+import SwiftTerm
+import NIOCore
+import AppKit
 
 // MARK: - Jail Models
 
@@ -76,7 +79,7 @@ enum JailStatus: String {
     case stopped = "Stopped"
     case unknown = "Unknown"
 
-    var color: Color {
+    var color: SwiftUI.Color {
         switch self {
         case .running: return .green
         case .stopped: return .secondary
@@ -397,11 +400,6 @@ struct JailDetailView: View {
 
     private var sshManager: SSHConnectionManager { viewModel.sshManager }
 
-    init(jail: Jail, viewModel: JailsViewModel) {
-        self.jail = jail
-        self.viewModel = viewModel
-        _detailViewModel = StateObject(wrappedValue: JailDetailViewModel(sshManager: viewModel.sshManager))
-    }
     @State private var showConfirmStop = false
     @State private var showConfirmRestart = false
     @State private var showConfirmDelete = false
@@ -410,25 +408,90 @@ struct JailDetailView: View {
     @State private var showUpdateSheet = false
     @State private var updateOutput = ""
     @State private var isUpdating = false
+    @State private var showConsole = false
+    @StateObject private var consoleCoordinator: JailConsoleCoordinator
+
+    init(jail: Jail, viewModel: JailsViewModel) {
+        self.jail = jail
+        self.viewModel = viewModel
+        _detailViewModel = StateObject(wrappedValue: JailDetailViewModel(sshManager: viewModel.sshManager))
+        _consoleCoordinator = StateObject(wrappedValue: JailConsoleCoordinator(sshManager: viewModel.sshManager, jailName: jail.name))
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                // Header with controls
-                VStack(alignment: .leading, spacing: 8) {
+        Group {
+            if showConsole {
+                // Full-screen jail console
+                VStack(spacing: 0) {
+                    // Header
                     HStack {
-                        Image(systemName: "building.2.fill")
-                            .font(.system(size: 36))
+                        Image(systemName: "terminal")
+                            .font(.title2)
                             .foregroundColor(.blue)
-                        VStack(alignment: .leading) {
-                            Text(jail.name)
-                                .font(.title)
-                            if !jail.hostname.isEmpty {
-                                Text(jail.hostname)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
+
+                        Text("Console: \(jail.name)")
+                            .font(.headline)
+
+                        Spacer()
+
+                        if consoleCoordinator.isConnected && !consoleCoordinator.hasExited {
+                            Text("Connected")
+                                .font(.caption)
+                                .foregroundColor(.green)
                         }
+
+                        Button(action: {
+                            consoleCoordinator.stopConsole()
+                            showConsole = false
+                        }) {
+                            Label("Close Console", systemImage: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .padding()
+                    .background(SwiftUI.Color.blue.opacity(0.1))
+
+                    Divider()
+
+                    // Terminal
+                    JailConsoleTerminalView(coordinator: consoleCoordinator)
+
+                }
+                .onAppear {
+                    if #available(macOS 15.0, *) {
+                        Task {
+                            await consoleCoordinator.startConsole()
+                        }
+                    }
+                }
+                .onChange(of: consoleCoordinator.hasExited) { _, hasExited in
+                    if hasExited {
+                        // Auto-close immediately when shell exits
+                        showConsole = false
+                    }
+                }
+                .onDisappear {
+                    consoleCoordinator.stopConsole()
+                }
+            } else {
+                // Normal detail view
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        // Header with controls
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Image(systemName: "building.2.fill")
+                                    .font(.system(size: 36))
+                                    .foregroundColor(.blue)
+                                VStack(alignment: .leading) {
+                                    Text(jail.name)
+                                        .font(.title)
+                                    if !jail.hostname.isEmpty {
+                                        Text(jail.hostname)
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
                         Spacer()
                         HStack(spacing: 4) {
                             Image(systemName: jail.status.icon)
@@ -615,9 +678,11 @@ struct JailDetailView: View {
                     }
                 }
 
-                Spacer()
+                        Spacer()
+                    }
+                    .padding()
+                }
             }
-            .padding()
         }
         .sheet(isPresented: $showEditConfig) {
             if jail.isManaged {
@@ -729,12 +794,7 @@ struct JailDetailView: View {
     }
 
     private func openConsole() {
-        let command = "jexec \(jail.name) /bin/sh"
-        NotificationCenter.default.post(
-            name: .openTerminalWithCommand,
-            object: nil,
-            userInfo: ["command": command]
-        )
+        showConsole = true
     }
 
     private func startUpdate() {
@@ -2686,5 +2746,259 @@ class JailsViewModel: ObservableObject {
 
     func updateTemplate(_ template: JailTemplate, onOutput: @escaping (String) -> Void) async throws {
         try await sshManager.updateTemplateStreaming(path: template.path, onOutput: onOutput)
+    }
+}
+
+// MARK: - Jail Console View
+
+/// Coordinator for jail console terminal session
+class JailConsoleCoordinator: NSObject, ObservableObject, TerminalViewDelegate, InteractiveShellDelegate {
+    weak var terminalView: TerminalView?
+    private var sshManager: SSHConnectionManager
+    private var stdinWriter: ((ByteBuffer) async throws -> Void)?
+    private var shellTask: Task<Void, Error>?
+    private let jailName: String
+    private var hasSeenClearSequence = false
+    private var outputBuffer = Data()
+    private var inputBuffer = ""
+    private var exitCheckTimer: Timer?
+
+    @Published var isConnected = false
+    @Published var isReady = false
+    @Published var hasExited = false
+    @Published var error: String?
+
+    init(sshManager: SSHConnectionManager, jailName: String) {
+        self.sshManager = sshManager
+        self.jailName = jailName
+        super.init()
+    }
+
+    /// Start the jail console session
+    @available(macOS 15.0, *)
+    func startConsole() async {
+        // Reset all state for a fresh session
+        hasSeenClearSequence = false
+        outputBuffer.removeAll()
+        inputBuffer = ""
+        exitCheckTimer?.invalidate()
+        exitCheckTimer = nil
+
+        await MainActor.run {
+            isConnected = true
+            isReady = false
+            hasExited = false
+            error = nil
+        }
+
+        shellTask = Task {
+            do {
+                // Use exec to replace the shell process entirely, so user goes directly
+                // into the jail and session ends when they exit (no return to host shell)
+                let command = "exec jexec \(jailName) /bin/sh"
+                try await sshManager.startInteractiveCommand(command, delegate: self)
+            } catch {
+                await MainActor.run {
+                    self.error = "Failed to start jail console: \(error.localizedDescription)"
+                    self.isConnected = false
+                }
+            }
+        }
+    }
+
+    /// Stop the console session
+    func stopConsole() {
+        shellTask?.cancel()
+        shellTask = nil
+        stdinWriter = nil
+        hasSeenClearSequence = false
+        outputBuffer.removeAll()
+        inputBuffer = ""
+        exitCheckTimer?.invalidate()
+        exitCheckTimer = nil
+
+        Task { @MainActor in
+            isConnected = false
+            isReady = false
+        }
+    }
+
+    // MARK: - InteractiveShellDelegate
+
+    func receiveOutput(_ data: Data) {
+        guard let terminalView = terminalView else { return }
+
+        // Skip initial output to hide the echoed command
+        if !hasSeenClearSequence {
+            // Start a timer on first output to skip the initial command echo
+            if outputBuffer.isEmpty {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    guard let self = self, let terminalView = self.terminalView else { return }
+                    if !self.hasSeenClearSequence {
+                        self.hasSeenClearSequence = true
+
+                        var promptShown = false
+
+                        // Extract the last line from buffer (the real prompt)
+                        if let str = String(data: self.outputBuffer, encoding: .utf8), !str.isEmpty {
+                            // Replace \r\n with \n, then \r with \n for consistent handling
+                            let normalized = str.replacingOccurrences(of: "\r\n", with: "\n")
+                                               .replacingOccurrences(of: "\r", with: "\n")
+
+                            // Split into lines and find the last non-empty line
+                            let lines = normalized.components(separatedBy: "\n")
+                            if let lastNonEmpty = lines.last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) {
+                                if let promptData = lastNonEmpty.data(using: .utf8) {
+                                    let bytes = [UInt8](promptData)
+                                    terminalView.feed(byteArray: bytes[...])
+                                    promptShown = true
+                                }
+                            }
+                        }
+
+                        // Fallback: show a generic prompt if nothing was found
+                        if !promptShown {
+                            if let promptData = "# ".data(using: .utf8) {
+                                let bytes = [UInt8](promptData)
+                                terminalView.feed(byteArray: bytes[...])
+                            }
+                        }
+
+                        self.outputBuffer.removeAll()
+                    }
+                }
+            }
+            outputBuffer.append(data)
+            return
+        }
+
+        let bytes = [UInt8](data)
+        DispatchQueue.main.async {
+            terminalView.feed(byteArray: bytes[...])
+        }
+    }
+
+    func setStdinWriter(_ writer: @escaping (ByteBuffer) async throws -> Void) {
+        self.stdinWriter = writer
+        Task { @MainActor in
+            self.isReady = true
+        }
+    }
+
+    func shellDidExit() {
+        Task { @MainActor in
+            self.hasExited = true
+            self.isConnected = false
+        }
+    }
+
+    // MARK: - TerminalViewDelegate
+
+    func send(source: TerminalView, data: ArraySlice<UInt8>) {
+        guard let stdinWriter = stdinWriter else {
+            // No stdin writer means session has ended
+            Task { @MainActor in
+                if !hasExited {
+                    hasExited = true
+                    isConnected = false
+                }
+            }
+            return
+        }
+
+        // Track input to detect "exit" command
+        if let str = String(bytes: Array(data), encoding: .utf8) {
+            inputBuffer += str
+            // Check if user typed "exit" followed by enter (CR or LF)
+            if inputBuffer.lowercased().contains("exit\r") || inputBuffer.lowercased().contains("exit\n") {
+                // Start monitoring for session end
+                DispatchQueue.main.async { [weak self] in
+                    self?.startExitMonitor()
+                }
+                inputBuffer = ""
+            }
+            // Keep buffer manageable
+            if inputBuffer.count > 100 {
+                inputBuffer = String(inputBuffer.suffix(50))
+            }
+        }
+
+        Task {
+            do {
+                var buffer = ByteBuffer()
+                buffer.writeBytes(Array(data))
+                try await stdinWriter(buffer)
+            } catch {
+                // Send failed - session has likely ended
+                await MainActor.run {
+                    if !self.hasExited {
+                        self.hasExited = true
+                        self.isConnected = false
+                    }
+                }
+            }
+        }
+    }
+
+    private func startExitMonitor() {
+        // Cancel any existing timer
+        exitCheckTimer?.invalidate()
+
+        // After "exit" is sent, close the console after a brief delay
+        exitCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            Task { @MainActor in
+                if !self.hasExited {
+                    self.hasExited = true
+                    self.isConnected = false
+                }
+            }
+        }
+    }
+
+    func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+        // Could send SIGWINCH to remote if needed
+    }
+
+    func setTerminalTitle(source: TerminalView, title: String) {}
+    func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+    func scrolled(source: TerminalView, position: Double) {}
+
+    func requestOpenLink(source: TerminalView, link: String, params: [String:String]) {
+        if let url = URL(string: link) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    func bell(source: TerminalView) {
+        NSSound.beep()
+    }
+
+    func clipboardCopy(source: TerminalView, content: Data) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setData(content, forType: .string)
+    }
+
+    func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
+    func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+}
+
+/// SwiftTerm terminal view for jail console
+struct JailConsoleTerminalView: NSViewRepresentable {
+    @ObservedObject var coordinator: JailConsoleCoordinator
+
+    func makeNSView(context: Context) -> TerminalView {
+        let terminal = TerminalView(frame: .zero)
+        terminal.nativeForegroundColor = .white
+        terminal.nativeBackgroundColor = .black
+        terminal.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        terminal.terminalDelegate = coordinator
+        coordinator.terminalView = terminal
+        return terminal
+    }
+
+    func updateNSView(_ nsView: TerminalView, context: Context) {
+        // Updates handled through coordinator
     }
 }
