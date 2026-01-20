@@ -2186,43 +2186,62 @@ struct JailSetupWizardView: View {
 
                 // Setup form
                 Form {
-                    Section("Storage Mode") {
-                        Picker("Storage Mode", selection: $storageMode) {
-                            Text("ZFS").tag("zfs")
-                            Text("UFS").tag("ufs")
-                        }
-                        .pickerStyle(.segmented)
-
-                        if useZfs {
-                            Text("Uses ZFS datasets for jail storage. Supports thin jails (clones) and snapshots.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        } else {
+                    if isLoadingPools {
+                        // Show loading state
+                        Section {
                             HStack {
-                                Image(systemName: "info.circle")
-                                    .foregroundColor(.blue)
-                                Text("UFS mode uses regular directories. Thin jails (clones) will not be available.")
+                                ProgressView()
+                                    .scaleEffect(0.7)
+                                Text("Loading ZFS pools...")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
                         }
-                    }
-
-                    if useZfs {
+                    } else if !pools.isEmpty {
+                        // ZFS pools available - just show pool picker (no storage mode toggle)
                         Section {
-                            if isLoadingPools {
-                                HStack {
-                                    ProgressView()
-                                        .scaleEffect(0.7)
-                                    Text("Loading ZFS pools...")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
+                            Picker("ZFS Pool:", selection: $selectedPool) {
+                                Text("Select a pool...").tag(nil as ZFSPool?)
+                                ForEach(pools) { pool in
+                                    HStack {
+                                        Text(pool.name)
+                                        Spacer()
+                                        Text("\(pool.free) free of \(pool.size)")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .tag(pool as ZFSPool?)
                                 }
-                            } else if pools.isEmpty {
+                            }
+                            .pickerStyle(.menu)
+
+                            TextField("Dataset Name:", text: $datasetName)
+                                .textFieldStyle(.roundedBorder)
+
+                            if !zfsDataset.isEmpty {
+                                Text("Will create: \(zfsDataset)/templates, \(zfsDataset)/media, \(zfsDataset)/containers")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text("Mount path: \(basePath)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    } else {
+                        // No ZFS pools - show storage mode toggle
+                        Section("Storage Mode") {
+                            Picker("Storage Mode", selection: $storageMode) {
+                                Text("ZFS (Recommended)").tag("zfs")
+                                Text("UFS").tag("ufs")
+                            }
+                            .pickerStyle(.segmented)
+
+                            if useZfs {
                                 HStack {
-                                    Image(systemName: "exclamationmark.triangle.fill")
+                                    Image(systemName: "exclamationmark.triangle")
                                         .foregroundColor(.orange)
-                                    Text("No ZFS pools found")
+                                        .font(.caption)
+                                    Text("No ZFS pools available")
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                     Spacer()
@@ -2233,42 +2252,26 @@ struct JailSetupWizardView: View {
                                     .controlSize(.small)
                                 }
                             } else {
-                                Picker("ZFS Pool:", selection: $selectedPool) {
-                                    Text("Select a pool...").tag(nil as ZFSPool?)
-                                    ForEach(pools) { pool in
-                                        HStack {
-                                            Text(pool.name)
-                                            Spacer()
-                                            Text("\(pool.free) free of \(pool.size)")
-                                                .font(.caption)
-                                                .foregroundColor(.secondary)
-                                        }
-                                        .tag(pool as ZFSPool?)
-                                    }
-                                }
-                                .pickerStyle(.menu)
-
-                                TextField("Dataset Name:", text: $datasetName)
-                                    .textFieldStyle(.roundedBorder)
-
-                                if !zfsDataset.isEmpty {
-                                    Text("Will create: \(zfsDataset)/templates, \(zfsDataset)/media, \(zfsDataset)/containers")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    Text("Mount path: \(basePath)")
+                                HStack {
+                                    Image(systemName: "info.circle")
+                                        .foregroundColor(.blue)
+                                    Text("UFS mode uses regular directories. Thin jails (clones) will not be available.")
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                 }
                             }
                         }
-                    } else {
-                        Section {
-                            TextField("Directory Path:", text: $datasetName)
-                                .textFieldStyle(.roundedBorder)
 
-                            Text("Will create directories at: /\(datasetName)/media, /\(datasetName)/containers")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                        // UFS directory configuration
+                        if !useZfs {
+                            Section {
+                                TextField("Directory Path:", text: $datasetName)
+                                    .textFieldStyle(.roundedBorder)
+
+                                Text("Will create directories at: /\(datasetName)/media, /\(datasetName)/containers")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
                         }
                     }
                 }
