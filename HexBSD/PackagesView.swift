@@ -7,6 +7,7 @@
 
 import SwiftUI
 import AppKit
+import SwiftTerm
 
 // MARK: - Data Models
 
@@ -92,7 +93,7 @@ enum RepositoryType: String, CaseIterable {
         }
     }
 
-    var color: Color {
+    var color: SwiftUI.Color {
         switch self {
         case .quarterly:
             return .blue
@@ -256,26 +257,12 @@ struct PackagesContentViewImpl: View {
                         }
                     }
                     .padding()
-                    .background(viewModel.upgradeComplete ? Color.green.opacity(0.1) : Color.orange.opacity(0.1))
+                    .background(viewModel.upgradeComplete ? SwiftUI.Color.green.opacity(0.1) : SwiftUI.Color.orange.opacity(0.1))
 
                     Divider()
 
-                    // Console output
-                    ScrollViewReader { proxy in
-                        ScrollView {
-                            Text(viewModel.upgradeOutput.isEmpty ? "Starting upgrade..." : viewModel.upgradeOutput)
-                                .font(.system(.body, design: .monospaced))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding()
-                                .id("bottom")
-                        }
-                        .background(Color(NSColor.textBackgroundColor))
-                        .onChange(of: viewModel.upgradeOutput) { _, _ in
-                            withAnimation {
-                                proxy.scrollTo("bottom", anchor: .bottom)
-                            }
-                        }
-                    }
+                    // Console output - using SwiftTerm for performance
+                    UpgradeTerminalView(viewModel: viewModel)
 
                     Divider()
 
@@ -292,7 +279,7 @@ struct PackagesContentViewImpl: View {
                             .keyboardShortcut(.defaultAction)
                         }
                         .padding()
-                        .background(Color.secondary.opacity(0.05))
+                        .background(SwiftUI.Color.secondary.opacity(0.05))
                     }
                 }
             } else if viewModel.isPackageOperation || viewModel.packageOperationComplete {
@@ -315,26 +302,12 @@ struct PackagesContentViewImpl: View {
                         }
                     }
                     .padding()
-                    .background(viewModel.packageOperationComplete ? Color.green.opacity(0.1) : Color.blue.opacity(0.1))
+                    .background(viewModel.packageOperationComplete ? SwiftUI.Color.green.opacity(0.1) : SwiftUI.Color.blue.opacity(0.1))
 
                     Divider()
 
-                    // Console output
-                    ScrollViewReader { proxy in
-                        ScrollView {
-                            Text(viewModel.packageOperationOutput.isEmpty ? "Starting..." : viewModel.packageOperationOutput)
-                                .font(.system(.body, design: .monospaced))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding()
-                                .id("pkgbottom")
-                        }
-                        .background(Color(NSColor.textBackgroundColor))
-                        .onChange(of: viewModel.packageOperationOutput) { _, _ in
-                            withAnimation {
-                                proxy.scrollTo("pkgbottom", anchor: .bottom)
-                            }
-                        }
-                    }
+                    // Console output - using SwiftTerm for performance
+                    PackageOperationTerminalView(viewModel: viewModel)
 
                     Divider()
 
@@ -351,7 +324,7 @@ struct PackagesContentViewImpl: View {
                             .keyboardShortcut(.defaultAction)
                         }
                         .padding()
-                        .background(Color.secondary.opacity(0.05))
+                        .background(SwiftUI.Color.secondary.opacity(0.05))
                     }
                 }
             } else {
@@ -405,7 +378,7 @@ struct PackagesContentViewImpl: View {
                                 .foregroundColor(.orange)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 4)
-                                .background(Color.orange.opacity(0.1))
+                                .background(SwiftUI.Color.orange.opacity(0.1))
                                 .cornerRadius(6)
                         }
 
@@ -510,7 +483,7 @@ struct PackagesContentViewImpl: View {
                 }
             }
             .padding(8)
-            .background(Color.secondary.opacity(0.1))
+            .background(SwiftUI.Color.secondary.opacity(0.1))
             .cornerRadius(8)
             .padding(.horizontal)
             .padding(.top, 8)
@@ -530,7 +503,7 @@ struct PackagesContentViewImpl: View {
                             .font(.caption)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
-                            .background(selectedRepositoryFilter == nil ? Color.accentColor : Color.secondary.opacity(0.1))
+                            .background(selectedRepositoryFilter == nil ? SwiftUI.Color.accentColor : SwiftUI.Color.secondary.opacity(0.1))
                             .foregroundColor(selectedRepositoryFilter == nil ? .white : .primary)
                             .cornerRadius(6)
                         }
@@ -549,7 +522,7 @@ struct PackagesContentViewImpl: View {
                                 .font(.caption)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 6)
-                                .background(selectedRepositoryFilter == repo ? repositoryColor(for: repo) : Color.secondary.opacity(0.1))
+                                .background(selectedRepositoryFilter == repo ? repositoryColor(for: repo) : SwiftUI.Color.secondary.opacity(0.1))
                                 .foregroundColor(selectedRepositoryFilter == repo ? .white : .primary)
                                 .cornerRadius(6)
                             }
@@ -591,7 +564,7 @@ struct PackagesContentViewImpl: View {
                                 .padding()
                         }
                         .frame(maxHeight: 200)
-                        .background(Color.secondary.opacity(0.05))
+                        .background(SwiftUI.Color.secondary.opacity(0.05))
                         .cornerRadius(8)
                         .padding()
                     }
@@ -781,7 +754,7 @@ struct PackagesContentViewImpl: View {
         }
     }
 
-    func repositoryColor(for repo: String) -> Color {
+    func repositoryColor(for repo: String) -> SwiftUI.Color {
         let lowercased = repo.lowercased()
         if lowercased.contains("base") {
             return .purple
@@ -800,7 +773,7 @@ struct PackagesContentViewImpl: View {
 struct InstalledPackageRow: View {
     let package: Package
 
-    private var repoColor: Color {
+    private var repoColor: SwiftUI.Color {
         let lowercased = package.repository.lowercased()
         if lowercased.contains("base") {
             return .purple
@@ -929,7 +902,7 @@ struct AvailablePackageRow: View {
                             .font(.caption2)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Color.secondary.opacity(0.2))
+                            .background(SwiftUI.Color.secondary.opacity(0.2))
                             .foregroundColor(.secondary)
                             .cornerRadius(4)
                     }
@@ -987,7 +960,7 @@ struct InstalledPackageDetailView: View {
                             .font(.caption)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Color.blue.opacity(0.15))
+                            .background(SwiftUI.Color.blue.opacity(0.15))
                             .foregroundColor(.blue)
                             .cornerRadius(4)
                     }
@@ -1003,7 +976,7 @@ struct InstalledPackageDetailView: View {
                 .buttonStyle(.plain)
             }
             .padding()
-            .background(Color.secondary.opacity(0.05))
+            .background(SwiftUI.Color.secondary.opacity(0.05))
 
             Divider()
 
@@ -1150,7 +1123,7 @@ struct InstalledPackageDetailView: View {
                 }
             }
             .padding()
-            .background(Color.secondary.opacity(0.05))
+            .background(SwiftUI.Color.secondary.opacity(0.05))
         }
         .frame(minWidth: 350)
         .id(package.id)  // Force view recreation when package changes
@@ -1197,7 +1170,7 @@ struct AvailablePackageDetailView: View {
                 .buttonStyle(.plain)
             }
             .padding()
-            .background(Color.green.opacity(0.05))
+            .background(SwiftUI.Color.green.opacity(0.05))
 
             Divider()
 
@@ -1317,7 +1290,7 @@ struct AvailablePackageDetailView: View {
                 .disabled(viewModel.isLoading)
             }
             .padding()
-            .background(Color.green.opacity(0.05))
+            .background(SwiftUI.Color.green.opacity(0.05))
         }
         .frame(minWidth: 350)
         .onAppear {
@@ -1404,7 +1377,7 @@ struct SwitchRepositorySheet: View {
                 }
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background((currentCustomURL != nil ? Color.purple : currentRepository.color).opacity(0.1))
+                .background((currentCustomURL != nil ? SwiftUI.Color.purple : currentRepository.color).opacity(0.1))
                 .cornerRadius(8)
 
                 Divider()
@@ -1443,11 +1416,11 @@ struct SwitchRepositorySheet: View {
                                 }
                             }
                             .padding(12)
-                            .background(!useCustomRepository && selectedRepository == repo ? repo.color.opacity(0.1) : Color.clear)
+                            .background(!useCustomRepository && selectedRepository == repo ? repo.color.opacity(0.1) : SwiftUI.Color.clear)
                             .cornerRadius(8)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 8)
-                                    .stroke(!useCustomRepository && selectedRepository == repo ? repo.color : Color.clear, lineWidth: 2)
+                                    .stroke(!useCustomRepository && selectedRepository == repo ? repo.color : SwiftUI.Color.clear, lineWidth: 2)
                             )
                         }
                         .buttonStyle(.plain)
@@ -1479,11 +1452,11 @@ struct SwitchRepositorySheet: View {
                             }
                         }
                         .padding(12)
-                        .background(useCustomRepository ? Color.purple.opacity(0.1) : Color.clear)
+                        .background(useCustomRepository ? SwiftUI.Color.purple.opacity(0.1) : SwiftUI.Color.clear)
                         .cornerRadius(8)
                         .overlay(
                             RoundedRectangle(cornerRadius: 8)
-                                .stroke(useCustomRepository ? Color.purple : Color.clear, lineWidth: 2)
+                                .stroke(useCustomRepository ? SwiftUI.Color.purple : SwiftUI.Color.clear, lineWidth: 2)
                         )
                     }
                     .buttonStyle(.plain)
@@ -1515,7 +1488,7 @@ struct SwitchRepositorySheet: View {
                             .foregroundColor(.secondary)
                     }
                     .padding(12)
-                    .background(Color.orange.opacity(0.1))
+                    .background(SwiftUI.Color.orange.opacity(0.1))
                     .cornerRadius(8)
                 }
             }
@@ -1607,7 +1580,7 @@ struct ChangeMirrorSheet: View {
                 }
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.blue.opacity(0.1))
+                .background(SwiftUI.Color.blue.opacity(0.1))
                 .cornerRadius(8)
 
                 Divider()
@@ -1647,11 +1620,11 @@ struct ChangeMirrorSheet: View {
                                     }
                                 }
                                 .padding(10)
-                                .background(selectedMirror.id == mirror.id ? Color.blue.opacity(0.1) : Color.clear)
+                                .background(selectedMirror.id == mirror.id ? SwiftUI.Color.blue.opacity(0.1) : SwiftUI.Color.clear)
                                 .cornerRadius(8)
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 8)
-                                        .stroke(selectedMirror.id == mirror.id ? Color.blue : Color.clear, lineWidth: 2)
+                                        .stroke(selectedMirror.id == mirror.id ? SwiftUI.Color.blue : SwiftUI.Color.clear, lineWidth: 2)
                                 )
                             }
                             .buttonStyle(.plain)
@@ -1669,7 +1642,7 @@ struct ChangeMirrorSheet: View {
                             .foregroundColor(.secondary)
                     }
                     .padding(12)
-                    .background(Color.blue.opacity(0.1))
+                    .background(SwiftUI.Color.blue.opacity(0.1))
                     .cornerRadius(8)
                 }
             }
@@ -1693,6 +1666,62 @@ struct ChangeMirrorSheet: View {
     }
 }
 
+// MARK: - Package Terminal Views
+
+struct PackageOperationTerminalView: NSViewRepresentable {
+    let viewModel: PackagesViewModel
+
+    func makeNSView(context: Context) -> TerminalView {
+        let terminal = TerminalView(frame: .zero)
+        terminal.nativeForegroundColor = .white
+        terminal.nativeBackgroundColor = .black
+        terminal.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+
+        // Register terminal with viewModel and flush any pending output
+        DispatchQueue.main.async {
+            viewModel.packageOperationTerminal = terminal
+            viewModel.flushPendingOutput()
+        }
+
+        return terminal
+    }
+
+    func updateNSView(_ terminal: TerminalView, context: Context) {
+        // Ensure terminal is set (in case view was recreated)
+        if viewModel.packageOperationTerminal == nil {
+            viewModel.packageOperationTerminal = terminal
+            viewModel.flushPendingOutput()
+        }
+    }
+}
+
+struct UpgradeTerminalView: NSViewRepresentable {
+    let viewModel: PackagesViewModel
+
+    func makeNSView(context: Context) -> TerminalView {
+        let terminal = TerminalView(frame: .zero)
+        terminal.nativeForegroundColor = .white
+        terminal.nativeBackgroundColor = .black
+        terminal.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+
+        // Register terminal with viewModel and flush any pending output
+        DispatchQueue.main.async {
+            viewModel.upgradeTerminal = terminal
+            viewModel.flushPendingUpgradeOutput()
+        }
+
+        return terminal
+    }
+
+    func updateNSView(_ terminal: TerminalView, context: Context) {
+        // Ensure terminal is set (in case view was recreated)
+        if viewModel.upgradeTerminal == nil {
+            viewModel.upgradeTerminal = terminal
+            viewModel.flushPendingUpgradeOutput()
+        }
+    }
+}
+
 // MARK: - View Model
 
 @MainActor
@@ -1705,10 +1734,8 @@ class PackagesViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var isUpgrading = false
     @Published var upgradeComplete = false
-    @Published var upgradeOutput = ""
     @Published var isPackageOperation = false  // For install/remove operations
     @Published var packageOperationComplete = false
-    @Published var packageOperationOutput = ""
     @Published var packageOperationTitle = ""  // "Installing" or "Removing"
     @Published var isSwitchingRepository = false
     @Published var repositorySwitchOutput = ""
@@ -1719,10 +1746,75 @@ class PackagesViewModel: ObservableObject {
     @Published var availableMirrors: [PackageMirror] = [.automatic]
     @Published var customRepoURL: String?
 
+    // Direct terminal references for efficient output (no string accumulation)
+    weak var packageOperationTerminal: TerminalView?
+    weak var upgradeTerminal: TerminalView?
+    private var pendingOutput: [String] = []
+    private var pendingUpgradeOutput: [String] = []
+
     private let sshManager: SSHConnectionManager
 
     init(sshManager: SSHConnectionManager) {
         self.sshManager = sshManager
+    }
+
+    func appendPackageOperationOutput(_ text: String) {
+        // Feed directly to SwiftTerm if available
+        if let terminal = packageOperationTerminal {
+            if let data = text.data(using: .utf8) {
+                let bytes = [UInt8](data)
+                terminal.feed(byteArray: bytes[...])
+            }
+        } else {
+            // Buffer until terminal is ready
+            pendingOutput.append(text)
+        }
+    }
+
+    func flushPendingOutput() {
+        guard let terminal = packageOperationTerminal, !pendingOutput.isEmpty else { return }
+        let combined = pendingOutput.joined()
+        pendingOutput.removeAll()
+        if let data = combined.data(using: .utf8) {
+            let bytes = [UInt8](data)
+            terminal.feed(byteArray: bytes[...])
+        }
+    }
+
+    func resetPackageOperation() {
+        pendingOutput.removeAll()
+        if let terminal = packageOperationTerminal {
+            terminal.feed(text: "\u{1B}[2J\u{1B}[H")  // Clear screen
+        }
+    }
+
+    // Upgrade terminal methods
+    func appendUpgradeOutput(_ text: String) {
+        if let terminal = upgradeTerminal {
+            if let data = text.data(using: .utf8) {
+                let bytes = [UInt8](data)
+                terminal.feed(byteArray: bytes[...])
+            }
+        } else {
+            pendingUpgradeOutput.append(text)
+        }
+    }
+
+    func flushPendingUpgradeOutput() {
+        guard let terminal = upgradeTerminal, !pendingUpgradeOutput.isEmpty else { return }
+        let combined = pendingUpgradeOutput.joined()
+        pendingUpgradeOutput.removeAll()
+        if let data = combined.data(using: .utf8) {
+            let bytes = [UInt8](data)
+            terminal.feed(byteArray: bytes[...])
+        }
+    }
+
+    func resetUpgradeOutput() {
+        pendingUpgradeOutput.removeAll()
+        if let terminal = upgradeTerminal {
+            terminal.feed(text: "\u{1B}[2J\u{1B}[H")  // Clear screen
+        }
     }
 
     func loadPackages() async {
@@ -1797,17 +1889,17 @@ class PackagesViewModel: ObservableObject {
 
         isUpgrading = true
         upgradeComplete = false
-        upgradeOutput = ""
+        resetUpgradeOutput()
         error = nil
 
         do {
             try await sshManager.upgradePackagesStreaming { [weak self] output in
-                self?.upgradeOutput += output
+                self?.appendUpgradeOutput(output)
             }
             upgradeComplete = true
             isUpgrading = false
         } catch {
-            upgradeOutput += "\n\nError: \(error.localizedDescription)"
+            appendUpgradeOutput("\n\nError: \(error.localizedDescription)")
             upgradeComplete = true
             isUpgrading = false
         }
@@ -1830,17 +1922,17 @@ class PackagesViewModel: ObservableObject {
 
         isUpgrading = true
         upgradeComplete = false
-        upgradeOutput = ""
+        resetUpgradeOutput()
         error = nil
 
         do {
             try await sshManager.upgradeSelectedPackagesStreaming(names: names) { [weak self] output in
-                self?.upgradeOutput += output
+                self?.appendUpgradeOutput(output)
             }
             upgradeComplete = true
             isUpgrading = false
         } catch {
-            upgradeOutput += "\n\nError: \(error.localizedDescription)"
+            appendUpgradeOutput("\n\nError: \(error.localizedDescription)")
             upgradeComplete = true
             isUpgrading = false
         }
@@ -1848,7 +1940,7 @@ class PackagesViewModel: ObservableObject {
 
     func dismissUpgradeConsole() async {
         upgradeComplete = false
-        upgradeOutput = ""
+        resetUpgradeOutput()
         // Reload packages to reflect the changes
         await loadPackages()
         updatesAvailable = 0
@@ -2065,19 +2157,19 @@ class PackagesViewModel: ObservableObject {
 
         isPackageOperation = true
         packageOperationComplete = false
-        packageOperationOutput = ""
+        resetPackageOperation()
         packageOperationTitle = "Removing '\(name)'"
         error = nil
 
         do {
             try await sshManager.removePackageStreaming(name: name, force: force) { [weak self] output in
-                self?.packageOperationOutput += output
+                self?.appendPackageOperationOutput(output)
             }
             packageOperationComplete = true
             isPackageOperation = false
             return true
         } catch {
-            packageOperationOutput += "\n\nError: \(error.localizedDescription)"
+            appendPackageOperationOutput("\n\nError: \(error.localizedDescription)")
             packageOperationComplete = true
             isPackageOperation = false
             return false
@@ -2099,19 +2191,19 @@ class PackagesViewModel: ObservableObject {
 
         isPackageOperation = true
         packageOperationComplete = false
-        packageOperationOutput = ""
+        resetPackageOperation()
         packageOperationTitle = "Installing '\(name)'"
         error = nil
 
         do {
             try await sshManager.installPackageStreaming(name: name) { [weak self] output in
-                self?.packageOperationOutput += output
+                self?.appendPackageOperationOutput(output)
             }
             packageOperationComplete = true
             isPackageOperation = false
             return true
         } catch {
-            packageOperationOutput += "\n\nError: \(error.localizedDescription)"
+            appendPackageOperationOutput("\n\nError: \(error.localizedDescription)")
             packageOperationComplete = true
             isPackageOperation = false
             return false
@@ -2120,7 +2212,7 @@ class PackagesViewModel: ObservableObject {
 
     func dismissPackageOperationConsole() async {
         packageOperationComplete = false
-        packageOperationOutput = ""
+        resetPackageOperation()
         packageOperationTitle = ""
         // Reload packages to reflect the changes
         await loadPackages()
@@ -2147,18 +2239,18 @@ class PackagesViewModel: ObservableObject {
 
         isPackageOperation = true
         packageOperationComplete = false
-        packageOperationOutput = ""
+        resetPackageOperation()
         packageOperationTitle = "Cleaning Package Cache"
         error = nil
 
         do {
             try await sshManager.cleanPackageCacheStreaming { [weak self] output in
-                self?.packageOperationOutput += output
+                self?.appendPackageOperationOutput(output)
             }
             packageOperationComplete = true
             isPackageOperation = false
         } catch {
-            packageOperationOutput += "\n\nError: \(error.localizedDescription)"
+            appendPackageOperationOutput("\n\nError: \(error.localizedDescription)")
             packageOperationComplete = true
             isPackageOperation = false
         }

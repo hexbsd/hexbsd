@@ -437,8 +437,15 @@ class SSHConnectionManager {
         let streams = try await client.executeCommandStream(wrappedCommand)
         print("DEBUG: Got command streams, starting to read output")
 
-        var allOutput = ""
+        // Use array for efficient accumulation instead of string concatenation
+        var allOutputChunks: [String] = []
         var outputCount = 0
+
+        // Throttling: buffer output and flush periodically to reduce UI updates
+        var outputBuffer: [String] = []
+        var lastFlushTime = Date()
+        let flushInterval: TimeInterval = 0.1  // Flush every 100ms
+        let maxBufferSize = 50  // Or flush after 50 chunks
 
         for try await event in streams {
             // Check for task cancellation
@@ -447,20 +454,44 @@ class SSHConnectionManager {
             switch event {
             case .stdout(let data), .stderr(let data):
                 let text = String(buffer: data)
-                allOutput += text
+                allOutputChunks.append(text)
                 outputCount += 1
-                print("DEBUG: Stream event #\(outputCount), received \(text.count) chars: \(text.prefix(100))...")
 
-                // Don't output the exit code marker
+                // Buffer output for throttled delivery
                 if !text.contains("EXIT_CODE:") {
-                    await MainActor.run {
-                        onOutput(text)
+                    outputBuffer.append(text)
+                }
+
+                // Flush buffer if interval elapsed or buffer is full
+                let now = Date()
+                if now.timeIntervalSince(lastFlushTime) >= flushInterval || outputBuffer.count >= maxBufferSize {
+                    // Flush inline to avoid capturing mutable state in closure
+                    if !outputBuffer.isEmpty {
+                        let combined = outputBuffer.joined()
+                        outputBuffer.removeAll(keepingCapacity: true)
+                        if !combined.contains("EXIT_CODE:") {
+                            await MainActor.run {
+                                onOutput(combined)
+                            }
+                        }
                     }
+                    lastFlushTime = now
                 }
             }
         }
 
-        print("DEBUG: Stream finished, total output: \(allOutput.count) chars")
+        // Flush any remaining buffered output
+        if !outputBuffer.isEmpty {
+            let combined = outputBuffer.joined()
+            if !combined.contains("EXIT_CODE:") {
+                await MainActor.run {
+                    onOutput(combined)
+                }
+            }
+        }
+
+        let allOutput = allOutputChunks.joined()
+        print("DEBUG: Stream finished, total events: \(outputCount), total output: \(allOutput.count) chars")
 
         // Parse exit code from the end
         if let range = allOutput.range(of: "EXIT_CODE:") {

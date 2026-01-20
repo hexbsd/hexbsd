@@ -7,6 +7,7 @@
 
 import SwiftUI
 import WebKit
+import SwiftTerm
 
 // MARK: - Poudriere Models
 
@@ -711,7 +712,7 @@ struct WebViewContainer: View {
             }
             .padding(.horizontal)
             .padding(.vertical, 6)
-            .background(Color(nsColor: .controlBackgroundColor))
+            .background(SwiftUI.Color(nsColor: .controlBackgroundColor))
 
             Divider()
 
@@ -1107,7 +1108,7 @@ struct PoudriereContentViewImpl: View {
                             }
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .background(selectedTab == tab ? Color.accentColor.opacity(0.2) : Color.clear)
+                            .background(selectedTab == tab ? SwiftUI.Color.accentColor.opacity(0.2) : SwiftUI.Color.clear)
                             .foregroundColor(selectedTab == tab ? .accentColor : .secondary)
                             .cornerRadius(6)
                         }
@@ -1172,7 +1173,7 @@ struct PoudriereContentViewImpl: View {
                         }
                         .padding()
                         .frame(maxWidth: 400, alignment: .leading)
-                        .background(Color(nsColor: .controlBackgroundColor))
+                        .background(SwiftUI.Color(nsColor: .controlBackgroundColor))
                         .cornerRadius(8)
 
                         // Install button
@@ -1237,7 +1238,7 @@ struct PoudriereContentViewImpl: View {
                         }
                         .padding()
                         .frame(maxWidth: 400, alignment: .leading)
-                        .background(Color(nsColor: .controlBackgroundColor))
+                        .background(SwiftUI.Color(nsColor: .controlBackgroundColor))
                         .cornerRadius(8)
 
                         // Required packages
@@ -1286,7 +1287,7 @@ struct PoudriereContentViewImpl: View {
                         }
                         .padding()
                         .frame(maxWidth: 400, alignment: .leading)
-                        .background(Color(nsColor: .controlBackgroundColor))
+                        .background(SwiftUI.Color(nsColor: .controlBackgroundColor))
                         .cornerRadius(8)
 
                         // Setup button
@@ -1347,6 +1348,7 @@ struct PoudriereContentViewImpl: View {
                     viewModel.showingCommandOutput = false
                 }
             )
+            .interactiveDismissDisabled(!viewModel.commandOutput.isComplete)
         }
         .onChange(of: viewModel.error) { oldValue, newValue in
             if newValue != nil {
@@ -3173,6 +3175,35 @@ struct PoudriereSetupProgressSheet: View {
     }
 }
 
+// MARK: - Efficient Terminal Output View (uses SwiftTerm)
+
+struct TerminalOutputView: NSViewRepresentable {
+    let outputModel: CommandOutputModel
+
+    func makeNSView(context: Context) -> TerminalView {
+        let terminal = TerminalView(frame: .zero)
+        terminal.nativeForegroundColor = .white
+        terminal.nativeBackgroundColor = .black
+        terminal.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+
+        print("DEBUG: TerminalOutputView.makeNSView called, setting terminal on model")
+        // Register terminal with the model for direct data feeding
+        DispatchQueue.main.async {
+            outputModel.terminalView = terminal
+        }
+
+        return terminal
+    }
+
+    func updateNSView(_ terminal: TerminalView, context: Context) {
+        // Ensure terminal is set (in case view was recreated)
+        if outputModel.terminalView == nil {
+            print("DEBUG: TerminalOutputView.updateNSView - terminal was nil, re-setting")
+            outputModel.terminalView = terminal
+        }
+    }
+}
+
 // MARK: - Command Output Sheet (Terminal-style)
 
 struct CommandOutputSheet: View {
@@ -3193,7 +3224,7 @@ struct CommandOutputSheet: View {
         }
     }
 
-    private var statusColor: Color {
+    private var statusColor: SwiftUI.Color {
         if outputModel.isCleaningUp {
             return .orange
         } else if outputModel.isCancelled && outputModel.isComplete {
@@ -3250,23 +3281,8 @@ struct CommandOutputSheet: View {
 
             Divider()
 
-            // Terminal output
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Text(outputModel.output.isEmpty ? "Waiting for output..." : outputModel.output)
-                        .font(.system(.body, design: .monospaced))
-                        .foregroundColor(.primary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding()
-                        .id("output")
-                }
-                .background(Color(nsColor: .textBackgroundColor))
-                .onChange(of: outputModel.output) { _, _ in
-                    withAnimation {
-                        proxy.scrollTo("output", anchor: .bottom)
-                    }
-                }
-            }
+            // Terminal output - feeds directly to SwiftTerm
+            TerminalOutputView(outputModel: outputModel)
 
             Divider()
 
@@ -3310,7 +3326,6 @@ struct CommandOutputSheet: View {
 
 @MainActor
 class CommandOutputModel: ObservableObject {
-    @Published var output: String = ""
     @Published var isComplete: Bool = false
     @Published var exitCode: Int = 0
     @Published var isCancelled: Bool = false
@@ -3319,8 +3334,43 @@ class CommandOutputModel: ObservableObject {
     private var task: Task<Void, Never>?
     private var cleanupHandler: (() async -> Void)?
 
+    // Direct reference to SwiftTerm for efficient output
+    private var _terminalView: TerminalView?
+    var terminalView: TerminalView? {
+        get { _terminalView }
+        set {
+            _terminalView = newValue
+            // Flush any buffered output when terminal becomes available
+            if let terminal = newValue, !pendingBuffer.isEmpty {
+                print("DEBUG: Terminal ready, flushing \(pendingBuffer.count) buffered items")
+                let buffered = pendingBuffer.joined()
+                pendingBuffer.removeAll()
+                if let data = buffered.data(using: .utf8) {
+                    let bytes = [UInt8](data)
+                    terminal.feed(byteArray: bytes[...])
+                }
+            } else if newValue != nil {
+                print("DEBUG: Terminal ready (no buffered output)")
+            }
+        }
+    }
+
+    // Buffer for output that arrives before terminal is ready
+    private var pendingBuffer: [String] = []
+
     func appendOutput(_ text: String) {
-        output += text
+        // Feed directly to SwiftTerm if available
+        if let terminal = _terminalView {
+            if let data = text.data(using: .utf8) {
+                let bytes = [UInt8](data)
+                print("DEBUG: Feeding \(bytes.count) bytes to terminal")
+                terminal.feed(byteArray: bytes[...])
+            }
+        } else {
+            // Buffer until terminal is ready
+            print("DEBUG: Buffering \(text.count) chars (terminal not ready, buffer size: \(pendingBuffer.count))")
+            pendingBuffer.append(text)
+        }
     }
 
     func complete(exitCode: Int) {
@@ -3358,7 +3408,11 @@ class CommandOutputModel: ObservableObject {
     }
 
     func reset() {
-        output = ""
+        // Clear pending buffer and terminal screen
+        pendingBuffer.removeAll()
+        if let terminal = _terminalView {
+            terminal.feed(text: "\u{1B}[2J\u{1B}[H")  // Clear screen and move cursor home
+        }
         isComplete = false
         exitCode = 0
         isCancelled = false
