@@ -1035,7 +1035,7 @@ struct BridgesTabViewImpl: View {
                 }) {
                     Label("Create Bridge", systemImage: "plus")
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
 
             }
             .padding()
@@ -1063,13 +1063,6 @@ struct BridgesTabViewImpl: View {
                     Text("Create a bridge to connect multiple network interfaces")
                         .font(.caption)
                         .foregroundColor(.secondary)
-
-                    Button(action: {
-                        showCreateSheet = true
-                    }) {
-                        Label("Create Bridge", systemImage: "plus")
-                    }
-                    .buttonStyle(.borderedProminent)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
