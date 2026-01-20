@@ -2995,6 +2995,12 @@ struct JailConsoleTerminalView: NSViewRepresentable {
         terminal.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         terminal.terminalDelegate = coordinator
         coordinator.terminalView = terminal
+
+        // Auto-focus the terminal after a brief delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            terminal.window?.makeFirstResponder(terminal)
+        }
+
         return terminal
     }
 
