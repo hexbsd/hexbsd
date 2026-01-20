@@ -469,11 +469,18 @@ class TerminalViewImpl: TerminalView {
 
         for col in startCol...endCol {
             if let char = terminal.getCharacter(col: col, row: row) {
-                lineText.append(char)
+                // Skip null characters (empty cells)
+                if char != "\0" {
+                    lineText.append(char)
+                }
             }
         }
 
-        // Trim trailing whitespace from line
-        return lineText.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
+        // Trim trailing whitespace and control characters from line
+        var result = lineText
+        while let last = result.last, last.isWhitespace || last.asciiValue == 0 || last == "\0" {
+            result.removeLast()
+        }
+        return result
     }
 }

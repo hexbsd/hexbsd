@@ -2753,7 +2753,7 @@ class JailsViewModel: ObservableObject {
 
 /// Coordinator for jail console terminal session
 class JailConsoleCoordinator: NSObject, ObservableObject, TerminalViewDelegate, InteractiveShellDelegate {
-    weak var terminalView: TerminalView?
+    weak var terminalView: TerminalViewImpl?
     private var sshManager: SSHConnectionManager
     private var stdinWriter: ((ByteBuffer) async throws -> Void)?
     private var shellTask: Task<Void, Error>?
@@ -2988,11 +2988,8 @@ class JailConsoleCoordinator: NSObject, ObservableObject, TerminalViewDelegate, 
 struct JailConsoleTerminalView: NSViewRepresentable {
     @ObservedObject var coordinator: JailConsoleCoordinator
 
-    func makeNSView(context: Context) -> TerminalView {
-        let terminal = TerminalView(frame: .zero)
-        terminal.nativeForegroundColor = .white
-        terminal.nativeBackgroundColor = .black
-        terminal.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    func makeNSView(context: Context) -> TerminalViewImpl {
+        let terminal = TerminalViewImpl(frame: .zero)
         terminal.terminalDelegate = coordinator
         coordinator.terminalView = terminal
 
@@ -3004,7 +3001,7 @@ struct JailConsoleTerminalView: NSViewRepresentable {
         return terminal
     }
 
-    func updateNSView(_ nsView: TerminalView, context: Context) {
+    func updateNSView(_ nsView: TerminalViewImpl, context: Context) {
         // Updates handled through coordinator
     }
 }
