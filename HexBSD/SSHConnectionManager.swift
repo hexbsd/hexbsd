@@ -63,6 +63,7 @@ class SSHConnectionManager {
     // Connection state
     var isConnected: Bool = false
     var serverAddress: String = ""
+    var serverName: String = ""  // User-friendly display name for window titles
     var lastError: String?
 
     // SSH client

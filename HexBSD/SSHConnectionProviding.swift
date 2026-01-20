@@ -18,6 +18,9 @@ protocol SSHConnectionProviding: AnyObject {
     /// The address of the connected server
     var serverAddress: String { get }
 
+    /// User-friendly display name for the server (used in window titles)
+    var serverName: String { get set }
+
     /// The last error message, if any
     var lastError: String? { get }
 

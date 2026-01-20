@@ -673,7 +673,7 @@ struct ContentView: View {
                 }
                 .disabled(!sshManager.isConnected || isNavigationLocked)
             }
-            .navigationTitle("\(sshManager.isConnected ? sshManager.serverAddress : "HexBSD")")
+            .navigationTitle("\(sshManager.isConnected ? sshManager.serverName : "HexBSD")")
 
 #if os(macOS)
             .navigationSplitViewColumnWidth(min: 180, ideal: 200)
@@ -682,7 +682,7 @@ struct ContentView: View {
             if let section = selectedSection, sshManager.isConnected {
                 DetailView(
                     section: section,
-                    serverAddress: sshManager.serverAddress,
+                    serverName: sshManager.serverName,
                     systemStatus: systemStatus
                 )
                 .environment(\.windowID, windowId)
@@ -975,6 +975,12 @@ struct ContentView: View {
                 // Validate that server is running FreeBSD
                 try await sshManager.validateFreeBSD()
 
+                // Set the server name for display in window titles
+                // Use host as fallback for older saved servers that might have empty names
+                await MainActor.run {
+                    sshManager.serverName = server.name.isEmpty ? server.host : server.name
+                }
+
                 await MainActor.run {
                     loadDataFromServer()
                     // Navigate to status screen after successful connection
@@ -1004,7 +1010,7 @@ struct ContentView: View {
 
 struct DetailView: View {
     let section: SidebarSection
-    let serverAddress: String
+    let serverName: String
     let systemStatus: SystemStatus?
 
     var body: some View {
@@ -1133,7 +1139,7 @@ struct DetailView: View {
             Spacer()
         }
         .padding()
-        .navigationTitle("\(serverAddress) - \(section.rawValue)")
+        .navigationTitle("\(serverName) - \(section.rawValue)")
     }
 }
 
@@ -1162,9 +1168,9 @@ struct ConnectView: View {
                 .bold()
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("Server Name (optional)")
+                Text("Server Name")
                     .font(.caption)
-                TextField("Will use server address if empty", text: $serverName)
+                TextField("My FreeBSD Server", text: $serverName)
                     .textFieldStyle(.roundedBorder)
 
                 Text("Server Address")
@@ -1239,7 +1245,7 @@ struct ConnectView: View {
                     connectToServer()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(isConnecting || inputAddress.isEmpty || username.isEmpty || selectedKeyURL == nil)
+                .disabled(isConnecting || serverName.isEmpty || inputAddress.isEmpty || username.isEmpty || selectedKeyURL == nil)
             }
         }
         .padding()
@@ -1341,12 +1347,17 @@ struct ConnectView: View {
                 // Validate that server is running FreeBSD
                 try await sshManager.validateFreeBSD()
 
+                // Set the server name for display in window titles
+                await MainActor.run {
+                    sshManager.serverName = serverName
+                }
+
                 // Connection successful - prompt to save server
                 await MainActor.run {
                     // Create pending server for save prompt
                     if let keyURL = selectedKeyURL {
                         pendingServer = SavedServer(
-                            name: serverName.isEmpty ? inputAddress : serverName,
+                            name: serverName,
                             host: inputAddress,
                             port: portInt,
                             username: username,
