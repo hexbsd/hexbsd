@@ -5949,9 +5949,11 @@ extension SSHConnectionManager {
             let description = components[2]
             let size = components[3]
             var repository = components[4].isEmpty ? "Unknown" : components[4]
-            // Normalize "FreeBSD" to "FreeBSD-base" to avoid redundant filter
+            // Normalize old latest config names to match quarterly naming for consistent filtering
             if repository == "FreeBSD" {
-                repository = "FreeBSD-base"
+                repository = "FreeBSD-ports"
+            } else if repository == "FreeBSD-kmods" {
+                repository = "FreeBSD-ports-kmods"
             }
 
             packages.append(Package(
@@ -6192,12 +6194,8 @@ extension SSHConnectionManager {
             } else {
                 // For latest with automatic, need to override to latest but keep SRV
                 let configContent = """
-# Disable the default quarterly repositories
-FreeBSD-ports: { enabled: no }
-FreeBSD-ports-kmods: { enabled: no }
-
-# Enable the latest repository for packages with automatic mirror selection
-FreeBSD: {
+# Override quarterly repositories with latest
+FreeBSD-ports: {
   url: "pkg+http://pkg.FreeBSD.org/${ABI}/latest",
   mirror_type: "srv",
   signature_type: "fingerprints",
@@ -6205,8 +6203,7 @@ FreeBSD: {
   enabled: yes
 }
 
-# Enable the latest repository for kernel modules
-FreeBSD-kmods: {
+FreeBSD-ports-kmods: {
   url: "pkg+http://pkg.FreeBSD.org/${ABI}/kmods_latest_${VERSION_MINOR}",
   mirror_type: "srv",
   signature_type: "fingerprints",
@@ -6226,20 +6223,15 @@ EOFPKG
             outputLog += "Setting mirror to \(hostname) (\(repoPath))...\n"
 
             let configContent = """
-# Disable the default repositories
-FreeBSD-ports: { enabled: no }
-FreeBSD-ports-kmods: { enabled: no }
-
-# Use specific mirror for packages
-FreeBSD: {
+# Override repositories with specific mirror
+FreeBSD-ports: {
   url: "http://\(hostname)/${ABI}/\(repoPath)",
   signature_type: "fingerprints",
   fingerprints: "/usr/share/keys/pkg",
   enabled: yes
 }
 
-# Use specific mirror for kernel modules
-FreeBSD-kmods: {
+FreeBSD-ports-kmods: {
   url: "http://\(hostname)/${ABI}/\(kmodsPath)",
   signature_type: "fingerprints",
   fingerprints: "/usr/share/keys/pkg",
@@ -6293,17 +6285,10 @@ EOFPKG
             outputLog += "Using system default quarterly repositories...\n"
             outputLog += "No override file needed - using /etc/pkg/FreeBSD.conf defaults\n"
         } else {
-            // For latest, create an override file
-            // We need to explicitly disable FreeBSD-ports and FreeBSD-ports-kmods
-            // which are defined in /etc/pkg/FreeBSD.conf as quarterly
-            // And enable the latest versions for both packages and kernel modules
+            // For latest, create an override file that redefines the repos with latest URLs
             let configContent = """
-# Disable the default quarterly repositories
-FreeBSD-ports: { enabled: no }
-FreeBSD-ports-kmods: { enabled: no }
-
-# Enable the latest repository for packages
-FreeBSD: {
+# Override quarterly repositories with latest
+FreeBSD-ports: {
   url: "pkg+http://pkg.FreeBSD.org/${ABI}/latest",
   mirror_type: "srv",
   signature_type: "fingerprints",
@@ -6311,8 +6296,7 @@ FreeBSD: {
   enabled: yes
 }
 
-# Enable the latest repository for kernel modules
-FreeBSD-kmods: {
+FreeBSD-ports-kmods: {
   url: "pkg+http://pkg.FreeBSD.org/${ABI}/kmods_latest_${VERSION_MINOR}",
   mirror_type: "srv",
   signature_type: "fingerprints",
@@ -6649,7 +6633,7 @@ EOFPKG
         return info
     }
 
-    /// Remove an installed package
+    /// Remove an installed package and clean up orphaned dependencies
     func removePackage(name: String, force: Bool = false) async throws -> String {
         guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
@@ -6657,7 +6641,14 @@ EOFPKG
         }
 
         let forceFlag = force ? "-f" : ""
-        let output = try await executeCommand("pkg delete -y \(forceFlag) '\(name)' 2>&1")
+        var output = try await executeCommand("pkg delete -y \(forceFlag) '\(name)' 2>&1")
+
+        // Run autoremove to clean up orphaned dependencies
+        let autoremoveOutput = try await executeCommand("pkg autoremove -y 2>&1")
+        if !autoremoveOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            output += "\n\n--- Cleaning up orphaned packages ---\n" + autoremoveOutput
+        }
+
         return output
     }
 
@@ -6697,6 +6688,10 @@ EOFPKG
             throw NSError(domain: "SSHConnectionManager", code: exitCode,
                          userInfo: [NSLocalizedDescriptionKey: "Package removal failed with exit code \(exitCode)"])
         }
+
+        // Run autoremove to clean up orphaned dependencies
+        onOutput("\n--- Cleaning up orphaned packages ---\n")
+        _ = try await executeCommandStreaming("pkg autoremove -y", onOutput: onOutput)
     }
 
     /// Get info about an available (not installed) package

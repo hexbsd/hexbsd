@@ -747,7 +747,8 @@ struct PackagesContentViewImpl: View {
             return "gearshape.fill"
         } else if lowercased.contains("kmod") {
             return "cpu.fill"
-        } else if lowercased.contains("ports") {
+        } else if lowercased.contains("ports") || lowercased == "freebsd" {
+            // "FreeBSD-ports" (quarterly) or "FreeBSD" (latest) are both ports repos
             return "shippingbox.fill"
         } else {
             return "archivebox.fill"
@@ -760,7 +761,8 @@ struct PackagesContentViewImpl: View {
             return .purple
         } else if lowercased.contains("kmod") {
             return .orange
-        } else if lowercased.contains("ports") {
+        } else if lowercased.contains("ports") || lowercased == "freebsd" {
+            // "FreeBSD-ports" (quarterly) or "FreeBSD" (latest) are both ports repos
             return .blue
         } else {
             return .green
@@ -779,7 +781,8 @@ struct InstalledPackageRow: View {
             return .purple
         } else if lowercased.contains("kmod") {
             return .orange
-        } else if lowercased.contains("ports") {
+        } else if lowercased.contains("ports") || lowercased == "freebsd" {
+            // "FreeBSD-ports" (quarterly) or "FreeBSD" (latest) are both ports repos
             return .blue
         } else {
             return .green
@@ -937,7 +940,8 @@ struct InstalledPackageDetailView: View {
     @State private var packageInfo: PackageInfo?
     @State private var isLoadingInfo = true
 
-    // Base packages should never be removable through the UI
+    // Base packages (from FreeBSD-base repo) should never be removable through the UI
+    // Note: "FreeBSD" (latest ports repo) is NOT a base repo - only "FreeBSD-base" is
     private var isBasePackage: Bool {
         package.repository.lowercased().contains("base")
     }
