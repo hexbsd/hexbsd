@@ -383,6 +383,7 @@ class SSHConnectionManager {
     }
 
     /// Execute a command and return stdout/stderr separately
+    /// This version captures output even when commands fail with non-zero exit codes
     func executeCommandDetailed(_ command: String) async throws -> (stdout: String, stderr: String) {
         guard let client = client else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
@@ -395,21 +396,40 @@ class SSHConnectionManager {
             Task { await commandSemaphore.release() }
         }
 
-        let streams = try await client.executeCommandStream(command)
+        // Wrap command to merge stderr with stdout and capture exit code
+        // This prevents Citadel from throwing before we can get error messages
+        let escapedCommand = command.replacingOccurrences(of: "'", with: "'\\''")
+        let wrappedCommand = "sh -c '\(escapedCommand) 2>&1; echo __EXIT_CODE__:$?'"
 
-        var stdout = ""
-        var stderr = ""
+        let streams = try await client.executeCommandStream(wrappedCommand)
+
+        var output = ""
 
         for try await event in streams {
             switch event {
-            case .stdout(let data):
-                stdout += String(buffer: data)
-            case .stderr(let data):
-                stderr += String(buffer: data)
+            case .stdout(let data), .stderr(let data):
+                output += String(buffer: data)
             }
         }
 
-        return (stdout: stdout, stderr: stderr)
+        // Parse exit code from the end
+        var commandOutput = output
+        var exitCode = 0
+        if let exitCodeRange = output.range(of: "__EXIT_CODE__:") {
+            let exitCodeStr = output[exitCodeRange.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+            exitCode = Int(exitCodeStr) ?? 0
+            commandOutput = String(output[..<exitCodeRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        // If command failed, throw an error with the output as the message
+        if exitCode != 0 {
+            throw NSError(domain: "SSHConnectionManager", code: exitCode,
+                         userInfo: [NSLocalizedDescriptionKey: commandOutput.isEmpty ? "Command failed with exit code \(exitCode)" : commandOutput])
+        }
+
+        // For successful commands, return combined output as stdout
+        // (stderr was merged via 2>&1, which is fine for ZFS commands that output warnings to stderr)
+        return (stdout: commandOutput, stderr: commandOutput)
     }
 
     /// Execute a command with streaming output via a callback
