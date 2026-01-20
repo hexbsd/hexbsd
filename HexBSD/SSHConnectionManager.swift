@@ -442,43 +442,59 @@ class SSHConnectionManager {
         var outputCount = 0
 
         // Throttling: buffer output and flush periodically to reduce UI updates
+        // For fast output (rapid events), batch up to 50ms or 50 chunks
+        // For slow output (sparse events), flush immediately to show progress
         var outputBuffer: [String] = []
-        var lastFlushTime = Date()
-        let flushInterval: TimeInterval = 0.1  // Flush every 100ms
+        var lastFlushTime = Date.distantPast  // Allow immediate first flush
+        var lastEventTime = Date.distantPast  // First event is considered "slow" (immediate flush)
+        let fastFlushInterval: TimeInterval = 0.05  // Flush every 50ms during rapid output
         let maxBufferSize = 50  // Or flush after 50 chunks
 
+        print("DEBUG: Entering stream for-await loop")
         for try await event in streams {
             // Check for task cancellation
             try Task.checkCancellation()
 
+            print("DEBUG: Received stream event")
             switch event {
             case .stdout(let data), .stderr(let data):
                 let text = String(buffer: data)
+                print("DEBUG: Stream event has \(text.count) chars")
                 allOutputChunks.append(text)
                 outputCount += 1
+
+                let now = Date()
+                let timeSinceLastEvent = now.timeIntervalSince(lastEventTime)
+                lastEventTime = now
 
                 // Buffer output for throttled delivery
                 if !text.contains("EXIT_CODE:") {
                     outputBuffer.append(text)
                 }
 
-                // Flush buffer if interval elapsed or buffer is full
-                let now = Date()
-                if now.timeIntervalSince(lastFlushTime) >= flushInterval || outputBuffer.count >= maxBufferSize {
-                    // Flush inline to avoid capturing mutable state in closure
-                    if !outputBuffer.isEmpty {
-                        let combined = outputBuffer.joined()
-                        outputBuffer.removeAll(keepingCapacity: true)
-                        if !combined.contains("EXIT_CODE:") {
-                            await MainActor.run {
-                                onOutput(combined)
-                            }
+                // Flush buffer if:
+                // 1. Slow output mode (>100ms since last event) - flush immediately for responsiveness
+                // 2. Fast output mode - flush every 50ms or when buffer is full
+                let timeSinceLastFlush = now.timeIntervalSince(lastFlushTime)
+                let shouldFlush = timeSinceLastEvent > 0.1 || // Slow output - flush immediately
+                                  timeSinceLastFlush >= fastFlushInterval || // Fast output - time threshold
+                                  outputBuffer.count >= maxBufferSize // Fast output - size threshold
+
+                if shouldFlush && !outputBuffer.isEmpty {
+                    let combined = outputBuffer.joined()
+                    print("DEBUG: Flushing buffer with \(combined.count) chars (slowMode: \(timeSinceLastEvent > 0.1))")
+                    outputBuffer.removeAll(keepingCapacity: true)
+                    if !combined.contains("EXIT_CODE:") {
+                        await MainActor.run {
+                            print("DEBUG: Calling onOutput callback with \(combined.count) chars")
+                            onOutput(combined)
                         }
                     }
                     lastFlushTime = now
                 }
             }
         }
+        print("DEBUG: Stream for-await loop finished")
 
         // Flush any remaining buffered output
         if !outputBuffer.isEmpty {

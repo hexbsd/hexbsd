@@ -2964,15 +2964,23 @@ class PoudriereViewModel: ObservableObject {
 
         let task = Task {
             do {
+                print("DEBUG: createJail task starting executeCommandStreaming")
                 let exitCode = try await sshManager.executeCommandStreaming(command) { [weak self] output in
-                    self?.commandOutput.appendOutput(output)
+                    if let strongSelf = self {
+                        print("DEBUG: createJail callback received \(output.count) chars, calling appendOutput")
+                        strongSelf.commandOutput.appendOutput(output)
+                    } else {
+                        print("DEBUG: createJail callback - self is nil!")
+                    }
                 }
+                print("DEBUG: createJail executeCommandStreaming returned with exitCode: \(exitCode)")
                 commandOutput.complete(exitCode: exitCode)
 
                 if exitCode == 0 {
                     await loadJails()
                 }
             } catch {
+                print("DEBUG: createJail caught error: \(error), isCancelled: \(Task.isCancelled)")
                 if !Task.isCancelled {
                     commandOutput.appendOutput("\n\nError: \(error.localizedDescription)")
                     commandOutput.complete(exitCode: 1)
@@ -3078,15 +3086,23 @@ class PoudriereViewModel: ObservableObject {
 
         let task = Task {
             do {
+                print("DEBUG: createPortsTree task starting executeCommandStreaming")
                 let exitCode = try await sshManager.executeCommandStreaming(command) { [weak self] output in
-                    self?.commandOutput.appendOutput(output)
+                    if let strongSelf = self {
+                        print("DEBUG: createPortsTree callback received \(output.count) chars, calling appendOutput")
+                        strongSelf.commandOutput.appendOutput(output)
+                    } else {
+                        print("DEBUG: createPortsTree callback - self is nil!")
+                    }
                 }
+                print("DEBUG: createPortsTree executeCommandStreaming returned with exitCode: \(exitCode)")
                 commandOutput.complete(exitCode: exitCode)
 
                 if exitCode == 0 {
                     await loadPortsTrees()
                 }
             } catch {
+                print("DEBUG: createPortsTree caught error: \(error), isCancelled: \(Task.isCancelled)")
                 if !Task.isCancelled {
                     commandOutput.appendOutput("\n\nError: \(error.localizedDescription)")
                     commandOutput.complete(exitCode: 1)
@@ -3186,11 +3202,10 @@ struct TerminalOutputView: NSViewRepresentable {
         terminal.nativeBackgroundColor = .black
         terminal.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
 
-        print("DEBUG: TerminalOutputView.makeNSView called, setting terminal on model")
+        print("DEBUG: TerminalOutputView.makeNSView called, setting terminal on model synchronously")
         // Register terminal with the model for direct data feeding
-        DispatchQueue.main.async {
-            outputModel.terminalView = terminal
-        }
+        // Set synchronously to avoid race condition with streaming output
+        outputModel.terminalView = terminal
 
         return terminal
     }
@@ -3359,6 +3374,7 @@ class CommandOutputModel: ObservableObject {
     private var pendingBuffer: [String] = []
 
     func appendOutput(_ text: String) {
+        print("DEBUG: CommandOutputModel.appendOutput called with \(text.count) chars, terminal available: \(_terminalView != nil)")
         // Feed directly to SwiftTerm if available
         if let terminal = _terminalView {
             if let data = text.data(using: .utf8) {
