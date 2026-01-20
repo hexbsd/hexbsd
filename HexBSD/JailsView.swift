@@ -148,6 +148,7 @@ struct JailsContentViewImpl: View {
     @State private var searchText = ""
     @State private var showCreateJail = false
     @State private var selectedTab: JailsTab = .jails
+    @State private var consoleJail: Jail?  // Jail currently in console mode (takes over full view)
 
     /// Check if jail infrastructure is ready (bridge exists, directories exist and jails enabled - templates are optional)
     private var isSetupComplete: Bool {
@@ -157,60 +158,70 @@ struct JailsContentViewImpl: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Toolbar
-            HStack {
-                // Tab picker - only show Templates tab if jails are using ZFS storage
-                if viewModel.jailSetupStatus.zfsDataset != nil {
-                    Picker("", selection: $selectedTab) {
-                        ForEach(JailsTab.allCases, id: \.self) { tab in
-                            Text(tab.rawValue).tag(tab)
+        Group {
+            if let jail = consoleJail {
+                // Full-screen jail console (takes over entire content area)
+                JailFullScreenConsoleView(jail: jail, sshManager: sshManager, onClose: {
+                    consoleJail = nil
+                })
+            } else {
+                // Normal jails view with toolbar and sidebar
+                VStack(spacing: 0) {
+                    // Toolbar
+                    HStack {
+                        // Tab picker - only show Templates tab if jails are using ZFS storage
+                        if viewModel.jailSetupStatus.zfsDataset != nil {
+                            Picker("", selection: $selectedTab) {
+                                ForEach(JailsTab.allCases, id: \.self) { tab in
+                                    Text(tab.rawValue).tag(tab)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .disabled(viewModel.isLongRunningOperation)
+                            .frame(width: 200)
+                        } else {
+                            Text("Jails")
+                                .font(.headline)
+                        }
+
+                        Spacer()
+
+                        if isSetupComplete && selectedTab == .jails {
+                            Button(action: {
+                                showCreateJail = true
+                            }) {
+                                Label("Create Jail", systemImage: "plus")
+                            }
+                            .buttonStyle(.bordered)
                         }
                     }
-                    .pickerStyle(.segmented)
-                    .disabled(viewModel.isLongRunningOperation)
-                    .frame(width: 200)
-                } else {
-                    Text("Jails")
-                        .font(.headline)
-                }
+                    .padding()
 
-                Spacer()
+                    Divider()
 
-                if isSetupComplete && selectedTab == .jails {
-                    Button(action: {
-                        showCreateJail = true
-                    }) {
-                        Label("Create Jail", systemImage: "plus")
+                    // Content area
+                    if !viewModel.initialCheckComplete {
+                        // Show loading until initial setup check completes
+                        VStack(spacing: 20) {
+                            ProgressView()
+                                .scaleEffect(1.5)
+                            Text("Loading...")
+                                .font(.headline)
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if !isSetupComplete {
+                        // Show setup wizard when infrastructure is not ready
+                        JailSetupWizardView(viewModel: viewModel)
+                    } else {
+                        // Show selected tab content
+                        switch selectedTab {
+                        case .jails:
+                            jailsTabContent
+                        case .templates:
+                            TemplatesTabView(viewModel: viewModel)
+                        }
                     }
-                    .buttonStyle(.bordered)
-                }
-            }
-            .padding()
-
-            Divider()
-
-            // Content area
-            if !viewModel.initialCheckComplete {
-                // Show loading until initial setup check completes
-                VStack(spacing: 20) {
-                    ProgressView()
-                        .scaleEffect(1.5)
-                    Text("Loading...")
-                        .font(.headline)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if !isSetupComplete {
-                // Show setup wizard when infrastructure is not ready
-                JailSetupWizardView(viewModel: viewModel)
-            } else {
-                // Show selected tab content
-                switch selectedTab {
-                case .jails:
-                    jailsTabContent
-                case .templates:
-                    TemplatesTabView(viewModel: viewModel)
                 }
             }
         }
@@ -309,7 +320,7 @@ struct JailsContentViewImpl: View {
                 // Detail view
                 Group {
                     if let jail = selectedJail {
-                        JailDetailView(jail: jail, viewModel: viewModel)
+                        JailDetailView(jail: jail, viewModel: viewModel, consoleJail: $consoleJail)
                     } else {
                         VStack(spacing: 20) {
                             Image(systemName: "sidebar.left")
@@ -397,6 +408,7 @@ struct JailDetailView: View {
     let jail: Jail
     @ObservedObject var viewModel: JailsViewModel
     @StateObject private var detailViewModel: JailDetailViewModel
+    @Binding var consoleJail: Jail?  // Binding to open full-screen console
 
     private var sshManager: SSHConnectionManager { viewModel.sshManager }
 
@@ -408,74 +420,16 @@ struct JailDetailView: View {
     @State private var showUpdateSheet = false
     @State private var updateOutput = ""
     @State private var isUpdating = false
-    @State private var showConsole = false
-    @StateObject private var consoleCoordinator: JailConsoleCoordinator
 
-    init(jail: Jail, viewModel: JailsViewModel) {
+    init(jail: Jail, viewModel: JailsViewModel, consoleJail: Binding<Jail?>) {
         self.jail = jail
         self.viewModel = viewModel
+        self._consoleJail = consoleJail
         _detailViewModel = StateObject(wrappedValue: JailDetailViewModel(sshManager: viewModel.sshManager))
-        _consoleCoordinator = StateObject(wrappedValue: JailConsoleCoordinator(sshManager: viewModel.sshManager, jailName: jail.name))
     }
 
     var body: some View {
-        Group {
-            if showConsole {
-                // Full-screen jail console
-                VStack(spacing: 0) {
-                    // Header
-                    HStack {
-                        Image(systemName: "terminal")
-                            .font(.title2)
-                            .foregroundColor(.blue)
-
-                        Text("Console: \(jail.name)")
-                            .font(.headline)
-
-                        Spacer()
-
-                        if consoleCoordinator.isConnected && !consoleCoordinator.hasExited {
-                            Text("Connected")
-                                .font(.caption)
-                                .foregroundColor(.green)
-                        }
-
-                        Button(action: {
-                            consoleCoordinator.stopConsole()
-                            showConsole = false
-                        }) {
-                            Label("Close Console", systemImage: "xmark.circle.fill")
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                    .padding()
-                    .background(SwiftUI.Color.blue.opacity(0.1))
-
-                    Divider()
-
-                    // Terminal
-                    JailConsoleTerminalView(coordinator: consoleCoordinator)
-
-                }
-                .onAppear {
-                    if #available(macOS 15.0, *) {
-                        Task {
-                            await consoleCoordinator.startConsole()
-                        }
-                    }
-                }
-                .onChange(of: consoleCoordinator.hasExited) { _, hasExited in
-                    if hasExited {
-                        // Auto-close immediately when shell exits
-                        showConsole = false
-                    }
-                }
-                .onDisappear {
-                    consoleCoordinator.stopConsole()
-                }
-            } else {
-                // Normal detail view
-                ScrollView {
+        ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
                         // Header with controls
                         VStack(alignment: .leading, spacing: 8) {
@@ -678,11 +632,9 @@ struct JailDetailView: View {
                     }
                 }
 
-                        Spacer()
-                    }
-                    .padding()
-                }
+                Spacer()
             }
+            .padding()
         }
         .sheet(isPresented: $showEditConfig) {
             if jail.isManaged {
@@ -794,7 +746,7 @@ struct JailDetailView: View {
     }
 
     private func openConsole() {
-        showConsole = true
+        consoleJail = jail
     }
 
     private func startUpdate() {
@@ -3003,5 +2955,74 @@ struct JailConsoleTerminalView: NSViewRepresentable {
 
     func updateNSView(_ nsView: TerminalViewImpl, context: Context) {
         // Updates handled through coordinator
+    }
+}
+
+/// Full-screen jail console view that takes over the entire content area
+struct JailFullScreenConsoleView: View {
+    let jail: Jail
+    let sshManager: SSHConnectionManager
+    let onClose: () -> Void
+
+    @StateObject private var coordinator: JailConsoleCoordinator
+
+    init(jail: Jail, sshManager: SSHConnectionManager, onClose: @escaping () -> Void) {
+        self.jail = jail
+        self.sshManager = sshManager
+        self.onClose = onClose
+        _coordinator = StateObject(wrappedValue: JailConsoleCoordinator(sshManager: sshManager, jailName: jail.name))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Image(systemName: "terminal")
+                    .font(.title2)
+                    .foregroundColor(.blue)
+
+                Text("Console: \(jail.name)")
+                    .font(.headline)
+
+                Spacer()
+
+                if coordinator.isConnected && !coordinator.hasExited {
+                    Text("Connected")
+                        .font(.caption)
+                        .foregroundColor(.green)
+                }
+
+                Button(action: {
+                    coordinator.stopConsole()
+                    onClose()
+                }) {
+                    Label("Close Console", systemImage: "xmark.circle.fill")
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding()
+            .background(SwiftUI.Color.blue.opacity(0.1))
+
+            Divider()
+
+            // Terminal
+            JailConsoleTerminalView(coordinator: coordinator)
+        }
+        .onAppear {
+            if #available(macOS 15.0, *) {
+                Task {
+                    await coordinator.startConsole()
+                }
+            }
+        }
+        .onChange(of: coordinator.hasExited) { _, hasExited in
+            if hasExited {
+                // Auto-close when shell exits
+                onClose()
+            }
+        }
+        .onDisappear {
+            coordinator.stopConsole()
+        }
     }
 }
