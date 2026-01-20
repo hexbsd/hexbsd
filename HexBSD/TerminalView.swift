@@ -119,6 +119,12 @@ struct SSHTerminalView: NSViewRepresentable {
         let terminal = TerminalViewImpl(frame: .zero)
         terminal.terminalDelegate = terminalCoordinator
         terminalCoordinator.terminalView = terminal
+
+        // Auto-focus the terminal after a brief delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            terminal.window?.makeFirstResponder(terminal)
+        }
+
         return terminal
     }
 
