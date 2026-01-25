@@ -4013,7 +4013,9 @@ extension SSHConnectionManager {
 
             # Create epair and add to existing bridge
             exec.prestart  = "/sbin/ifconfig ${epair} create up";
+            exec.prestart += "/sbin/ifconfig ${epair}a -rxcsum -txcsum";
             exec.prestart += "/sbin/ifconfig \(bridge) addm ${epair}a up";
+            exec.created   = "/sbin/ifconfig ${epair}b -rxcsum -txcsum";
 
         """
 
