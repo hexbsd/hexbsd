@@ -416,6 +416,7 @@ struct JailDetailView: View {
     @State private var showConfirmRestart = false
     @State private var showConfirmDelete = false
     @State private var showEditConfig = false
+    @State private var showEditSecurity = false
     @State private var isPerformingAction = false
     @State private var showUpdateSheet = false
     @State private var updateOutput = ""
@@ -504,6 +505,13 @@ struct JailDetailView: View {
                             Spacer()
 
                             if jail.isManaged {
+                                Button(action: {
+                                    showEditSecurity = true
+                                }) {
+                                    Label("Security", systemImage: "lock.shield")
+                                }
+                                .buttonStyle(.bordered)
+
                                 Button(action: {
                                     showEditConfig = true
                                 }) {
@@ -639,6 +647,11 @@ struct JailDetailView: View {
         .sheet(isPresented: $showEditConfig) {
             if jail.isManaged {
                 EditJailConfigSheet(jail: jail, viewModel: viewModel)
+            }
+        }
+        .sheet(isPresented: $showEditSecurity) {
+            if jail.isManaged {
+                EditJailSecuritySheet(jail: jail, viewModel: viewModel)
             }
         }
         .sheet(isPresented: $showUpdateSheet) {
@@ -815,6 +828,10 @@ struct JailCreateSheet: View {
     @State private var freebsdVersion = ""
     @State private var availableReleases: [String] = []
     @State private var isLoadingReleases = false
+
+    // Security settings
+    @State private var allowRawSockets = false
+    @State private var allowSysVIPC = false
 
     // State
     @State private var isCreating = false
@@ -1116,6 +1133,18 @@ struct JailCreateSheet: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+
+            Section("Security") {
+                Toggle("Allow Raw Sockets", isOn: $allowRawSockets)
+                Text("Enables ping and other ICMP utilities inside the jail. Required for network diagnostics.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                Toggle("Allow SysV IPC", isOn: $allowSysVIPC)
+                Text("Enables System V IPC (shared memory, semaphores). Required for PostgreSQL, Apache, and many database applications.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         }
         .formStyle(.grouped)
         .padding()
@@ -1133,6 +1162,8 @@ struct JailCreateSheet: View {
                         if ipMode == .staticIP && !ipAddress.isEmpty {
                             JailInfoRow(label: "IP Address", value: ipAddress)
                         }
+                        JailInfoRow(label: "Raw Sockets", value: allowRawSockets ? "Enabled" : "Disabled")
+                        JailInfoRow(label: "SysV IPC", value: allowSysVIPC ? "Enabled" : "Disabled")
                     }
                     .padding(.vertical, 8)
                 }
@@ -1261,8 +1292,17 @@ struct JailCreateSheet: View {
             exec.clean;
             mount.devfs;
             devfs_ruleset = 11;
-        }
         """
+
+        if allowRawSockets {
+            config += "\n    allow.raw_sockets;"
+        }
+
+        if allowSysVIPC {
+            config += "\n    allow.sysvipc;"
+        }
+
+        config += "\n}\n"
 
         return config
     }
@@ -1310,6 +1350,8 @@ struct JailCreateSheet: View {
                     bridgeName: selectedBridge?.name ?? "bridge0",
                     template: selectedTemplate,
                     freebsdVersion: freebsdVersion,
+                    allowRawSockets: allowRawSockets,
+                    allowSysVIPC: allowSysVIPC,
                     onOutput: { output in
                         Task { @MainActor in
                             creationOutput += output
@@ -1327,7 +1369,9 @@ struct JailCreateSheet: View {
                     ipAddress: ipAddress,
                     bridgeName: selectedBridge?.name ?? "bridge0",
                     template: selectedTemplate,
-                    freebsdVersion: freebsdVersion
+                    freebsdVersion: freebsdVersion,
+                    allowRawSockets: allowRawSockets,
+                    allowSysVIPC: allowSysVIPC
                 )
                 dismiss()
             }
@@ -1455,6 +1499,176 @@ struct EditJailConfigSheet: View {
         do {
             try await viewModel.sshManager.saveJailConfigFile(name: jail.name, content: configContent)
             originalContent = configContent
+            dismiss()
+        } catch {
+            saveError = error.localizedDescription
+        }
+
+        isSaving = false
+    }
+}
+
+// MARK: - Edit Jail Security Sheet
+
+struct EditJailSecuritySheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let jail: Jail
+    @ObservedObject var viewModel: JailsViewModel
+
+    @State private var allowRawSockets = false
+    @State private var allowSysVIPC = false
+    @State private var originalRawSockets = false
+    @State private var originalSysVIPC = false
+    @State private var isLoading = true
+    @State private var isSaving = false
+    @State private var saveError: String?
+
+    var hasChanges: Bool {
+        allowRawSockets != originalRawSockets || allowSysVIPC != originalSysVIPC
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Security Options")
+                        .font(.title2)
+                        .fontWeight(.semibold)
+                    Text(jail.name)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+            }
+            .padding()
+
+            Divider()
+
+            if isLoading {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("Loading configuration...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                Form {
+                    Section("Network") {
+                        Toggle("Allow Raw Sockets", isOn: $allowRawSockets)
+                        Text("Enables ping and other ICMP utilities inside the jail. Required for network diagnostics.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    Section("IPC") {
+                        Toggle("Allow SysV IPC", isOn: $allowSysVIPC)
+                        Text("Enables System V IPC (shared memory, semaphores). Required for PostgreSQL, Apache, and many database applications.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    if jail.isRunning {
+                        Section {
+                            HStack {
+                                Image(systemName: "info.circle.fill")
+                                    .foregroundColor(.blue)
+                                Text("Restart the jail for changes to take effect.")
+                                    .font(.caption)
+                            }
+                        }
+                    }
+                }
+                .formStyle(.grouped)
+            }
+
+            // Error
+            if let error = saveError {
+                HStack {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal)
+                .padding(.top, 8)
+            }
+
+            Divider()
+
+            // Actions
+            HStack {
+                Button("Cancel") {
+                    dismiss()
+                }
+
+                Spacer()
+
+                Button(isSaving ? "Saving..." : "Save") {
+                    Task {
+                        await saveSecurityOptions()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!hasChanges || isSaving)
+            }
+            .padding()
+        }
+        .frame(width: 450, height: 400)
+        .onAppear {
+            Task {
+                await loadSecurityOptions()
+            }
+        }
+    }
+
+    private func loadSecurityOptions() async {
+        isLoading = true
+        do {
+            let config = try await viewModel.sshManager.getJailConfigFile(name: jail.name)
+            // Parse the config to find allow.raw_sockets and allow.sysvipc
+            allowRawSockets = config.contains("allow.raw_sockets")
+            allowSysVIPC = config.contains("allow.sysvipc")
+            originalRawSockets = allowRawSockets
+            originalSysVIPC = allowSysVIPC
+        } catch {
+            saveError = "Failed to load configuration: \(error.localizedDescription)"
+        }
+        isLoading = false
+    }
+
+    private func saveSecurityOptions() async {
+        isSaving = true
+        saveError = nil
+
+        do {
+            var config = try await viewModel.sshManager.getJailConfigFile(name: jail.name)
+
+            // Remove existing security options
+            config = config.replacingOccurrences(of: "    allow.raw_sockets;\n", with: "")
+            config = config.replacingOccurrences(of: "    allow.sysvipc;\n", with: "")
+            // Also handle without leading spaces
+            config = config.replacingOccurrences(of: "allow.raw_sockets;\n", with: "")
+            config = config.replacingOccurrences(of: "allow.sysvipc;\n", with: "")
+
+            // Find the closing brace and insert options before it
+            if let closingBraceRange = config.range(of: "}", options: .backwards) {
+                var optionsToInsert = ""
+                if allowRawSockets {
+                    optionsToInsert += "    allow.raw_sockets;\n"
+                }
+                if allowSysVIPC {
+                    optionsToInsert += "    allow.sysvipc;\n"
+                }
+                config.insert(contentsOf: optionsToInsert, at: closingBraceRange.lowerBound)
+            }
+
+            try await viewModel.sshManager.saveJailConfigFile(name: jail.name, content: config)
+            originalRawSockets = allowRawSockets
+            originalSysVIPC = allowSysVIPC
             dismiss()
         } catch {
             saveError = error.localizedDescription
@@ -2621,7 +2835,9 @@ class JailsViewModel: ObservableObject {
         ipAddress: String,
         bridgeName: String,
         template: JailTemplate?,
-        freebsdVersion: String
+        freebsdVersion: String,
+        allowRawSockets: Bool = false,
+        allowSysVIPC: Bool = false
     ) async throws {
         try await sshManager.createJail(
             name: name,
@@ -2632,7 +2848,9 @@ class JailsViewModel: ObservableObject {
             bridgeName: bridgeName,
             template: template,
             freebsdVersion: freebsdVersion,
-            useZFS: jailSetupStatus.zfsDataset != nil
+            useZFS: jailSetupStatus.zfsDataset != nil,
+            allowRawSockets: allowRawSockets,
+            allowSysVIPC: allowSysVIPC
         )
         await loadJails()
     }
@@ -2646,6 +2864,8 @@ class JailsViewModel: ObservableObject {
         bridgeName: String,
         template: JailTemplate?,
         freebsdVersion: String,
+        allowRawSockets: Bool = false,
+        allowSysVIPC: Bool = false,
         onOutput: @escaping (String) -> Void
     ) async throws {
         try await sshManager.createJailStreaming(
@@ -2658,6 +2878,8 @@ class JailsViewModel: ObservableObject {
             template: template,
             freebsdVersion: freebsdVersion,
             useZFS: jailSetupStatus.zfsDataset != nil,
+            allowRawSockets: allowRawSockets,
+            allowSysVIPC: allowSysVIPC,
             onOutput: onOutput
         )
         await loadJails()

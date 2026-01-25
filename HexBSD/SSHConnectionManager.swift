@@ -3786,7 +3786,9 @@ extension SSHConnectionManager {
         bridgeName: String,
         template: JailTemplate?,
         freebsdVersion: String,
-        useZFS: Bool = true
+        useZFS: Bool = true,
+        allowRawSockets: Bool = false,
+        allowSysVIPC: Bool = false
     ) async throws {
         guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
@@ -3812,7 +3814,9 @@ extension SSHConnectionManager {
             ipMode: ipMode,
             ipAddress: ipAddress,
             bridgeName: bridgeName,
-            jailId: jailId
+            jailId: jailId,
+            allowRawSockets: allowRawSockets,
+            allowSysVIPC: allowSysVIPC
         )
 
         // Ensure jail.conf.d directory exists
@@ -3880,6 +3884,8 @@ extension SSHConnectionManager {
         template: JailTemplate?,
         freebsdVersion: String,
         useZFS: Bool = true,
+        allowRawSockets: Bool = false,
+        allowSysVIPC: Bool = false,
         onOutput: @escaping (String) -> Void
     ) async throws {
         guard client != nil else {
@@ -3906,7 +3912,9 @@ extension SSHConnectionManager {
             ipMode: ipMode,
             ipAddress: ipAddress,
             bridgeName: bridgeName,
-            jailId: jailId
+            jailId: jailId,
+            allowRawSockets: allowRawSockets,
+            allowSysVIPC: allowSysVIPC
         )
 
         // Ensure jail.conf.d directory exists
@@ -3983,7 +3991,9 @@ extension SSHConnectionManager {
         ipMode: JailIPMode,
         ipAddress: String,
         bridgeName: String,
-        jailId: Int = 1
+        jailId: Int = 1,
+        allowRawSockets: Bool = false,
+        allowSysVIPC: Bool = false
     ) -> String {
         // bridgeName is an existing bridge (e.g., bridge0, bridge1)
         let bridge = bridgeName.isEmpty ? "bridge0" : bridgeName
@@ -4039,9 +4049,18 @@ extension SSHConnectionManager {
             exec.clean;
             mount.devfs;
             devfs_ruleset = 11;
+        """
+
+        // Security options
+        if allowRawSockets {
+            config += "\n    allow.raw_sockets;"
         }
 
-        """
+        if allowSysVIPC {
+            config += "\n    allow.sysvipc;"
+        }
+
+        config += "\n}\n\n"
 
         return config
     }
