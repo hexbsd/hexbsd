@@ -3843,6 +3843,29 @@ extension SSHConnectionManager {
             try await createThickUFSJail(name: name, path: path, freebsdVersion: freebsdVersion)
         }
 
+        // Write network configuration to jail's /etc/rc.conf
+        let gateway: String
+        if case .staticIP = ipMode {
+            let ip = ipAddress.isEmpty ? "192.168.1.100/24" : ipAddress
+            if let slashIndex = ip.firstIndex(of: "/"),
+               let lastDot = ip[..<slashIndex].lastIndex(of: ".") {
+                gateway = String(ip[..<lastDot]) + ".1"
+            } else if let lastDot = ip.lastIndex(of: ".") {
+                gateway = String(ip[..<lastDot]) + ".1"
+            } else {
+                gateway = "192.168.1.1"
+            }
+        } else {
+            gateway = ""
+        }
+        try await writeJailNetworkRcConf(
+            jailPath: path,
+            jailId: jailId,
+            ipMode: ipMode,
+            ipAddress: ipAddress,
+            gateway: gateway
+        )
+
         print("DEBUG: Jail '\(name)' created successfully")
     }
 
@@ -3916,6 +3939,30 @@ extension SSHConnectionManager {
             try await createThickUFSJailStreaming(name: name, path: path, freebsdVersion: freebsdVersion, onOutput: onOutput)
         }
 
+        // Write network configuration to jail's /etc/rc.conf
+        let gateway: String
+        if case .staticIP = ipMode {
+            let ip = ipAddress.isEmpty ? "192.168.1.100/24" : ipAddress
+            if let slashIndex = ip.firstIndex(of: "/"),
+               let lastDot = ip[..<slashIndex].lastIndex(of: ".") {
+                gateway = String(ip[..<lastDot]) + ".1"
+            } else if let lastDot = ip.lastIndex(of: ".") {
+                gateway = String(ip[..<lastDot]) + ".1"
+            } else {
+                gateway = "192.168.1.1"
+            }
+        } else {
+            gateway = ""
+        }
+        try await writeJailNetworkRcConf(
+            jailPath: path,
+            jailId: jailId,
+            ipMode: ipMode,
+            ipAddress: ipAddress,
+            gateway: gateway
+        )
+        onOutput("Configured network in jail's /etc/rc.conf\n")
+
         print("DEBUG: Jail '\(name)' created successfully")
     }
 
@@ -3960,12 +4007,11 @@ extension SSHConnectionManager {
 
         """
 
-        // Network: DHCP by default, static IP if specified
+        // Network: DHCP or static IP - configured via jail's /etc/rc.conf
         switch ipMode {
         case .dhcp:
             config += """
-                exec.start     = "/sbin/dhclient ${epair}b";
-                exec.start    += "/bin/sh /etc/rc";
+                exec.start     = "/bin/sh /etc/rc";
 
             """
         case .staticIP:
@@ -3998,6 +4044,39 @@ extension SSHConnectionManager {
         """
 
         return config
+    }
+
+    /// Write network configuration to the jail's /etc/rc.conf
+    private func writeJailNetworkRcConf(
+        jailPath: String,
+        jailId: Int,
+        ipMode: JailIPMode,
+        ipAddress: String,
+        gateway: String
+    ) async throws {
+        let epairInterface = "epair\(jailId)b"
+        var rcConfContent = "# Network configuration\n"
+
+        switch ipMode {
+        case .dhcp:
+            rcConfContent += """
+            ifconfig_\(epairInterface)="SYNCDHCP"
+            ifconfig_\(epairInterface)_ipv6="inet6 accept_rtadv"
+            """
+        case .staticIP:
+            rcConfContent += """
+            ifconfig_\(epairInterface)="inet \(ipAddress)"
+            defaultrouter="\(gateway)"
+            """
+        }
+
+        let writeCommand = """
+        cat >> '\(jailPath)/etc/rc.conf' << 'RCCONF'
+        \(rcConfContent)
+        RCCONF
+        """
+        _ = try await executeCommand(writeCommand)
+        print("DEBUG: Wrote network config to \(jailPath)/etc/rc.conf")
     }
 
     /// Create a thick jail with dedicated ZFS dataset
@@ -4723,7 +4802,7 @@ extension SSHConnectionManager {
             fi
             # Add devfs rule for vnet jails with DHCP (need bpf access)
             if ! grep -q 'devfsrules_jail_bpf=11' /etc/devfs.rules 2>/dev/null; then
-                printf '\n[devfsrules_jail_bpf=11]\nadd include $devfsrules_jail\nadd path '\''bpf*'\'' unhide\n' >> /etc/devfs.rules
+                printf '[devfsrules_jail_bpf=11]\nadd include $devfsrules_jail\nadd path '\''bpf*'\'' unhide\n' >> /etc/devfs.rules
                 service devfs restart
             fi
         }

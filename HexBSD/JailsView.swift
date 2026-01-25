@@ -1235,8 +1235,7 @@ struct JailCreateSheet: View {
 
         if ipMode == .dhcp {
             config += """
-                exec.start     = "/sbin/dhclient ${epair}b";
-                exec.start    += "/bin/sh /etc/rc";
+                exec.start     = "/bin/sh /etc/rc";
 
             """
         } else {
