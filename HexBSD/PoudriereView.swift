@@ -2140,7 +2140,6 @@ struct CreatePortsTreeSheet: View {
 
 struct PoudriereBulkBuildView: View {
     @ObservedObject var viewModel: PoudriereViewModel
-    @State private var buildOptions = BulkBuildOptions()
     @State private var isStartingBuild = false
 
     var body: some View {
@@ -2161,7 +2160,7 @@ struct PoudriereBulkBuildView: View {
                         }
                         .padding(.vertical, 4)
                     } else {
-                        Picker("Jail", selection: $buildOptions.jail) {
+                        Picker("Jail", selection: $viewModel.buildOptions.jail) {
                             Text("Select a jail...").tag(nil as PoudriereJail?)
                             ForEach(viewModel.jails) { jail in
                                 Text(jail.displayName).tag(jail as PoudriereJail?)
@@ -2182,7 +2181,7 @@ struct PoudriereBulkBuildView: View {
                         }
                         .padding(.vertical, 4)
                     } else {
-                        Picker("Ports Tree", selection: $buildOptions.portsTree) {
+                        Picker("Ports Tree", selection: $viewModel.buildOptions.portsTree) {
                             Text("Select a ports tree...").tag(nil as PoudrierePortsTree?)
                             ForEach(viewModel.portsTrees) { tree in
                                 Text(tree.name).tag(tree as PoudrierePortsTree?)
@@ -2195,16 +2194,16 @@ struct PoudriereBulkBuildView: View {
                 // Package selection
                 GroupBox("Packages to Build") {
                     VStack(alignment: .leading, spacing: 12) {
-                        Toggle("Build all packages", isOn: $buildOptions.buildAll)
+                        Toggle("Build all packages", isOn: $viewModel.buildOptions.buildAll)
 
-                        if !buildOptions.buildAll {
+                        if !viewModel.buildOptions.buildAll {
                             Divider()
 
                             // Package list file option
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Package list file")
                                     .font(.subheadline)
-                                TextField("/usr/local/etc/poudriere.d/pkglist", text: $buildOptions.packageListFile)
+                                TextField("/usr/local/etc/poudriere.d/pkglist", text: $viewModel.buildOptions.packageListFile)
                                     .textFieldStyle(.roundedBorder)
                                 Text("Path to a file containing package origins, one per line")
                                     .font(.caption)
@@ -2217,18 +2216,18 @@ struct PoudriereBulkBuildView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Or enter packages directly")
                                     .font(.subheadline)
-                                TextField("www/nginx security/sudo shells/bash", text: $buildOptions.packagesText)
+                                TextField("www/nginx security/sudo shells/bash", text: $viewModel.buildOptions.packagesText)
                                     .textFieldStyle(.roundedBorder)
                                 Text("Space-separated list of package origins (e.g., www/nginx editors/vim)")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
 
-                                if !buildOptions.packages.isEmpty {
+                                if !viewModel.buildOptions.packages.isEmpty {
                                     HStack {
-                                        Text("\(buildOptions.packages.count) package(s):")
+                                        Text("\(viewModel.buildOptions.packages.count) package(s):")
                                             .font(.caption)
                                             .foregroundColor(.secondary)
-                                        Text(buildOptions.packages.joined(separator: ", "))
+                                        Text(viewModel.buildOptions.packages.joined(separator: ", "))
                                             .font(.caption)
                                             .foregroundColor(.primary)
                                     }
@@ -2242,13 +2241,13 @@ struct PoudriereBulkBuildView: View {
                 // Build options
                 GroupBox("Build Options") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Toggle("Clean build (rebuild all)", isOn: $buildOptions.cleanBuild)
-                        if !buildOptions.buildAll {
-                            Toggle("Force rebuild selected packages", isOn: $buildOptions.forceRebuildSelected)
-                                .disabled(buildOptions.cleanBuild)
+                        Toggle("Clean build (rebuild all)", isOn: $viewModel.buildOptions.cleanBuild)
+                        if !viewModel.buildOptions.buildAll {
+                            Toggle("Force rebuild selected packages", isOn: $viewModel.buildOptions.forceRebuildSelected)
+                                .disabled(viewModel.buildOptions.cleanBuild)
                                 .help("Rebuild only the specified packages without cleaning dependencies (-C)")
                         }
-                        Toggle("Test mode (run pkg-plist check)", isOn: $buildOptions.testBuild)
+                        Toggle("Test mode (run pkg-plist check)", isOn: $viewModel.buildOptions.testBuild)
                     }
                     .padding(.vertical, 4)
                 }
@@ -2273,7 +2272,7 @@ struct PoudriereBulkBuildView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
-                    .disabled(!buildOptions.isValid || isStartingBuild)
+                    .disabled(!viewModel.buildOptions.isValid || isStartingBuild)
                 }
             }
             .padding()
@@ -2287,34 +2286,34 @@ struct PoudriereBulkBuildView: View {
     }
 
     private func startBuild() async {
-        guard let jail = buildOptions.jail, let tree = buildOptions.portsTree else { return }
+        guard let jail = viewModel.buildOptions.jail, let tree = viewModel.buildOptions.portsTree else { return }
         isStartingBuild = true
 
         do {
-            if buildOptions.buildAll {
+            if viewModel.buildOptions.buildAll {
                 _ = try await viewModel.sshManager.startPoudriereBulkAll(
                     jail: jail.name,
                     portsTree: tree.name,
-                    clean: buildOptions.cleanBuild,
-                    test: buildOptions.testBuild
+                    clean: viewModel.buildOptions.cleanBuild,
+                    test: viewModel.buildOptions.testBuild
                 )
-            } else if !buildOptions.packageListFile.isEmpty {
+            } else if !viewModel.buildOptions.packageListFile.isEmpty {
                 _ = try await viewModel.sshManager.startPoudriereBulkFromFile(
                     jail: jail.name,
                     portsTree: tree.name,
-                    listFile: buildOptions.packageListFile,
-                    clean: buildOptions.cleanBuild,
-                    forceRebuildSelected: buildOptions.forceRebuildSelected,
-                    test: buildOptions.testBuild
+                    listFile: viewModel.buildOptions.packageListFile,
+                    clean: viewModel.buildOptions.cleanBuild,
+                    forceRebuildSelected: viewModel.buildOptions.forceRebuildSelected,
+                    test: viewModel.buildOptions.testBuild
                 )
-            } else if !buildOptions.packages.isEmpty {
+            } else if !viewModel.buildOptions.packages.isEmpty {
                 _ = try await viewModel.sshManager.startPoudriereBulkPackages(
                     jail: jail.name,
                     portsTree: tree.name,
-                    packages: buildOptions.packages,
-                    clean: buildOptions.cleanBuild,
-                    forceRebuildSelected: buildOptions.forceRebuildSelected,
-                    test: buildOptions.testBuild
+                    packages: viewModel.buildOptions.packages,
+                    clean: viewModel.buildOptions.cleanBuild,
+                    forceRebuildSelected: viewModel.buildOptions.forceRebuildSelected,
+                    test: viewModel.buildOptions.testBuild
                 )
             }
             // Refresh and switch to Build Status tab on success
@@ -2762,6 +2761,9 @@ class PoudriereViewModel: ObservableObject {
     // Jails and Ports Trees
     @Published var jails: [PoudriereJail] = []
     @Published var portsTrees: [PoudrierePortsTree] = []
+
+    // Build options (persisted for session)
+    @Published var buildOptions = BulkBuildOptions()
 
     // Setup state
     @Published var isSettingUp = false
