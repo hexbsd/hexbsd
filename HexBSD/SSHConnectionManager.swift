@@ -2132,7 +2132,7 @@ extension SSHConnectionManager {
     }
 
     /// Start a bulk build with specific packages
-    func startPoudriereBulkPackages(jail: String, portsTree: String, packages: [String], clean: Bool = false, test: Bool = false) async throws -> String {
+    func startPoudriereBulkPackages(jail: String, portsTree: String, packages: [String], clean: Bool = false, forceRebuildSelected: Bool = false, test: Bool = false) async throws -> String {
         guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
@@ -2165,9 +2165,11 @@ extension SSHConnectionManager {
         }
 
         let packageList = packages.joined(separator: " ")
-        var command = "poudriere bulk -j '\(jail)' -p '\(portsTree)' \(packageList)"
+        var command = "poudriere bulk -j '\(jail)' -p '\(portsTree)'"
         if clean { command += " -c" }
+        if forceRebuildSelected { command += " -C" }
         if test { command += " -t" }
+        command += " \(packageList)"
 
         // Run in background with nohup so it survives SSH disconnection
         command = "nohup \(command) > /tmp/poudriere-bulk-\(jail)-\(portsTree).log 2>&1 &"
@@ -2177,7 +2179,7 @@ extension SSHConnectionManager {
     }
 
     /// Start a bulk build from a package list file
-    func startPoudriereBulkFromFile(jail: String, portsTree: String, listFile: String, clean: Bool = false, test: Bool = false) async throws -> String {
+    func startPoudriereBulkFromFile(jail: String, portsTree: String, listFile: String, clean: Bool = false, forceRebuildSelected: Bool = false, test: Bool = false) async throws -> String {
         guard client != nil else {
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
@@ -2193,6 +2195,7 @@ extension SSHConnectionManager {
 
         var command = "poudriere bulk -j '\(jail)' -p '\(portsTree)' -f '\(listFile)'"
         if clean { command += " -c" }
+        if forceRebuildSelected { command += " -C" }
         if test { command += " -t" }
 
         // Run in background with nohup so it survives SSH disconnection

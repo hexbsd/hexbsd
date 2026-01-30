@@ -180,6 +180,7 @@ struct BulkBuildOptions {
     var packageListFile: String = ""
     var packagesText: String = ""  // Space-separated list of packages
     var cleanBuild: Bool = false
+    var forceRebuildSelected: Bool = false  // Force rebuild only specified packages (-C)
     var testBuild: Bool = false
 
     /// Packages parsed from the text field
@@ -2242,6 +2243,11 @@ struct PoudriereBulkBuildView: View {
                 GroupBox("Build Options") {
                     VStack(alignment: .leading, spacing: 8) {
                         Toggle("Clean build (rebuild all)", isOn: $buildOptions.cleanBuild)
+                        if !buildOptions.buildAll {
+                            Toggle("Force rebuild selected packages", isOn: $buildOptions.forceRebuildSelected)
+                                .disabled(buildOptions.cleanBuild)
+                                .help("Rebuild only the specified packages without cleaning dependencies (-C)")
+                        }
                         Toggle("Test mode (run pkg-plist check)", isOn: $buildOptions.testBuild)
                     }
                     .padding(.vertical, 4)
@@ -2298,6 +2304,7 @@ struct PoudriereBulkBuildView: View {
                     portsTree: tree.name,
                     listFile: buildOptions.packageListFile,
                     clean: buildOptions.cleanBuild,
+                    forceRebuildSelected: buildOptions.forceRebuildSelected,
                     test: buildOptions.testBuild
                 )
             } else if !buildOptions.packages.isEmpty {
@@ -2306,6 +2313,7 @@ struct PoudriereBulkBuildView: View {
                     portsTree: tree.name,
                     packages: buildOptions.packages,
                     clean: buildOptions.cleanBuild,
+                    forceRebuildSelected: buildOptions.forceRebuildSelected,
                     test: buildOptions.testBuild
                 )
             }
