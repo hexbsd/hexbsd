@@ -2577,6 +2577,343 @@ extension SSHConnectionManager {
         let output = try await executeCommand(command)
         return output
     }
+
+    // MARK: - Package Repository Operations
+
+    /// List all poudriere package repositories (completed builds)
+    func listPoudriereRepositories() async throws -> [PoudriereRepository] {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Get poudriere data path
+        let config = try await readPoudriereConfig()
+        let basePath = config.basefs.isEmpty ? "/usr/local/poudriere" : config.basefs
+        let dataPath = config.poudriereData.isEmpty ? "\(basePath)/data" : config.poudriereData.replacingOccurrences(of: "${BASEFS}", with: basePath)
+        let packagesPath = "\(dataPath)/packages"
+
+        // Scan for package directories
+        let command = """
+        for dir in \(packagesPath)/*/; do
+            if [ -d "$dir" ]; then
+                name=$(basename "$dir")
+                # Skip hidden directories and .building
+                case "$name" in
+                    .*|.building) continue ;;
+                esac
+                count=$(find "$dir" -name "*.pkg" 2>/dev/null | wc -l | tr -d ' ')
+                modified=$(stat -f "%Sm" -t "%Y-%m-%d" "$dir" 2>/dev/null || echo "unknown")
+                echo "${name}|${count}|${modified}|${dir}"
+            fi
+        done
+        """
+
+        let output = try await executeCommand(command)
+        var repositories: [PoudriereRepository] = []
+
+        for line in output.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+
+            let parts = trimmed.split(separator: "|", omittingEmptySubsequences: false)
+            guard parts.count >= 3 else { continue }
+
+            let name = String(parts[0])
+            let count = Int(String(parts[1])) ?? 0
+            let modified = String(parts[2])
+            let path = parts.count > 3 ? String(parts[3]) : "\(packagesPath)/\(name)"
+
+            // Parse jail and tree from name (format typically: "jailname-treename")
+            let nameParts = name.split(separator: "-", maxSplits: 1)
+            let jailName = nameParts.first.map(String.init) ?? name
+            let treeName = nameParts.count > 1 ? String(nameParts[1]) : "default"
+
+            repositories.append(PoudriereRepository(
+                id: name,
+                jailName: jailName,
+                treeName: treeName,
+                packagesPath: path,
+                packageCount: count,
+                lastModified: modified == "unknown" ? nil : modified
+            ))
+        }
+
+        return repositories.sorted { $0.id < $1.id }
+    }
+
+    /// Check if package server jail exists and its status
+    func checkPkgServerStatus(jailName: String = "pkg") async throws -> PkgServerConfig? {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Check if jail config exists and nginx status
+        let checkCommand = """
+        if [ -f /etc/jail.conf.d/\(jailName).conf ]; then
+            # Get jail status
+            running="no"
+            if jls -j \(jailName) >/dev/null 2>&1; then
+                running="yes"
+            fi
+            # Try to extract hostname from config
+            hostname=$(grep -E '^[[:space:]]*host\\.hostname' /etc/jail.conf.d/\(jailName).conf 2>/dev/null | sed 's/.*=[[:space:]]*"\\{0,1\\}\\([^";]*\\).*/\\1/' | head -1)
+            # Check if nginx is configured
+            nginx_configured="no"
+            if [ -f /jails/containers/\(jailName)/usr/local/etc/nginx/nginx.conf ]; then
+                nginx_configured="yes"
+            fi
+            # Try to extract port from nginx config
+            port=$(grep -E 'listen[[:space:]]+[0-9]+' /jails/containers/\(jailName)/usr/local/etc/nginx/nginx.conf 2>/dev/null | head -1 | grep -oE '[0-9]+' || echo "80")
+            echo "exists|${running}|${hostname:-\(jailName)}|${port}|${nginx_configured}"
+        else
+            echo "missing"
+        fi
+        """
+
+        let output = try await executeCommand(checkCommand)
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmed == "missing" {
+            return nil
+        }
+
+        let parts = trimmed.split(separator: "|")
+        guard parts.count >= 4, parts[0] == "exists" else { return nil }
+
+        let isRunning = parts[1] == "yes"
+        let hostname = String(parts[2])
+        let port = Int(String(parts[3])) ?? 80
+        let isNginxConfigured = parts.count > 4 && parts[4] == "yes"
+
+        return PkgServerConfig(
+            jailName: jailName,
+            httpPort: port,
+            serverHostname: hostname,
+            isRunning: isRunning,
+            isNginxConfigured: isNginxConfigured
+        )
+    }
+
+    /// Setup nginx in an existing jail to serve poudriere packages
+    /// The jail should already be created via the normal Jails wizard
+    func setupPkgServerNginxStreaming(
+        jailName: String = "pkg",
+        onOutput: @escaping (String) -> Void
+    ) async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Get poudriere packages path
+        let config = try await readPoudriereConfig()
+        let basePath = config.basefs.isEmpty ? "/usr/local/poudriere" : config.basefs
+        let dataPath = config.poudriereData.isEmpty ? "\(basePath)/data" : config.poudriereData.replacingOccurrences(of: "${BASEFS}", with: basePath)
+        let packagesPath = "\(dataPath)/packages"
+
+        let jailPath = "/jails/containers/\(jailName)"
+
+        // Get hostname from jail config
+        let hostnameCmd = "grep -E '^[[:space:]]*host\\.hostname' /etc/jail.conf.d/\(jailName).conf 2>/dev/null | sed 's/.*=[[:space:]]*\"\\{0,1\\}\\([^\";]*\\).*/\\1/' | head -1"
+        let hostname = try await executeCommand(hostnameCmd).trimmingCharacters(in: .whitespacesAndNewlines)
+        let serverHostname = hostname.isEmpty ? jailName : hostname
+
+        // Nginx config for serving packages
+        let nginxConfig = """
+        worker_processes 1;
+        events { worker_connections 1024; }
+        http {
+            include mime.types;
+            default_type application/octet-stream;
+            sendfile on;
+            keepalive_timeout 65;
+            server {
+                listen 80;
+                server_name \(serverHostname);
+                root /packages;
+                autoindex on;
+                autoindex_exact_size off;
+                autoindex_localtime on;
+                location / {
+                    try_files $uri $uri/ =404;
+                }
+            }
+        }
+        """
+
+        // Escape for shell
+        let escapedNginxConfig = nginxConfig.replacingOccurrences(of: "'", with: "'\\''")
+
+        // Setup script - installs nginx and configures nullfs mount
+        let setupScript = """
+        set -e
+
+        echo "==> Setting up nginx in jail '\(jailName)'"
+
+        # Check if jail exists
+        if [ ! -f /etc/jail.conf.d/\(jailName).conf ]; then
+            echo "ERROR: Jail '\(jailName)' does not exist"
+            exit 1
+        fi
+
+        # Check if jail path exists
+        if [ ! -d "\(jailPath)" ]; then
+            echo "ERROR: Jail path \(jailPath) does not exist"
+            exit 1
+        fi
+
+        # Check if poudriere packages exist
+        if [ ! -d "\(packagesPath)" ]; then
+            echo "ERROR: Poudriere packages directory not found at \(packagesPath)"
+            exit 1
+        fi
+
+        # Check if jail was running (we'll need to restart it)
+        jail_was_running="no"
+        if jls -j \(jailName) >/dev/null 2>&1; then
+            jail_was_running="yes"
+            echo "==> Jail is running, will restart to apply mount changes..."
+            service jail stop \(jailName)
+            sleep 1
+        fi
+
+        # Setup fstab for nullfs mount of packages (if not already present)
+        echo "==> Setting up nullfs mount for packages"
+        mkdir -p \(jailPath)/packages
+        if ! grep -q "\(jailPath)/packages" /etc/fstab.\(jailName) 2>/dev/null; then
+            echo "\(packagesPath) \(jailPath)/packages nullfs ro 0 0" >> /etc/fstab.\(jailName)
+            echo "Added fstab entry for packages mount"
+        else
+            echo "fstab entry already exists"
+        fi
+
+        # Ensure jail config has mount.fstab directive
+        if ! grep -q "mount.fstab" /etc/jail.conf.d/\(jailName).conf 2>/dev/null; then
+            echo "==> Adding mount.fstab to jail config"
+            # Add mount.fstab after mount.devfs line using awk
+            awk '/mount.devfs/ { print; print "    mount.fstab = \\"/etc/fstab.\(jailName)\\";"; next } { print }' /etc/jail.conf.d/\(jailName).conf > /etc/jail.conf.d/\(jailName).conf.tmp && mv /etc/jail.conf.d/\(jailName).conf.tmp /etc/jail.conf.d/\(jailName).conf
+        else
+            echo "mount.fstab directive already exists"
+        fi
+
+        # Start the jail (this will apply the fstab mounts)
+        echo "==> Starting jail..."
+        service jail start \(jailName)
+        sleep 2
+
+        # Install nginx inside the jail
+        echo "==> Installing nginx in jail"
+        jexec \(jailName) pkg install -y nginx
+
+        # Write nginx config
+        echo "==> Configuring nginx"
+        cat > \(jailPath)/usr/local/etc/nginx/nginx.conf << 'NGINXEOF'
+        \(escapedNginxConfig)
+        NGINXEOF
+
+        # Enable nginx in jail's rc.conf
+        echo "==> Enabling nginx service"
+        jexec \(jailName) sysrc nginx_enable=YES
+
+        # Start nginx
+        echo "==> Starting nginx..."
+        jexec \(jailName) service nginx restart || jexec \(jailName) service nginx start
+
+        echo ""
+        echo "SUCCESS: Package server is ready!"
+        echo "Packages are available at: http://\(serverHostname)/"
+        """
+
+        let exitCode = try await executeCommandStreaming(setupScript, onOutput: onOutput)
+
+        if exitCode != 0 {
+            throw NSError(domain: "SSHConnectionManager", code: exitCode,
+                         userInfo: [NSLocalizedDescriptionKey: "Failed to setup nginx in jail (exit code \(exitCode))"])
+        }
+    }
+
+    /// Start the package server jail
+    func startPkgServer(jailName: String = "pkg") async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = """
+        # Mount nullfs if not mounted
+        if ! mount | grep -q "on /jails/containers/\(jailName)/packages"; then
+            mount -F /etc/fstab.\(jailName) /jails/containers/\(jailName)/packages 2>/dev/null || true
+        fi
+        service jail start \(jailName)
+        """
+        _ = try await executeCommand(command)
+    }
+
+    /// Stop the package server jail
+    func stopPkgServer(jailName: String = "pkg") async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let command = "service jail stop \(jailName)"
+        _ = try await executeCommand(command)
+    }
+
+    /// Delete the package server jail
+    func deletePkgServerJail(jailName: String = "pkg") async throws {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        let jailPath = "/jails/containers/\(jailName)"
+
+        let command = """
+        # Stop jail if running
+        service jail stop \(jailName) 2>/dev/null || true
+
+        # Unmount nullfs
+        umount \(jailPath)/packages 2>/dev/null || true
+        umount \(jailPath)/dev 2>/dev/null || true
+
+        # Remove fstab
+        rm -f /etc/fstab.\(jailName)
+
+        # Remove jail config
+        rm -f /etc/jail.conf.d/\(jailName).conf
+
+        # Check for ZFS and destroy dataset
+        if zfs list "\(jailPath)" >/dev/null 2>&1; then
+            zfs destroy -r "$(zfs list -H -o name \(jailPath))"
+        else
+            rm -rf \(jailPath)
+        fi
+
+        echo "Deleted"
+        """
+
+        _ = try await executeCommand(command)
+    }
+
+    /// Get the IP address of a running jail (for client config URLs)
+    func getPkgServerIP(jailName: String = "pkg") async throws -> String? {
+        guard client != nil else {
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        // Get the IP from the jail's epair interface
+        let command = """
+        jexec \(jailName) ifconfig 2>/dev/null | grep -E 'inet [0-9]' | grep -v '127.0.0.1' | head -1 | awk '{print $2}'
+        """
+
+        let output = try await executeCommand(command)
+        let ip = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ip.isEmpty ? nil : ip
+    }
 }
 
 // MARK: - Security Operations

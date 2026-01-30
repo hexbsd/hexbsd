@@ -8,6 +8,7 @@
 import SwiftUI
 import WebKit
 import SwiftTerm
+import AppKit
 
 // MARK: - Poudriere Models
 
@@ -211,6 +212,46 @@ struct BuildablePackage: Identifiable, Equatable, Hashable {
         self.category = parts.first.map(String.init) ?? ""
         self.name = parts.last.map(String.init) ?? origin
         self.comment = comment
+    }
+}
+
+/// Represents a poudriere package repository (completed build)
+struct PoudriereRepository: Identifiable, Equatable, Hashable {
+    let id: String                // e.g., "14amd64-default"
+    let jailName: String
+    let treeName: String
+    let packagesPath: String
+    let packageCount: Int
+    let lastModified: String?
+
+    init(id: String, jailName: String = "", treeName: String = "", packagesPath: String = "", packageCount: Int = 0, lastModified: String? = nil) {
+        self.id = id
+        // Parse jail and tree from id (format: "jailname-treename")
+        let parts = id.split(separator: "-", maxSplits: 1)
+        self.jailName = jailName.isEmpty ? (parts.first.map(String.init) ?? id) : jailName
+        self.treeName = treeName.isEmpty ? (parts.count > 1 ? String(parts[1]) : "default") : treeName
+        self.packagesPath = packagesPath
+        self.packageCount = packageCount
+        self.lastModified = lastModified
+    }
+}
+
+/// Configuration for the package server jail
+struct PkgServerConfig: Equatable {
+    var jailName: String          // Default: "pkg"
+    var httpPort: Int             // Default: 80
+    var serverHostname: String    // For client config generation
+    var isRunning: Bool
+    var isNginxConfigured: Bool   // True if nginx is installed and configured
+
+    static var `default`: PkgServerConfig {
+        PkgServerConfig(
+            jailName: "pkg",
+            httpPort: 80,
+            serverHostname: "",
+            isRunning: false,
+            isNginxConfigured: false
+        )
     }
 }
 
@@ -1008,6 +1049,7 @@ enum PoudriereTab: String, CaseIterable {
     case jails = "Jails"
     case ports = "Ports Trees"
     case build = "Build"
+    case repositories = "Repositories"
     case config = "Configuration"
 
     var icon: String {
@@ -1016,6 +1058,7 @@ enum PoudriereTab: String, CaseIterable {
         case .jails: return "building.columns.fill"
         case .ports: return "folder.fill"
         case .build: return "hammer.fill"
+        case .repositories: return "archivebox.fill"
         case .config: return "gearshape.fill"
         }
     }
@@ -1322,6 +1365,8 @@ struct PoudriereContentViewImpl: View {
                     PoudrierePortsTreesView(viewModel: viewModel)
                 case .build:
                     PoudriereBulkBuildView(viewModel: viewModel)
+                case .repositories:
+                    PoudriereRepositoriesView(viewModel: viewModel)
                 case .config:
                     PoudriereConfigView(viewModel: viewModel)
                 }
@@ -2742,6 +2787,574 @@ struct PoudriereConfigView: View {
     }
 }
 
+// MARK: - Repositories View
+
+struct PoudriereRepositoriesView: View {
+    @ObservedObject var viewModel: PoudriereViewModel
+    @State private var expandedRepo: String?
+    @State private var isDeleting = false
+    @State private var showDeleteConfirm = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                // Header
+                HStack {
+                    Text("Package Repositories")
+                        .font(.title2)
+                        .fontWeight(.semibold)
+
+                    Spacer()
+
+                    Button(action: {
+                        Task {
+                            await loadRepositories()
+                        }
+                    }) {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(viewModel.isLoadingRepositories)
+                }
+
+                // Package Server Status
+                PkgServerStatusView(
+                    viewModel: viewModel,
+                    showDeleteConfirm: $showDeleteConfirm,
+                    isDeleting: $isDeleting
+                )
+
+                Divider()
+
+                // Repositories List
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Available Repositories")
+                        .font(.headline)
+
+                    if viewModel.isLoadingRepositories {
+                        HStack {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                            Text("Loading repositories...")
+                                .foregroundColor(.secondary)
+                        }
+                        .padding()
+                    } else if viewModel.repositories.isEmpty {
+                        VStack(spacing: 12) {
+                            Image(systemName: "shippingbox")
+                                .font(.system(size: 48))
+                                .foregroundColor(.secondary)
+                            Text("No package repositories found")
+                                .font(.headline)
+                                .foregroundColor(.secondary)
+                            Text("Run a poudriere bulk build to create package repositories")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 40)
+                    } else {
+                        ForEach(viewModel.repositories) { repo in
+                            RepositoryRow(
+                                repo: repo,
+                                serverConfig: viewModel.pkgServerConfig,
+                                isExpanded: expandedRepo == repo.id,
+                                onToggleExpand: {
+                                    withAnimation {
+                                        if expandedRepo == repo.id {
+                                            expandedRepo = nil
+                                        } else {
+                                            expandedRepo = repo.id
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+            .padding()
+        }
+        .onAppear {
+            Task {
+                await loadRepositories()
+            }
+        }
+        .alert("Delete Package Server", isPresented: $showDeleteConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) {
+                Task {
+                    await deleteServer()
+                }
+            }
+        } message: {
+            Text("This will stop and delete the package server jail. Your package repositories will not be affected.")
+        }
+    }
+
+    private func loadRepositories() async {
+        viewModel.isLoadingRepositories = true
+        do {
+            viewModel.repositories = try await viewModel.sshManager.listPoudriereRepositories()
+
+            // Load available system jails for selection
+            let jails = try await viewModel.sshManager.listJails()
+            viewModel.availableJails = jails.map { $0.name }
+
+            // Check pkg server status for the selected jail
+            viewModel.pkgServerConfig = try await viewModel.sshManager.checkPkgServerStatus(jailName: viewModel.pkgServerJailName)
+            viewModel.isPkgServerRunning = viewModel.pkgServerConfig?.isRunning ?? false
+        } catch {
+            viewModel.error = "Failed to load repositories: \(error.localizedDescription)"
+        }
+        viewModel.isLoadingRepositories = false
+    }
+
+    private func deleteServer() async {
+        guard let config = viewModel.pkgServerConfig else { return }
+        isDeleting = true
+        do {
+            try await viewModel.sshManager.deletePkgServerJail(jailName: config.jailName)
+            viewModel.pkgServerConfig = nil
+            viewModel.isPkgServerRunning = false
+        } catch {
+            viewModel.error = "Failed to delete package server: \(error.localizedDescription)"
+        }
+        isDeleting = false
+    }
+}
+
+struct RepositoryRow: View {
+    let repo: PoudriereRepository
+    let serverConfig: PkgServerConfig?
+    let isExpanded: Bool
+    let onToggleExpand: () -> Void
+
+    private var isServerReady: Bool {
+        serverConfig?.isNginxConfigured == true
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Main row
+            HStack(spacing: 12) {
+                Image(systemName: "shippingbox.fill")
+                    .font(.title2)
+                    .foregroundColor(.blue)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(repo.id)
+                        .font(.headline)
+
+                    HStack(spacing: 8) {
+                        Text("\(repo.packageCount) packages")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        if let modified = repo.lastModified {
+                            Text("Modified: \(modified)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+
+                Spacer()
+
+                // Only show client config button when pkg server is running
+                if isServerReady {
+                    Button(action: onToggleExpand) {
+                        HStack(spacing: 4) {
+                            Text(isExpanded ? "Hide Config" : "Show Client Config")
+                                .font(.caption)
+                            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                                .font(.caption)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+            .padding()
+            .background(Color(nsColor: .controlBackgroundColor))
+
+            // Expanded client config (only when server is ready)
+            if isExpanded && isServerReady {
+                ClientConfigSnippet(repo: repo, serverConfig: serverConfig)
+                    .padding()
+                    .background(Color(nsColor: .textBackgroundColor))
+            }
+        }
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+        )
+    }
+}
+
+struct ClientConfigSnippet: View {
+    let repo: PoudriereRepository
+    let serverConfig: PkgServerConfig?
+    @State private var copied = false
+
+    private var serverURL: String {
+        if let config = serverConfig, config.isRunning {
+            let host = config.serverHostname.isEmpty ? "SERVER_IP" : config.serverHostname
+            let port = config.httpPort == 80 ? "" : ":\(config.httpPort)"
+            return "http://\(host)\(port)"
+        }
+        return "http://SERVER_IP"
+    }
+
+    private var configFileName: String {
+        "/usr/local/etc/pkg/repos/\(repo.id).conf"
+    }
+
+    private var configContent: String {
+        """
+        \(repo.id): {
+            url: "\(serverURL)/\(repo.id)",
+            enabled: yes
+        }
+        """
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Client Configuration")
+                    .font(.headline)
+
+                Spacer()
+
+                Button(action: copyToClipboard) {
+                    HStack(spacing: 4) {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        Text(copied ? "Copied!" : "Copy")
+                    }
+                    .font(.caption)
+                }
+                .buttonStyle(.bordered)
+            }
+
+            Text(configFileName)
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            // Config snippet
+            VStack(alignment: .leading, spacing: 0) {
+                Text(configContent)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(12)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(nsColor: .textBackgroundColor))
+            .cornerRadius(6)
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+            )
+        }
+    }
+
+    private func copyToClipboard() {
+        let fullConfig = "# \(configFileName)\n\(configContent)"
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(fullConfig, forType: .string)
+        copied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            copied = false
+        }
+    }
+}
+
+struct PkgServerStatusView: View {
+    @ObservedObject var viewModel: PoudriereViewModel
+    @Binding var showDeleteConfirm: Bool
+    @Binding var isDeleting: Bool
+    @State private var isToggling = false
+    @State private var isSettingUp = false
+    @State private var serverIP: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let config = viewModel.pkgServerConfig {
+                if config.isNginxConfigured {
+                    // Fully configured - show start/stop/delete
+                    fullyConfiguredView(config: config)
+                } else {
+                    // Jail exists but nginx not configured - show setup button
+                    needsSetupView(config: config)
+                }
+            } else {
+                // No jail exists - tell user to create one
+                noJailView
+            }
+        }
+        .padding()
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(8)
+        .onAppear {
+            Task {
+                await loadServerIP()
+            }
+        }
+        .onChange(of: viewModel.isPkgServerRunning) { _, _ in
+            Task {
+                await loadServerIP()
+            }
+        }
+        .onChange(of: viewModel.pkgServerJailName) { _, newJailName in
+            Task {
+                await checkSelectedJail()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func fullyConfiguredView(config: PkgServerConfig) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: config.isRunning ? "checkmark.circle.fill" : "pause.circle.fill")
+                .font(.title2)
+                .foregroundColor(config.isRunning ? .green : .orange)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("Package Server:")
+                        .fontWeight(.medium)
+                    Text(config.isRunning ? "Running" : "Stopped")
+                        .foregroundColor(config.isRunning ? .green : .orange)
+                }
+
+                Text("Jail: \(config.jailName)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                if config.isRunning {
+                    let portSuffix = config.httpPort == 80 ? "" : ":\(config.httpPort)"
+                    if !config.serverHostname.isEmpty {
+                        Text("URL: http://\(config.serverHostname)\(portSuffix)/")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    if let ip = serverIP {
+                        Text("IP: \(ip)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+
+            Spacer()
+
+            HStack(spacing: 8) {
+                Button(action: {
+                    Task {
+                        await toggleServer()
+                    }
+                }) {
+                    if isToggling {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                    } else {
+                        Text(config.isRunning ? "Stop" : "Start")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(isToggling || isDeleting)
+
+                Button(action: {
+                    showDeleteConfirm = true
+                }) {
+                    if isDeleting {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                    } else {
+                        Text("Delete")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .foregroundColor(.red)
+                .disabled(isToggling || isDeleting)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func needsSetupView(config: PkgServerConfig) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "gearshape.circle")
+                .font(.title2)
+                .foregroundColor(.orange)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Package Server: Setup Required")
+                    .fontWeight(.medium)
+
+                HStack(spacing: 4) {
+                    Text("Jail '\(config.jailName)' is")
+                    Text(config.isRunning ? "running" : "stopped")
+                        .foregroundColor(config.isRunning ? .green : .orange)
+                }
+                .font(.caption)
+
+                if config.isRunning {
+                    Text("Setup will install nginx and restart the jail to apply changes.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("Setup will start the jail and install nginx.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Spacer()
+
+            Button(action: {
+                Task {
+                    await setupNginx(jailName: config.jailName)
+                }
+            }) {
+                if isSettingUp {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                } else {
+                    Label("Complete Setup", systemImage: "gearshape")
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isSettingUp)
+        }
+    }
+
+    @ViewBuilder
+    private var noJailView: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: "info.circle")
+                    .font(.title2)
+                    .foregroundColor(.blue)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Package Server: Not Configured")
+                        .fontWeight(.medium)
+
+                    Text("Select a jail to use as your package server, or create one in the Jails section first.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+            }
+
+            if viewModel.availableJails.isEmpty {
+                Text("No jails found. Create a jail in the Jails section first.")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+            } else {
+                HStack(spacing: 12) {
+                    Text("Jail:")
+                        .fontWeight(.medium)
+
+                    Picker("Select Jail", selection: $viewModel.pkgServerJailName) {
+                        ForEach(viewModel.availableJails, id: \.self) { jail in
+                            Text(jail).tag(jail)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 200)
+
+                    Button(action: {
+                        Task {
+                            await checkSelectedJail()
+                        }
+                    }) {
+                        Label("Check Jail", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+        }
+    }
+
+    private func checkSelectedJail() async {
+        do {
+            viewModel.pkgServerConfig = try await viewModel.sshManager.checkPkgServerStatus(jailName: viewModel.pkgServerJailName)
+            viewModel.isPkgServerRunning = viewModel.pkgServerConfig?.isRunning ?? false
+        } catch {
+            viewModel.error = "Failed to check jail: \(error.localizedDescription)"
+        }
+    }
+
+    private func toggleServer() async {
+        guard let config = viewModel.pkgServerConfig else { return }
+        isToggling = true
+        do {
+            if config.isRunning {
+                try await viewModel.sshManager.stopPkgServer(jailName: config.jailName)
+                viewModel.isPkgServerRunning = false
+            } else {
+                try await viewModel.sshManager.startPkgServer(jailName: config.jailName)
+                viewModel.isPkgServerRunning = true
+            }
+            // Refresh status
+            viewModel.pkgServerConfig = try await viewModel.sshManager.checkPkgServerStatus(jailName: config.jailName)
+            viewModel.isPkgServerRunning = viewModel.pkgServerConfig?.isRunning ?? false
+            await loadServerIP()
+        } catch {
+            viewModel.error = "Failed to \(config.isRunning ? "stop" : "start") server: \(error.localizedDescription)"
+        }
+        isToggling = false
+    }
+
+    private func setupNginx(jailName: String) async {
+        isSettingUp = true
+
+        // Show command output sheet
+        viewModel.commandTitle = "Setting up Package Server"
+        viewModel.commandOutput.reset()
+        viewModel.showingCommandOutput = true
+
+        do {
+            try await viewModel.sshManager.setupPkgServerNginxStreaming(
+                jailName: jailName,
+                onOutput: { output in
+                    Task { @MainActor in
+                        viewModel.commandOutput.appendOutput(output)
+                    }
+                }
+            )
+
+            viewModel.commandOutput.complete(exitCode: 0)
+
+            // Refresh status
+            viewModel.pkgServerConfig = try await viewModel.sshManager.checkPkgServerStatus(jailName: jailName)
+            viewModel.isPkgServerRunning = viewModel.pkgServerConfig?.isRunning ?? false
+            await loadServerIP()
+        } catch {
+            viewModel.commandOutput.appendOutput("\n\nERROR: \(error.localizedDescription)\n")
+            viewModel.commandOutput.complete(exitCode: 1)
+        }
+
+        isSettingUp = false
+    }
+
+    private func loadServerIP() async {
+        guard let config = viewModel.pkgServerConfig, config.isRunning else {
+            serverIP = nil
+            return
+        }
+        do {
+            serverIP = try await viewModel.sshManager.getPkgServerIP(jailName: config.jailName)
+        } catch {
+            serverIP = nil
+        }
+    }
+}
+
+
 // MARK: - View Model
 
 @MainActor
@@ -2761,6 +3374,14 @@ class PoudriereViewModel: ObservableObject {
     // Jails and Ports Trees
     @Published var jails: [PoudriereJail] = []
     @Published var portsTrees: [PoudrierePortsTree] = []
+
+    // Package Repositories
+    @Published var repositories: [PoudriereRepository] = []
+    @Published var pkgServerConfig: PkgServerConfig?
+    @Published var isPkgServerRunning: Bool = false
+    @Published var isLoadingRepositories: Bool = false
+    @Published var pkgServerJailName: String = "pkg"  // Selected jail for pkg server
+    @Published var availableJails: [String] = []      // List of system jails for selection
 
     // Build options (persisted for session)
     @Published var buildOptions = BulkBuildOptions()
