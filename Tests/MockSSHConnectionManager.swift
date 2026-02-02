@@ -17,6 +17,7 @@ final class MockSSHConnectionManager: SSHConnectionProviding {
 
     var isConnected: Bool = false
     var serverAddress: String = ""
+    var serverName: String = ""
     var lastError: String?
 
     // MARK: - Mock Configuration
@@ -118,6 +119,7 @@ final class MockSSHConnectionManager: SSHConnectionProviding {
     func reset() {
         isConnected = false
         serverAddress = ""
+        serverName = ""
         lastError = nil
         executedCommands = []
         connectAttempts = []
