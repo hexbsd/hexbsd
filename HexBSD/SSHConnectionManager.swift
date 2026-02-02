@@ -6,11 +6,37 @@
 //
 
 import Foundation
+import Network
 import Citadel
 import Crypto
 import _CryptoExtras
 import NIOCore
 import NIOSSH
+
+/// Thread-safe atomic flag for synchronization
+final class AtomicFlag: @unchecked Sendable {
+    private var _value: Bool = false
+    private let lock = NSLock()
+
+    /// Atomically test if flag is false, and if so, set it to true.
+    /// Returns true if the flag was successfully set (was false), false otherwise.
+    func testAndSet() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if _value {
+            return false
+        }
+        _value = true
+        return true
+    }
+
+    /// Reset the flag to false
+    func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        _value = false
+    }
+}
 
 /// Async semaphore to limit concurrent operations
 actor AsyncSemaphore {
@@ -92,6 +118,12 @@ class SSHConnectionManager {
 
     // Semaphore to limit concurrent SSH commands (SSH servers typically limit to ~10 channels)
     private let commandSemaphore = AsyncSemaphore(limit: 6)
+
+    // Connection health monitor
+    private var healthCheckTask: Task<Void, Never>?
+
+    // Real-time system status (updated by health check)
+    var liveSystemStatus: SystemStatus?
 
     // Initializer - can create multiple instances for replication
     init() {}
@@ -187,6 +219,10 @@ class SSHConnectionManager {
             self.connectedPort = port
             self.connectedUsername = authMethod.username
             self.connectedKeyPath = authMethod.privateKeyURL.path
+
+            // Start background health monitoring for real-time dashboard updates
+            // and automatic disconnect detection
+            startHealthMonitor(interval: 5.0)
         } catch let error as NSError {
             print("DEBUG: Connection failed - Domain: \(error.domain), Code: \(error.code)")
             print("DEBUG: Error description: \(error.localizedDescription)")
@@ -259,12 +295,154 @@ class SSHConnectionManager {
 
     /// Disconnect from the server
     func disconnect() async {
+        // Stop health monitoring
+        stopHealthMonitor()
+
         if let client = client {
             try? await client.close()
         }
         self.client = nil
         self.isConnected = false
         self.serverAddress = ""
+        self.liveSystemStatus = nil
+    }
+
+    /// Start background health monitoring - checks if SSH port is reachable
+    func startHealthMonitor(interval: TimeInterval = 5.0) {
+        // Stop any existing monitor
+        stopHealthMonitor()
+
+        guard let host = connectedHost, let port = connectedPort else {
+            print("DEBUG [SSH]: Cannot start health monitor - no host/port")
+            return
+        }
+
+        print("DEBUG [SSH]: Starting health monitor for \(host):\(port) with \(interval)s interval")
+
+        healthCheckTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self = self, self.isConnected else { break }
+
+                // Simple TCP port check
+                let isReachable = await self.checkPortReachable(host: host, port: port)
+
+                if !isReachable {
+                    print("DEBUG [SSH]: Port check failed - connection lost!")
+                    await MainActor.run {
+                        self.handleConnectionLoss()
+                    }
+                    break
+                }
+
+                // Wait for next interval
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            }
+            print("DEBUG [SSH]: Health monitor stopped")
+        }
+    }
+
+    /// Quick TCP port check to verify host is reachable using Network.framework
+    private func checkPortReachable(host: String, port: Int) async -> Bool {
+        return await withCheckedContinuation { continuation in
+            let connection = NWConnection(
+                host: NWEndpoint.Host(host),
+                port: NWEndpoint.Port(integerLiteral: UInt16(port)),
+                using: .tcp
+            )
+
+            // Thread-safe flag to prevent multiple resumes
+            let resumed = AtomicFlag()
+
+            connection.stateUpdateHandler = { state in
+                guard resumed.testAndSet() else { return }
+
+                switch state {
+                case .ready:
+                    connection.cancel()
+                    continuation.resume(returning: true)
+                case .failed, .cancelled:
+                    continuation.resume(returning: false)
+                case .waiting:
+                    // Network path not available - treat as unreachable
+                    connection.cancel()
+                    continuation.resume(returning: false)
+                default:
+                    // Reset flag if we haven't handled the state yet
+                    resumed.reset()
+                }
+            }
+
+            connection.start(queue: DispatchQueue(label: "health-check"))
+
+            // Timeout after 3 seconds
+            DispatchQueue.global().asyncAfter(deadline: .now() + 3.0) {
+                guard resumed.testAndSet() else { return }
+                connection.cancel()
+                continuation.resume(returning: false)
+            }
+        }
+    }
+
+    /// Stop background health monitoring
+    func stopHealthMonitor() {
+        healthCheckTask?.cancel()
+        healthCheckTask = nil
+    }
+
+    /// Check if an error indicates a lost connection
+    /// Simple approach: any SSH/network level error = connection lost
+    private func isConnectionLostError(_ error: Error) -> Bool {
+        let errorString = String(describing: error)
+        print("DEBUG [SSH]: Checking error: \(errorString)")
+
+        // Any NIOSSH error means the SSH connection is broken
+        if errorString.contains("NIOSSH") || errorString.contains("NIOSSHError") {
+            print("DEBUG [SSH]: NIOSSH error - connection lost!")
+            return true
+        }
+
+        // Any Citadel SSH error
+        if errorString.contains("Citadel") || errorString.contains("SSHClient") {
+            print("DEBUG [SSH]: Citadel error - connection lost!")
+            return true
+        }
+
+        // Network-level errors
+        let lowerError = errorString.lowercased()
+        if lowerError.contains("connection reset") ||
+           lowerError.contains("connection refused") ||
+           lowerError.contains("broken pipe") ||
+           lowerError.contains("network is unreachable") ||
+           lowerError.contains("host is down") ||
+           lowerError.contains("no route to host") ||
+           lowerError.contains("socket is not connected") ||
+           lowerError.contains("operation timed out") ||
+           lowerError.contains("eof") {
+            print("DEBUG [SSH]: Network error - connection lost!")
+            return true
+        }
+
+        // Check error type directly
+        let typeName = String(describing: type(of: error))
+        if typeName.contains("NIOSSH") || typeName.contains("NIO") {
+            print("DEBUG [SSH]: NIO error type - connection lost!")
+            return true
+        }
+
+        print("DEBUG [SSH]: Not a connection error: \(typeName)")
+        return false
+    }
+
+    /// Handle connection loss - disconnect and update state
+    @MainActor
+    private func handleConnectionLoss() {
+        guard isConnected else { return } // Already disconnected
+        print("DEBUG [SSH]: Connection lost detected, setting isConnected = false")
+        self.client = nil
+        self.isConnected = false
+        self.serverAddress = ""
+        self.lastError = "Connection to server was lost"
+        print("DEBUG [SSH]: isConnected is now: \(isConnected)")
     }
 
     /// Test raw socket connectivity to diagnose connection issues
@@ -385,8 +563,16 @@ class SSHConnectionManager {
             Task { await commandSemaphore.release() }
         }
 
-        let output = try await client.executeCommand(command)
-        return String(buffer: output)
+        do {
+            let output = try await client.executeCommand(command)
+            return String(buffer: output)
+        } catch {
+            // Check if this is a connection loss
+            if isConnectionLostError(error) {
+                await handleConnectionLoss()
+            }
+            throw error
+        }
     }
 
     /// Execute a command and return stdout/stderr separately
@@ -403,40 +589,48 @@ class SSHConnectionManager {
             Task { await commandSemaphore.release() }
         }
 
-        // Wrap command to merge stderr with stdout and capture exit code
-        // This prevents Citadel from throwing before we can get error messages
-        let escapedCommand = command.replacingOccurrences(of: "'", with: "'\\''")
-        let wrappedCommand = "sh -c '\(escapedCommand) 2>&1; echo __EXIT_CODE__:$?'"
+        do {
+            // Wrap command to merge stderr with stdout and capture exit code
+            // This prevents Citadel from throwing before we can get error messages
+            let escapedCommand = command.replacingOccurrences(of: "'", with: "'\\''")
+            let wrappedCommand = "sh -c '\(escapedCommand) 2>&1; echo __EXIT_CODE__:$?'"
 
-        let streams = try await client.executeCommandStream(wrappedCommand)
+            let streams = try await client.executeCommandStream(wrappedCommand)
 
-        var output = ""
+            var output = ""
 
-        for try await event in streams {
-            switch event {
-            case .stdout(let data), .stderr(let data):
-                output += String(buffer: data)
+            for try await event in streams {
+                switch event {
+                case .stdout(let data), .stderr(let data):
+                    output += String(buffer: data)
+                }
             }
-        }
 
-        // Parse exit code from the end
-        var commandOutput = output
-        var exitCode = 0
-        if let exitCodeRange = output.range(of: "__EXIT_CODE__:") {
-            let exitCodeStr = output[exitCodeRange.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
-            exitCode = Int(exitCodeStr) ?? 0
-            commandOutput = String(output[..<exitCodeRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-        }
+            // Parse exit code from the end
+            var commandOutput = output
+            var exitCode = 0
+            if let exitCodeRange = output.range(of: "__EXIT_CODE__:") {
+                let exitCodeStr = output[exitCodeRange.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+                exitCode = Int(exitCodeStr) ?? 0
+                commandOutput = String(output[..<exitCodeRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
 
-        // If command failed, throw an error with the output as the message
-        if exitCode != 0 {
-            throw NSError(domain: "SSHConnectionManager", code: exitCode,
-                         userInfo: [NSLocalizedDescriptionKey: commandOutput.isEmpty ? "Command failed with exit code \(exitCode)" : commandOutput])
-        }
+            // If command failed, throw an error with the output as the message
+            if exitCode != 0 {
+                throw NSError(domain: "SSHConnectionManager", code: exitCode,
+                             userInfo: [NSLocalizedDescriptionKey: commandOutput.isEmpty ? "Command failed with exit code \(exitCode)" : commandOutput])
+            }
 
-        // For successful commands, return combined output as stdout
-        // (stderr was merged via 2>&1, which is fine for ZFS commands that output warnings to stderr)
-        return (stdout: commandOutput, stderr: commandOutput)
+            // For successful commands, return combined output as stdout
+            // (stderr was merged via 2>&1, which is fine for ZFS commands that output warnings to stderr)
+            return (stdout: commandOutput, stderr: commandOutput)
+        } catch {
+            // Check if this is a connection loss
+            if isConnectionLostError(error) {
+                await handleConnectionLoss()
+            }
+            throw error
+        }
     }
 
     /// Execute a command with streaming output via a callback
@@ -455,6 +649,7 @@ class SSHConnectionManager {
             Task { await commandSemaphore.release() }
         }
 
+        do {
         print("DEBUG: executeCommandStreaming starting with command: \(command)")
 
         // Wrap command to get exit code at the end, use script command to force line buffering
@@ -547,6 +742,13 @@ class SSHConnectionManager {
 
         print("DEBUG: No exit code found, returning 0")
         return 0
+        } catch {
+            // Check if this is a connection loss
+            if isConnectionLostError(error) {
+                await handleConnectionLoss()
+            }
+            throw error
+        }
     }
 
     /// Start an interactive shell session with PTY
@@ -1362,29 +1564,41 @@ extension SSHConnectionManager {
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
-        // Use tail -f to follow log file updates
-        // Using -F to also handle log rotation
-        let command = "tail -F '\(path)' 2>/dev/null"
-        print("DEBUG [SSH]: streamLogFile starting command stream: \(command)")
+        do {
+            // Use tail -f to follow log file updates
+            // Using -F to also handle log rotation
+            let command = "tail -F '\(path)' 2>/dev/null"
+            print("DEBUG [SSH]: streamLogFile starting command stream: \(command)")
 
-        let streams = try await client.executeCommandStream(command)
-        print("DEBUG [SSH]: streamLogFile got stream, entering read loop")
+            let streams = try await client.executeCommandStream(command)
+            print("DEBUG [SSH]: streamLogFile got stream, entering read loop")
 
-        for try await event in streams {
-            // Check for task cancellation
-            try Task.checkCancellation()
+            for try await event in streams {
+                // Check for task cancellation
+                try Task.checkCancellation()
 
-            switch event {
-            case .stdout(let data), .stderr(let data):
-                let text = String(buffer: data)
-                // Split into lines and call callback for each
-                let lines = text.components(separatedBy: "\n")
-                for line in lines where !line.isEmpty {
-                    onNewLine(line)
+                switch event {
+                case .stdout(let data), .stderr(let data):
+                    let text = String(buffer: data)
+                    // Split into lines and call callback for each
+                    let lines = text.components(separatedBy: "\n")
+                    for line in lines where !line.isEmpty {
+                        onNewLine(line)
+                    }
                 }
             }
+            print("DEBUG [SSH]: streamLogFile stream ended normally for \(path)")
+        } catch is CancellationError {
+            // Task was cancelled - this is expected during log switching
+            print("DEBUG [SSH]: streamLogFile cancelled for \(path)")
+            throw CancellationError()
+        } catch {
+            // Check if this is a connection loss
+            if isConnectionLostError(error) {
+                await handleConnectionLoss()
+            }
+            throw error
         }
-        print("DEBUG [SSH]: streamLogFile stream ended normally for \(path)")
     }
 
     /// Search all log files for a pattern, returns files with match counts
