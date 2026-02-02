@@ -859,6 +859,12 @@ struct ContentView: View {
                 selectedSection = .tasks
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .terminalSessionEnded)) { _ in
+            // Navigate to dashboard when terminal session ends
+            if sshManager.isConnected && selectedSection == .terminal {
+                selectedSection = .dashboard
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .navigateToZFS)) { notification in
             // Only handle if this notification is for this window
             if let notificationWindowId = notification.userInfo?["windowId"] as? UUID,

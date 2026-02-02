@@ -2972,10 +2972,37 @@ class JailConsoleCoordinator: NSObject, ObservableObject, TerminalViewDelegate, 
                 // into the jail and session ends when they exit (no return to host shell)
                 let command = "exec jexec \(jailName) /bin/sh"
                 try await sshManager.startInteractiveCommand(command, delegate: self)
-            } catch {
+                // Console exited normally (user typed "exit")
                 await MainActor.run {
-                    self.error = "Failed to start jail console: \(error.localizedDescription)"
                     self.isConnected = false
+                    self.isReady = false
+                    self.hasExited = true
+                }
+            } catch is CancellationError {
+                // Task was cancelled - expected during cleanup
+                await MainActor.run {
+                    self.isConnected = false
+                    self.isReady = false
+                }
+            } catch {
+                let errorString = String(describing: error)
+                // Check if this is a normal channel close (exit, reboot, disconnect)
+                let isNormalClose = errorString.contains("ChannelError") ||
+                                   errorString.contains("EOF") ||
+                                   errorString.contains("closed") ||
+                                   errorString.contains("NIOSSH")
+
+                await MainActor.run {
+                    if isNormalClose {
+                        // Console session ended normally
+                        print("DEBUG: Jail console session ended: \(errorString)")
+                        self.hasExited = true
+                    } else {
+                        // Actual error
+                        self.error = "Console error: \(error.localizedDescription)"
+                    }
+                    self.isConnected = false
+                    self.isReady = false
                 }
             }
         }

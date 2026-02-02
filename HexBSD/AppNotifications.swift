@@ -57,4 +57,7 @@ extension Notification.Name {
 
     /// Posted when navigation to ZFS page is requested (opens Pools sheet)
     static let navigateToZFS = Notification.Name("navigateToZFS")
+
+    /// Posted when terminal session ends (user typed exit or connection closed)
+    static let terminalSessionEnded = Notification.Name("terminalSessionEnded")
 }

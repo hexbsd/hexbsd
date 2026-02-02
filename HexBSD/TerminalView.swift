@@ -159,10 +159,39 @@ class TerminalCoordinator: NSObject, ObservableObject, TerminalViewDelegate, Int
         shellTask = Task {
             do {
                 try await sshManager.startInteractiveShell(delegate: self)
-            } catch {
+                // Shell exited normally (user typed "exit")
                 await MainActor.run {
-                    self.error = "Failed to start shell: \(error.localizedDescription)"
                     self.isConnected = false
+                    self.isReady = false
+                    // Navigate back to dashboard
+                    NotificationCenter.default.post(name: .terminalSessionEnded, object: nil)
+                }
+            } catch is CancellationError {
+                // Task was cancelled - expected during cleanup
+                await MainActor.run {
+                    self.isConnected = false
+                    self.isReady = false
+                }
+            } catch {
+                let errorString = String(describing: error)
+                // Check if this is a normal channel close (exit, reboot, disconnect)
+                let isNormalClose = errorString.contains("ChannelError") ||
+                                   errorString.contains("EOF") ||
+                                   errorString.contains("closed") ||
+                                   errorString.contains("NIOSSH")
+
+                await MainActor.run {
+                    if isNormalClose {
+                        // Shell session ended - don't show error
+                        print("DEBUG: Shell session ended: \(errorString)")
+                    } else {
+                        // Actual error - show it
+                        self.error = "Shell error: \(error.localizedDescription)"
+                    }
+                    self.isConnected = false
+                    self.isReady = false
+                    // Navigate back to dashboard
+                    NotificationCenter.default.post(name: .terminalSessionEnded, object: nil)
                 }
             }
         }
