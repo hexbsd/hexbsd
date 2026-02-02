@@ -119,58 +119,8 @@ struct CreateJailOptions {
 /// Options for creating a new ports tree
 struct CreatePortsTreeOptions {
     var name: String = ""
-    var method: PortsTreeMethod = .gitHttps
+    var repositoryUrl: String = "https://git.FreeBSD.org/ports.git"
     var branch: String = "main"
-    var useCustomBranch: Bool = false
-    var customBranch: String = ""
-    var useCustomUrl: Bool = false
-    var customUrl: String = ""
-
-    enum PortsTreeMethod: String, CaseIterable {
-        case gitHttps = "git+https"
-        case gitHttpsFull = "git+https+full"
-        case gitHttpsShallow = "git+https+shallow"
-        case null = "null"
-
-        var displayName: String {
-            switch self {
-            case .gitHttps: return "Git HTTPS (default depth)"
-            case .gitHttpsFull: return "Git HTTPS (full clone)"
-            case .gitHttpsShallow: return "Git HTTPS (shallow clone)"
-            case .null: return "Null (use existing /usr/ports)"
-            }
-        }
-
-        var description: String {
-            switch self {
-            case .gitHttps: return "Standard git clone via HTTPS with reasonable history"
-            case .gitHttpsFull: return "Full clone via HTTPS with complete history"
-            case .gitHttpsShallow: return "Shallow clone via HTTPS, fastest but limited history"
-            case .null: return "Use an existing ports tree at /usr/ports"
-            }
-        }
-
-        var usesGit: Bool {
-            switch self {
-            case .gitHttps, .gitHttpsFull, .gitHttpsShallow: return true
-            case .null: return false
-            }
-        }
-    }
-
-    static var availableBranches: [String] {
-        ["main", "2024Q4", "2024Q3", "2024Q2", "2024Q1"]
-    }
-
-    /// The effective branch to use (custom or selected)
-    var effectiveBranch: String {
-        useCustomBranch ? customBranch : branch
-    }
-
-    /// The effective URL to use (custom or default FreeBSD)
-    var effectiveUrl: String? {
-        useCustomUrl && !customUrl.isEmpty ? customUrl : nil
-    }
 }
 
 /// Options for starting a bulk build
@@ -2062,8 +2012,8 @@ struct CreatePortsTreeSheet: View {
 
     var isValid: Bool {
         let nameValid = !options.name.isEmpty && options.name.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
-        let branchValid = !options.method.usesGit || !options.effectiveBranch.isEmpty
-        let urlValid = !options.useCustomUrl || !options.customUrl.isEmpty
+        let branchValid = !options.branch.isEmpty
+        let urlValid = !options.repositoryUrl.isEmpty
         return nameValid && branchValid && urlValid
     }
 
@@ -2095,64 +2045,26 @@ struct CreatePortsTreeSheet: View {
                             .foregroundColor(.secondary)
                     }
 
-                    // Method
+                    // Repository URL
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Method")
+                        Text("Repository URL")
                             .font(.headline)
-                        Picker("Method", selection: $options.method) {
-                            ForEach(CreatePortsTreeOptions.PortsTreeMethod.allCases, id: \.self) { method in
-                                Text(method.displayName).tag(method)
-                            }
-                        }
-                        .labelsHidden()
-                        Text(options.method.description)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+
+                        TextField("https://git.FreeBSD.org/ports.git", text: $options.repositoryUrl)
+                            .textFieldStyle(.roundedBorder)
                     }
 
-                    // Branch (for git methods)
-                    if options.method.usesGit {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Branch")
-                                .font(.headline)
+                    // Branch
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Branch")
+                            .font(.headline)
 
-                            if options.useCustomBranch {
-                                TextField("Branch name", text: $options.customBranch)
-                                    .textFieldStyle(.roundedBorder)
-                            } else {
-                                Picker("Branch", selection: $options.branch) {
-                                    ForEach(CreatePortsTreeOptions.availableBranches, id: \.self) { branch in
-                                        Text(branch).tag(branch)
-                                    }
-                                }
-                                .labelsHidden()
-                            }
+                        TextField("main", text: $options.branch)
+                            .textFieldStyle(.roundedBorder)
 
-                            Toggle("Use custom branch", isOn: $options.useCustomBranch)
-                                .toggleStyle(.checkbox)
-
-                            Text("main = latest, quarterly branches = more stable")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-
-                        // Custom Repository URL
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Repository URL")
-                                .font(.headline)
-
-                            Toggle("Use custom repository URL", isOn: $options.useCustomUrl)
-                                .toggleStyle(.checkbox)
-
-                            if options.useCustomUrl {
-                                TextField("https://github.com/user/ports.git", text: $options.customUrl)
-                                    .textFieldStyle(.roundedBorder)
-                            }
-
-                            Text(options.useCustomUrl ? "Enter the full git repository URL" : "Default: FreeBSD ports repository")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
+                        Text("main = latest, quarterly branches (e.g. 2024Q4) = more stable")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
                 }
                 .padding()
@@ -3679,19 +3591,10 @@ class PoudriereViewModel: ObservableObject {
     }
 
     func createPortsTree(options: CreatePortsTreeOptions) async {
-        var command = "poudriere ports -c -p '\(options.name)' -m '\(options.method.rawValue)'"
-
-        // Add branch for git methods
-        if options.method.usesGit {
-            let branch = options.effectiveBranch
-            if !branch.isEmpty {
-                command += " -B '\(branch)'"
-            }
-
-            // Add custom URL if specified
-            if let customUrl = options.effectiveUrl {
-                command += " -U '\(customUrl)'"
-            }
+        var command = "poudriere ports -c -p '\(options.name)' -m 'git+https'"
+        command += " -U '\(options.repositoryUrl)'"
+        if !options.branch.isEmpty {
+            command += " -B '\(options.branch)'"
         }
         let portsTreeName = options.name
 
