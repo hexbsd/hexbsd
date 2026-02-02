@@ -6844,20 +6844,18 @@ extension SSHConnectionManager {
         // Ensure the repos directory exists
         _ = try await executeCommand("mkdir -p /usr/local/etc/pkg/repos")
 
-        // Remove existing repository config files
-        outputLog += "Removing old repository configurations...\n"
-        _ = try await executeCommand("rm -f /usr/local/etc/pkg/repos/*.conf")
+        // Remove existing repository config file
+        outputLog += "Removing old repository configuration...\n"
+        _ = try await executeCommand("rm -f /usr/local/etc/pkg/repos/FreeBSD.conf")
 
-        if hostname.isEmpty {
-            // Reset to automatic SRV lookup
-            outputLog += "Setting up automatic mirror selection (SRV lookup)...\n"
+        if hostname.isEmpty && repoType == .quarterly {
+            // For quarterly with automatic, just use system defaults - no override file needed
+            outputLog += "Using system default quarterly repositories...\n"
+        } else if hostname.isEmpty {
+            // For latest with automatic, need to override to latest but keep SRV
+            outputLog += "Setting up automatic mirror selection (SRV lookup) with latest packages...\n"
 
-            if repoType == .quarterly {
-                // For quarterly with automatic, just use system defaults
-                outputLog += "Using system default quarterly repositories...\n"
-            } else {
-                // For latest with automatic, need to override to latest but keep SRV
-                let configContent = """
+            let configContent = """
 # Override quarterly repositories with latest
 FreeBSD-ports: {
   url: "pkg+http://pkg.FreeBSD.org/${ABI}/latest",
@@ -6875,13 +6873,13 @@ FreeBSD-ports-kmods: {
   enabled: yes
 }
 """
-                let command = """
+
+            let command = """
 cat > /usr/local/etc/pkg/repos/FreeBSD.conf << 'EOFPKG'
 \(configContent)
 EOFPKG
 """
-                _ = try await executeCommand(command)
-            }
+            _ = try await executeCommand(command)
         } else {
             // Use specific mirror - no SRV, direct HTTP
             outputLog += "Setting mirror to \(hostname) (\(repoPath))...\n"
@@ -6902,6 +6900,7 @@ FreeBSD-ports-kmods: {
   enabled: yes
 }
 """
+
             let command = """
 cat > /usr/local/etc/pkg/repos/FreeBSD.conf << 'EOFPKG'
 \(configContent)
@@ -6939,9 +6938,9 @@ EOFPKG
         // Ensure the repos directory exists
         _ = try await executeCommand("mkdir -p /usr/local/etc/pkg/repos")
 
-        // Remove ALL existing repository config files first
-        outputLog += "Removing old repository configurations...\n"
-        _ = try await executeCommand("rm -f /usr/local/etc/pkg/repos/*.conf")
+        // Remove the override file
+        outputLog += "Removing old repository configuration...\n"
+        _ = try await executeCommand("rm -f /usr/local/etc/pkg/repos/FreeBSD.conf")
 
         if newRepo == .quarterly {
             // For quarterly, just remove the override and use system defaults
@@ -7008,13 +7007,14 @@ EOFPKG
         // Ensure the repos directory exists
         _ = try await executeCommand("mkdir -p /usr/local/etc/pkg/repos")
 
-        // Remove ALL existing repository config files first
-        outputLog += "Removing old repository configurations...\n"
-        _ = try await executeCommand("rm -f /usr/local/etc/pkg/repos/*.conf")
+        // Remove the override file
+        outputLog += "Removing old repository configuration...\n"
+        _ = try await executeCommand("rm -f /usr/local/etc/pkg/repos/FreeBSD.conf")
 
         // Create configuration for custom repository
         // Note: Custom repositories typically don't use fingerprint verification
         // Users can add their own signing configuration if needed
+        // FreeBSD-base is left alone - it uses system defaults from /etc/pkg/FreeBSD.conf
         let configContent = """
 # Disable the default repositories
 FreeBSD-ports: { enabled: no }
@@ -7027,10 +7027,10 @@ Custom: {
 }
 """
 
-        // Write the configuration
+        // Write the configuration to FreeBSD.conf (single override file)
         outputLog += "Writing custom repository configuration...\n"
         let command = """
-cat > /usr/local/etc/pkg/repos/Custom.conf << 'EOFPKG'
+cat > /usr/local/etc/pkg/repos/FreeBSD.conf << 'EOFPKG'
 \(configContent)
 EOFPKG
 """
@@ -7059,22 +7059,32 @@ EOFPKG
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
-        // Check if there's a custom repository configuration
-        let customConfOutput = try await executeCommand("cat /usr/local/etc/pkg/repos/Custom.conf 2>/dev/null || echo ''")
+        // Check if there's a custom repository configuration in FreeBSD.conf
+        let confOutput = try await executeCommand("cat /usr/local/etc/pkg/repos/FreeBSD.conf 2>/dev/null || echo ''")
 
-        if !customConfOutput.isEmpty && customConfOutput.contains("Custom:") {
-            // Extract the URL from the configuration
-            // Looking for: url: "https://..."
-            let lines = customConfOutput.split(separator: "\n")
+        if !confOutput.isEmpty && confOutput.contains("Custom:") {
+            // Extract the URL from the Custom section
+            // Looking for: Custom: { ... url: "https://..." ... }
+            let lines = confOutput.split(separator: "\n")
+            var inCustomSection = false
             for line in lines {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed.starts(with: "url:") {
-                    // Extract the URL between quotes
-                    if let startQuote = trimmed.firstIndex(of: "\""),
-                       let endQuote = trimmed.lastIndex(of: "\""),
-                       startQuote < endQuote {
-                        let urlStart = trimmed.index(after: startQuote)
-                        return String(trimmed[urlStart..<endQuote])
+                if trimmed.starts(with: "Custom:") {
+                    inCustomSection = true
+                    continue
+                }
+                if inCustomSection {
+                    if trimmed.starts(with: "}") {
+                        break
+                    }
+                    if trimmed.starts(with: "url:") {
+                        // Extract the URL between quotes
+                        if let startQuote = trimmed.firstIndex(of: "\""),
+                           let endQuote = trimmed.lastIndex(of: "\""),
+                           startQuote < endQuote {
+                            let urlStart = trimmed.index(after: startQuote)
+                            return String(trimmed[urlStart..<endQuote])
+                        }
                     }
                 }
             }
