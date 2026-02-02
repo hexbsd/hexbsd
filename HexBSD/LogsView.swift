@@ -370,21 +370,25 @@ struct LogsContentViewImpl: View {
             }
         }
         .onChange(of: viewModel.selectedLog) { oldValue, newValue in
+            print("DEBUG [LogsView]: onChange selectedLog: \(oldValue?.name ?? "nil") -> \(newValue?.name ?? "nil")")
             Task {
                 await viewModel.startStreaming()
             }
         }
         .onChange(of: viewModel.lineCount) { oldValue, newValue in
+            print("DEBUG [LogsView]: onChange lineCount: \(oldValue) -> \(newValue)")
             Task {
                 await viewModel.startStreaming()
             }
         }
         .onAppear {
+            print("DEBUG [LogsView]: onAppear")
             Task {
                 await viewModel.loadLogFiles()
             }
         }
         .onDisappear {
+            print("DEBUG [LogsView]: onDisappear - stopping streaming")
             viewModel.stopStreaming()
         }
         .background {
@@ -421,6 +425,22 @@ class LogsViewModel: ObservableObject {
 
     // Streaming task
     private var streamTask: Task<Void, Never>?
+
+    // Buffer for batching log updates
+    private var pendingLogLines: [String] = []
+    private var flushTask: Task<Void, Never>?
+
+    // Track which log path is currently being streamed to detect stale updates
+    private var currentStreamingPath: String?
+
+    // Track which log is currently loaded (for content display)
+    private var currentLoadedPath: String?
+
+    // Debounce timer for rapid log selection changes
+    private var debounceWorkItem: DispatchWorkItem?
+
+    // Delayed streaming timer - only start tail -F after user stops clicking
+    private var streamingDelayWorkItem: DispatchWorkItem?
 
     var filteredLogContent: String {
         guard !searchText.isEmpty else { return logContent }
@@ -464,56 +484,222 @@ class LogsViewModel: ObservableObject {
     }
 
     func startStreaming() async {
-        // Stop any existing stream
-        stopStreaming()
+        print("DEBUG [LogsView]: startStreaming called, selectedLog: \(selectedLog?.name ?? "nil"), currentStreamingPath: \(currentStreamingPath ?? "nil")")
+
+        // Cancel any pending debounced request
+        debounceWorkItem?.cancel()
+        debounceWorkItem = nil
 
         guard let log = selectedLog else {
+            print("DEBUG [LogsView]: No log selected, stopping stream")
+            // Stop streaming and clear content
+            await stopStreamingAndWait()
             logContent = ""
+            return
+        }
+
+        // If already streaming this log, no need to restart
+        if currentStreamingPath == log.path && isStreaming {
+            print("DEBUG [LogsView]: Already streaming this log, skipping")
+            return
+        }
+
+        // Debounce: wait 150ms in case user is rapidly cycling through logs
+        print("DEBUG [LogsView]: Scheduling debounced load for \(log.name)")
+        let logToLoad = log
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            Task { @MainActor in
+                await self.performStartStreaming(log: logToLoad)
+            }
+        }
+        debounceWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: workItem)
+    }
+
+    private func performStartStreaming(log: LogFile) async {
+        print("DEBUG [LogsView]: performStartStreaming called for \(log.name)")
+
+        // Cancel any pending streaming delay
+        streamingDelayWorkItem?.cancel()
+        streamingDelayWorkItem = nil
+
+        // Stop any existing stream first and wait for it to complete
+        await stopStreamingAndWait()
+
+        // Check if user already selected a different log while we were stopping
+        guard selectedLog?.path == log.path else {
+            print("DEBUG [LogsView]: User selected different log while stopping, aborting")
             return
         }
 
         isLoadingContent = true
         error = nil
+        currentLoadedPath = log.path
 
-        // First load initial content
+        // First load initial content (this uses a single short-lived channel)
+        print("DEBUG [LogsView]: Reading log file \(log.path) with \(lineCount) lines")
         do {
-            logContent = try await sshManager.readLogFile(path: log.path, lines: lineCount)
+            let content = try await sshManager.readLogFile(path: log.path, lines: lineCount)
+            print("DEBUG [LogsView]: Successfully read \(content.count) bytes from \(log.name)")
+
+            // Verify we're still supposed to be showing this log
+            guard currentLoadedPath == log.path else {
+                print("DEBUG [LogsView]: Path changed during read, discarding content")
+                isLoadingContent = false
+                return
+            }
+
+            logContent = content
         } catch {
-            self.error = "Failed to read log: \(error.localizedDescription)"
-            logContent = ""
+            print("DEBUG [LogsView]: ERROR reading log: \(error)")
+            // Only show error if we're still supposed to be showing this log
+            if currentLoadedPath == log.path {
+                self.error = "Failed to read log: \(error.localizedDescription)"
+                logContent = ""
+            }
             isLoadingContent = false
+            currentLoadedPath = nil
             return
         }
 
         isLoadingContent = false
+
+        // Schedule streaming to start after a delay - this prevents channel exhaustion
+        // when user is rapidly clicking through logs
+        let logPath = log.path
+        let delayedStream = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            Task { @MainActor in
+                await self.startDelayedStream(path: logPath)
+            }
+        }
+        streamingDelayWorkItem = delayedStream
+        print("DEBUG [LogsView]: Scheduling delayed stream start for \(log.name) (1s delay)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: delayedStream)
+    }
+
+    private func startDelayedStream(path: String) async {
+        // Verify we're still supposed to be streaming this log
+        guard currentLoadedPath == path, selectedLog?.path == path else {
+            print("DEBUG [LogsView]: Delayed stream cancelled - log changed")
+            return
+        }
+
+        print("DEBUG [LogsView]: Starting tail -F stream for \(path)")
+        currentStreamingPath = path
         isStreaming = true
 
         // Start streaming with tail -f
-        let logPath = log.path
         streamTask = Task {
-            await streamLogUpdates(path: logPath)
+            await streamLogUpdates(path: path)
         }
     }
 
+    private func stopStreamingAndWait() async {
+        print("DEBUG [LogsView]: stopStreamingAndWait called, currentStreamingPath: \(currentStreamingPath ?? "nil")")
+
+        // Cancel debounced requests
+        debounceWorkItem?.cancel()
+        debounceWorkItem = nil
+
+        // Cancel any pending delayed stream start
+        streamingDelayWorkItem?.cancel()
+        streamingDelayWorkItem = nil
+
+        // Signal that we want to stop
+        let oldPath = currentStreamingPath
+        currentStreamingPath = nil
+
+        // Cancel the stream task
+        if streamTask != nil {
+            print("DEBUG [LogsView]: Cancelling stream task for \(oldPath ?? "unknown")")
+            streamTask?.cancel()
+        }
+
+        // Wait briefly for the stream to acknowledge cancellation
+        if oldPath != nil {
+            print("DEBUG [LogsView]: Waiting 100ms for stream cleanup...")
+            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms - increased for channel cleanup
+            print("DEBUG [LogsView]: Stream cleanup wait complete")
+        }
+
+        streamTask = nil
+        flushTask?.cancel()
+        flushTask = nil
+        pendingLogLines.removeAll()
+        isStreaming = false
+    }
+
     func stopStreaming() {
+        print("DEBUG [LogsView]: stopStreaming called")
+        debounceWorkItem?.cancel()
+        debounceWorkItem = nil
+        streamingDelayWorkItem?.cancel()
+        streamingDelayWorkItem = nil
+        currentStreamingPath = nil
+        currentLoadedPath = nil
         streamTask?.cancel()
         streamTask = nil
+        flushTask?.cancel()
+        flushTask = nil
+        pendingLogLines.removeAll()
         isStreaming = false
     }
 
     private func streamLogUpdates(path: String) async {
+        print("DEBUG [LogsView]: streamLogUpdates starting for \(path)")
         do {
-            try await sshManager.streamLogFile(path: path) { [weak self] newLine in
+            try await sshManager.streamLogFile(path: path) { [weak self] (newLine: String) in
+                guard let self = self else { return }
+                // Buffer updates to avoid publishing during view rendering
                 Task { @MainActor in
-                    guard let self = self, !Task.isCancelled else { return }
-                    self.logContent += newLine + "\n"
+                    // Only process if this is still the active stream
+                    guard !Task.isCancelled, self.currentStreamingPath == path else { return }
+                    self.pendingLogLines.append(newLine)
+                    self.scheduleFlush()
                 }
             }
+            print("DEBUG [LogsView]: streamLogFile completed normally for \(path)")
         } catch {
+            print("DEBUG [LogsView]: streamLogFile ERROR for \(path): \(error)")
+            // Only update state if this is still the active stream and not cancelled
             if !Task.isCancelled {
                 await MainActor.run {
-                    self.isStreaming = false
+                    if self.currentStreamingPath == path {
+                        self.isStreaming = false
+                        self.currentStreamingPath = nil
+                    }
                 }
+            }
+        }
+    }
+
+    private func scheduleFlush() {
+        // Cancel any existing flush task
+        flushTask?.cancel()
+
+        // Capture current path for validation
+        let activePath = currentStreamingPath
+
+        // Schedule a new flush after a short delay to batch updates
+        flushTask = Task { @MainActor in
+            // Small delay to batch rapid updates
+            try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+
+            // Only flush if still streaming the same log
+            guard !Task.isCancelled,
+                  !pendingLogLines.isEmpty,
+                  currentStreamingPath == activePath,
+                  activePath != nil else { return }
+
+            let linesToFlush = pendingLogLines
+            pendingLogLines.removeAll()
+
+            // Use DispatchQueue to ensure we're not in a view update cycle
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, self.currentStreamingPath == activePath else { return }
+                self.logContent += linesToFlush.joined(separator: "\n") + "\n"
             }
         }
     }

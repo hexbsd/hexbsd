@@ -1338,19 +1338,26 @@ extension SSHConnectionManager {
 
     /// Read log file content (last N lines)
     func readLogFile(path: String, lines: Int) async throws -> String {
+        print("DEBUG [SSH]: readLogFile called for \(path), lines: \(lines), isConnected: \(isConnected)")
         guard client != nil else {
+            print("DEBUG [SSH]: readLogFile - client is nil!")
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
 
         // Use tail to get last N lines
         let command = "tail -n \(lines) '\(path)'"
-        return try await executeCommand(command)
+        print("DEBUG [SSH]: readLogFile executing: \(command)")
+        let result = try await executeCommand(command)
+        print("DEBUG [SSH]: readLogFile completed, got \(result.count) bytes")
+        return result
     }
 
     /// Stream log file updates using tail -f
     func streamLogFile(path: String, onNewLine: @escaping (String) -> Void) async throws {
+        print("DEBUG [SSH]: streamLogFile called for \(path), isConnected: \(isConnected)")
         guard let client = client else {
+            print("DEBUG [SSH]: streamLogFile - client is nil!")
             throw NSError(domain: "SSHConnectionManager", code: 1,
                          userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
         }
@@ -1358,8 +1365,10 @@ extension SSHConnectionManager {
         // Use tail -f to follow log file updates
         // Using -F to also handle log rotation
         let command = "tail -F '\(path)' 2>/dev/null"
+        print("DEBUG [SSH]: streamLogFile starting command stream: \(command)")
 
         let streams = try await client.executeCommandStream(command)
+        print("DEBUG [SSH]: streamLogFile got stream, entering read loop")
 
         for try await event in streams {
             // Check for task cancellation
@@ -1375,6 +1384,7 @@ extension SSHConnectionManager {
                 }
             }
         }
+        print("DEBUG [SSH]: streamLogFile stream ended normally for \(path)")
     }
 
     /// Search all log files for a pattern, returns files with match counts
