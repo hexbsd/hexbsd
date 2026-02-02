@@ -96,6 +96,89 @@ struct HighlightedText: View {
     }
 }
 
+// MARK: - Selectable Log Text View (NSTextView wrapper for proper copy support)
+
+struct SelectableLogText: NSViewRepresentable {
+    let text: String
+    let searchText: String
+    var autoScrollToBottom: Bool = false
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        let textView = NSTextView()
+
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.backgroundColor = .textBackgroundColor
+        textView.font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        textView.textContainerInset = NSSize(width: 10, height: 10)
+        textView.autoresizingMask = [.width]
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+
+        scrollView.documentView = textView
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.backgroundColor = .textBackgroundColor
+
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+
+        // Only update if content changed to avoid scroll position reset
+        let currentText = textView.string
+        let contentChanged = currentText != text || context.coordinator.lastSearchText != searchText
+
+        if contentChanged {
+            context.coordinator.lastSearchText = searchText
+
+            if searchText.isEmpty {
+                // Plain text - no highlighting
+                textView.string = text
+                textView.textColor = .textColor
+            } else {
+                // Apply highlighting for search matches
+                let attributedString = NSMutableAttributedString(string: text)
+                let fullRange = NSRange(location: 0, length: text.utf16.count)
+
+                // Base attributes
+                attributedString.addAttribute(.font, value: NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular), range: fullRange)
+                attributedString.addAttribute(.foregroundColor, value: NSColor.textColor, range: fullRange)
+
+                // Highlight matches
+                var searchRange = text.startIndex..<text.endIndex
+
+                while let range = text.range(of: searchText, options: .caseInsensitive, range: searchRange) {
+                    let nsRange = NSRange(range, in: text)
+                    attributedString.addAttribute(.foregroundColor, value: NSColor.orange, range: nsRange)
+                    attributedString.addAttribute(.font, value: NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .bold), range: nsRange)
+                    searchRange = range.upperBound..<text.endIndex
+                }
+
+                textView.textStorage?.setAttributedString(attributedString)
+            }
+
+            // Auto-scroll to bottom when streaming
+            if autoScrollToBottom {
+                textView.scrollToEndOfDocument(nil)
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    class Coordinator {
+        var lastSearchText: String = ""
+    }
+}
+
 // MARK: - Logs Content View
 
 struct LogsContentView: View {
@@ -323,37 +406,12 @@ struct LogsContentViewImpl: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    ScrollViewReader { proxy in
-                        ScrollView {
-                            if viewModel.searchText.isEmpty {
-                                Text(viewModel.logContent)
-                                    .font(.system(.body, design: .monospaced))
-                                    .textSelection(.enabled)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding()
-                                    .id("logContent")
-                            } else {
-                                // Show filtered content with highlighted matches
-                                VStack(alignment: .leading, spacing: 0) {
-                                    ForEach(Array(viewModel.filteredLogContent.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
-                                        HighlightedText(text: line, highlight: viewModel.searchText)
-                                            .font(.system(.body, design: .monospaced))
-                                            .textSelection(.enabled)
-                                    }
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding()
-                                .id("logContent")
-                            }
-                        }
-                        .background(Color(nsColor: .textBackgroundColor))
-                        .onChange(of: viewModel.logContent) { oldValue, newValue in
-                            // Auto-scroll to bottom when streaming
-                            if viewModel.isStreaming {
-                                proxy.scrollTo("logContent", anchor: .bottom)
-                            }
-                        }
-                    }
+                    // Use NSTextView wrapper for proper copy support
+                    SelectableLogText(
+                        text: viewModel.searchText.isEmpty ? viewModel.logContent : viewModel.filteredLogContent,
+                        searchText: viewModel.searchText,
+                        autoScrollToBottom: viewModel.isStreaming
+                    )
                 }
             }
         }
