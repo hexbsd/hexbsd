@@ -116,11 +116,21 @@ struct CreateJailOptions {
     }
 }
 
+/// Method for creating a ports tree
+enum PortsTreeCreationMethod: String, CaseIterable {
+    case gitRepository = "Git Repository"
+    case existingDirectory = "Existing Directory"
+}
+
 /// Options for creating a new ports tree
 struct CreatePortsTreeOptions {
     var name: String = ""
+    var creationMethod: PortsTreeCreationMethod = .gitRepository
+    // Git options
     var repositoryUrl: String = "https://git.FreeBSD.org/ports.git"
     var branch: String = "main"
+    // Existing directory option (nullfs mount)
+    var existingPath: String = ""
 }
 
 /// Options for starting a bulk build
@@ -2009,12 +2019,20 @@ struct CreatePortsTreeSheet: View {
     let onDismiss: () -> Void
     @State private var options = CreatePortsTreeOptions()
     @State private var isCreating = false
+    @State private var showingDirectoryPicker = false
 
     var isValid: Bool {
         let nameValid = !options.name.isEmpty && options.name.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
-        let branchValid = !options.branch.isEmpty
-        let urlValid = !options.repositoryUrl.isEmpty
-        return nameValid && branchValid && urlValid
+
+        switch options.creationMethod {
+        case .gitRepository:
+            let branchValid = !options.branch.isEmpty
+            let urlValid = !options.repositoryUrl.isEmpty
+            return nameValid && branchValid && urlValid
+        case .existingDirectory:
+            let pathValid = !options.existingPath.isEmpty
+            return nameValid && pathValid
+        }
     }
 
     var body: some View {
@@ -2045,26 +2063,63 @@ struct CreatePortsTreeSheet: View {
                             .foregroundColor(.secondary)
                     }
 
-                    // Repository URL
+                    // Method picker
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Repository URL")
+                        Text("Source")
                             .font(.headline)
-
-                        TextField("https://git.FreeBSD.org/ports.git", text: $options.repositoryUrl)
-                            .textFieldStyle(.roundedBorder)
+                        Picker("", selection: $options.creationMethod) {
+                            ForEach(PortsTreeCreationMethod.allCases, id: \.self) { method in
+                                Text(method.rawValue).tag(method)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
                     }
 
-                    // Branch
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Branch")
-                            .font(.headline)
+                    // Method-specific fields
+                    switch options.creationMethod {
+                    case .gitRepository:
+                        // Repository URL
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Repository URL")
+                                .font(.headline)
 
-                        TextField("main", text: $options.branch)
-                            .textFieldStyle(.roundedBorder)
+                            TextField("https://git.FreeBSD.org/ports.git", text: $options.repositoryUrl)
+                                .textFieldStyle(.roundedBorder)
+                        }
 
-                        Text("main = latest, quarterly branches (e.g. 2024Q4) = more stable")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                        // Branch
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Branch")
+                                .font(.headline)
+
+                            TextField("main", text: $options.branch)
+                                .textFieldStyle(.roundedBorder)
+
+                            Text("main = latest, quarterly branches (e.g. 2024Q4) = more stable")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                    case .existingDirectory:
+                        // Existing path
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Ports Directory Path")
+                                .font(.headline)
+
+                            HStack {
+                                TextField("/usr/ports", text: $options.existingPath)
+                                    .textFieldStyle(.roundedBorder)
+
+                                Button("Browse...") {
+                                    showingDirectoryPicker = true
+                                }
+                            }
+
+                            Text("Select an existing ports tree directory on the server. Poudriere will use a nullfs mount.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
                 .padding()
@@ -2089,7 +2144,248 @@ struct CreatePortsTreeSheet: View {
             }
             .padding()
         }
-        .frame(width: 450, height: 480)
+        .frame(width: 450, height: 520)
+        .sheet(isPresented: $showingDirectoryPicker) {
+            RemoteDirectoryPicker(sshManager: viewModel.sshManager) { selectedPath in
+                if let path = selectedPath {
+                    options.existingPath = path
+                }
+                showingDirectoryPicker = false
+            }
+        }
+    }
+}
+
+// MARK: - Remote Directory Picker
+
+struct RemoteDirectoryPicker: View {
+    let sshManager: SSHConnectionManager
+    let onSelect: (String?) -> Void
+
+    @StateObject private var viewModel: RemoteDirectoryPickerViewModel
+
+    init(sshManager: SSHConnectionManager, onSelect: @escaping (String?) -> Void) {
+        self.sshManager = sshManager
+        self.onSelect = onSelect
+        _viewModel = StateObject(wrappedValue: RemoteDirectoryPickerViewModel(sshManager: sshManager))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Text("Select Ports Directory")
+                    .font(.title2)
+                    .bold()
+                Spacer()
+                Button("Cancel") { onSelect(nil) }
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding()
+
+            Divider()
+
+            // Navigation bar
+            HStack(spacing: 8) {
+                Button(action: { Task { await viewModel.navigateUp() } }) {
+                    Image(systemName: "chevron.left")
+                }
+                .buttonStyle(.borderless)
+                .disabled(viewModel.currentPath == "/")
+
+                Button(action: { Task { await viewModel.navigateToRoot() } }) {
+                    Image(systemName: "house")
+                }
+                .buttonStyle(.borderless)
+                .help("Go to root")
+
+                Text(viewModel.currentPath)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundColor(.secondary)
+
+                Spacer()
+
+                Button(action: { Task { await viewModel.refresh() } }) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("Refresh")
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 6)
+
+            Divider()
+
+            // Directory list
+            ZStack {
+                if viewModel.isLoading {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("Loading...")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if viewModel.directories.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "folder")
+                            .font(.system(size: 48))
+                            .foregroundColor(.secondary)
+                        Text("No subdirectories")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List(viewModel.directories, selection: $viewModel.selectedDirectory) { dir in
+                        HStack(spacing: 8) {
+                            Image(systemName: "folder.fill")
+                                .foregroundColor(.orange)
+                                .frame(width: 20)
+                            Text(dir.name)
+                                .lineLimit(1)
+                            Spacer()
+                        }
+                        .tag(dir.id)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            TapGesture(count: 2).onEnded {
+                                Task { await viewModel.navigateTo(dir) }
+                            }
+                        )
+                        .simultaneousGesture(
+                            TapGesture(count: 1).onEnded {
+                                viewModel.selectedDirectory = dir.id
+                            }
+                        )
+                    }
+                    .listStyle(.plain)
+                }
+            }
+
+            Divider()
+
+            // Selected path display
+            HStack {
+                Text("Selected:")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text(viewModel.currentPath)
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            // Footer
+            HStack {
+                Spacer()
+                Button("Select This Directory") {
+                    onSelect(viewModel.currentPath)
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding()
+        }
+        .frame(width: 500, height: 450)
+        .onAppear {
+            Task { await viewModel.loadInitialDirectory() }
+        }
+    }
+}
+
+// MARK: - Remote Directory Picker ViewModel
+
+struct RemoteDirectory: Identifiable, Hashable {
+    let id = UUID()
+    let name: String
+    let path: String
+}
+
+@MainActor
+class RemoteDirectoryPickerViewModel: ObservableObject {
+    @Published var directories: [RemoteDirectory] = []
+    @Published var currentPath: String = "/"
+    @Published var isLoading = false
+    @Published var selectedDirectory: UUID?
+
+    private let sshManager: SSHConnectionManager
+
+    init(sshManager: SSHConnectionManager) {
+        self.sshManager = sshManager
+    }
+
+    func loadInitialDirectory() async {
+        // Start at /usr/ports if it exists, otherwise /
+        do {
+            let result = try await sshManager.executeCommand("test -d /usr/ports && echo 'yes' || echo 'no'")
+            if result.trimmingCharacters(in: .whitespacesAndNewlines) == "yes" {
+                currentPath = "/usr/ports"
+            } else {
+                currentPath = "/"
+            }
+        } catch {
+            currentPath = "/"
+        }
+        await loadDirectory(currentPath)
+    }
+
+    func navigateToRoot() async {
+        currentPath = "/"
+        await loadDirectory(currentPath)
+    }
+
+    func navigateUp() async {
+        let components = currentPath.split(separator: "/")
+        if components.count > 1 {
+            currentPath = "/" + components.dropLast().joined(separator: "/")
+        } else {
+            currentPath = "/"
+        }
+        await loadDirectory(currentPath)
+    }
+
+    func navigateTo(_ dir: RemoteDirectory) async {
+        currentPath = dir.path
+        await loadDirectory(currentPath)
+    }
+
+    func refresh() async {
+        await loadDirectory(currentPath)
+    }
+
+    func loadDirectory(_ path: String) async {
+        isLoading = true
+        selectedDirectory = nil
+
+        do {
+            // List only directories, sorted
+            let command = "find '\(path.replacingOccurrences(of: "'", with: "'\\''"))' -maxdepth 1 -type d ! -name '.*' 2>/dev/null | sort"
+            let result = try await sshManager.executeCommand(command)
+
+            let lines = result.split(separator: "\n").map(String.init)
+            var dirs: [RemoteDirectory] = []
+
+            for line in lines {
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty, trimmed != path else { continue }
+
+                let name = (trimmed as NSString).lastPathComponent
+                dirs.append(RemoteDirectory(name: name, path: trimmed))
+            }
+
+            directories = dirs
+        } catch {
+            directories = []
+        }
+
+        isLoading = false
     }
 }
 
@@ -3591,12 +3887,23 @@ class PoudriereViewModel: ObservableObject {
     }
 
     func createPortsTree(options: CreatePortsTreeOptions) async {
-        var command = "poudriere ports -c -p '\(options.name)' -m 'git+https'"
-        command += " -U '\(options.repositoryUrl)'"
-        if !options.branch.isEmpty {
-            command += " -B '\(options.branch)'"
-        }
+        let command: String
         let portsTreeName = options.name
+
+        switch options.creationMethod {
+        case .gitRepository:
+            var cmd = "poudriere ports -c -p '\(options.name)' -m 'git+https'"
+            cmd += " -U '\(options.repositoryUrl)'"
+            if !options.branch.isEmpty {
+                cmd += " -B '\(options.branch)'"
+            }
+            command = cmd
+
+        case .existingDirectory:
+            // Use null method with -M to specify the path (nullfs mount)
+            let escapedPath = options.existingPath.replacingOccurrences(of: "'", with: "'\\''")
+            command = "poudriere ports -c -p '\(options.name)' -m null -M '\(escapedPath)'"
+        }
 
         // Setup command output sheet
         commandOutput.reset()
@@ -3604,18 +3911,20 @@ class PoudriereViewModel: ObservableObject {
         showingCommandOutput = true
         error = nil
 
-        // Set cleanup handler to remove partial ports tree on cancel
-        commandOutput.setCleanupHandler { [weak self] in
-            guard let self = self else { return }
-            self.commandOutput.appendOutput("\n\n--- Cancelling and cleaning up partial ports tree '\(portsTreeName)'... ---\n")
-            do {
-                // Try to delete any partial ports tree that was created
-                _ = try await self.sshManager.executeCommand("poudriere ports -d -p '\(portsTreeName)' -C 2>/dev/null || true")
-                self.commandOutput.appendOutput("Cleanup complete.\n")
-            } catch {
-                self.commandOutput.appendOutput("Cleanup error: \(error.localizedDescription)\n")
+        // Set cleanup handler to remove partial ports tree on cancel (only for git method)
+        if options.creationMethod == .gitRepository {
+            commandOutput.setCleanupHandler { [weak self] in
+                guard let self = self else { return }
+                self.commandOutput.appendOutput("\n\n--- Cancelling and cleaning up partial ports tree '\(portsTreeName)'... ---\n")
+                do {
+                    // Try to delete any partial ports tree that was created
+                    _ = try await self.sshManager.executeCommand("poudriere ports -d -p '\(portsTreeName)' -C 2>/dev/null || true")
+                    self.commandOutput.appendOutput("Cleanup complete.\n")
+                } catch {
+                    self.commandOutput.appendOutput("Cleanup error: \(error.localizedDescription)\n")
+                }
+                await self.loadPortsTrees()
             }
-            await self.loadPortsTrees()
         }
 
         let task = Task {
