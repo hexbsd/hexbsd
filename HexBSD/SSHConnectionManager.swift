@@ -2429,6 +2429,73 @@ extension SSHConnectionManager {
         return output
     }
 
+    /// Start a bulk build with streaming output (for terminal display)
+    /// Runs poudriere in background with nohup so it survives disconnect, then tails the log
+    /// Returns exit code (0 if build started successfully, even if we disconnect before it finishes)
+    func startPoudriereBulkStreaming(
+        jail: String,
+        portsTree: String,
+        buildAll: Bool = false,
+        packages: [String] = [],
+        listFile: String? = nil,
+        clean: Bool = false,
+        forceRebuildSelected: Bool = false,
+        test: Bool = false,
+        onOutput: @escaping (String) -> Void
+    ) async throws -> Int {
+        guard client != nil else {
+            print("DEBUG: startPoudriereBulkStreaming - Not connected")
+            throw NSError(domain: "SSHConnectionManager", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Not connected to server"])
+        }
+
+        var command = "poudriere bulk -j '\(jail)' -p '\(portsTree)'"
+
+        // Add flags first
+        if clean { command += " -c" }
+        if forceRebuildSelected && !buildAll { command += " -C" }
+        if test { command += " -t" }
+
+        // Then add package specification (must come after flags)
+        if buildAll {
+            command += " -a"
+        } else if let file = listFile, !file.isEmpty {
+            command += " -f '\(file)'"
+        } else if !packages.isEmpty {
+            command += " " + packages.joined(separator: " ")
+        }
+
+        let logFile = "/tmp/poudriere-bulk-\(jail)-\(portsTree).log"
+
+        print("DEBUG: startPoudriereBulkStreaming - Command: \(command)")
+        print("DEBUG: startPoudriereBulkStreaming - Log file: \(logFile)")
+
+        // Start poudriere in background with nohup so it survives SSH disconnect
+        // Output goes to log file which we then tail
+        let startCommand = "nohup \(command) > '\(logFile)' 2>&1 & echo $!"
+        let pidResult = try await executeCommand(startCommand)
+        let pid = pidResult.trimmingCharacters(in: .whitespacesAndNewlines)
+        print("DEBUG: startPoudriereBulkStreaming - Started with PID: \(pid)")
+
+        // Small delay to let poudriere start and create initial output
+        try await Task.sleep(nanoseconds: 500_000_000)  // 0.5 seconds
+
+        // Now tail the log file to stream output
+        // tail -n +1 -f shows entire file from beginning and follows new output
+        let tailCommand = "tail -n +1 -f '\(logFile)'"
+        print("DEBUG: startPoudriereBulkStreaming - Tailing with: \(tailCommand)")
+
+        let exitCode = try await executeCommandStreaming(tailCommand, onOutput: onOutput)
+        print("DEBUG: startPoudriereBulkStreaming - Tail finished with exitCode: \(exitCode)")
+
+        // Check if poudriere actually finished successfully
+        // Read the last few lines of the log to check for success/failure
+        let checkResult = try? await executeCommand("tail -5 '\(logFile)' | grep -q 'Bulk build completed' && echo 'success' || echo 'unknown'")
+        print("DEBUG: startPoudriereBulkStreaming - Build result check: \(checkResult ?? "error")")
+
+        return exitCode
+    }
+
     /// Search for packages in the ports tree
     func searchPoudrierePorts(query: String, portsTree: String) async throws -> [BuildablePackage] {
         guard client != nil else {

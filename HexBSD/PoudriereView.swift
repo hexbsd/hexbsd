@@ -2393,7 +2393,22 @@ class RemoteDirectoryPickerViewModel: ObservableObject {
 
 struct PoudriereBulkBuildView: View {
     @ObservedObject var viewModel: PoudriereViewModel
-    @State private var isStartingBuild = false
+
+    var body: some View {
+        if viewModel.isBulkBuilding {
+            // Show terminal view when building
+            BulkBuildTerminalContainer(viewModel: viewModel)
+        } else {
+            // Show build configuration form
+            BulkBuildConfigView(viewModel: viewModel)
+        }
+    }
+}
+
+// MARK: - Build Configuration Form
+
+struct BulkBuildConfigView: View {
+    @ObservedObject var viewModel: PoudriereViewModel
 
     var body: some View {
         ScrollView {
@@ -2505,27 +2520,49 @@ struct PoudriereBulkBuildView: View {
                     .padding(.vertical, 4)
                 }
 
+                // Reconnect banner (if there's a disconnected build)
+                // DEBUG: Always show state for troubleshooting
+                let _ = print("DEBUG: BulkBuildConfigView - bulkBuildDisconnected=\(viewModel.bulkBuildDisconnected), activeBulkBuildLog=\(viewModel.activeBulkBuildLog ?? "nil")")
+
+                if viewModel.bulkBuildDisconnected, let logFile = viewModel.activeBulkBuildLog {
+                    GroupBox {
+                        HStack {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .foregroundColor(.orange)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Active Build Detected")
+                                    .fontWeight(.medium)
+                                Text(logFile)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Button("Reconnect") {
+                                Task {
+                                    await viewModel.reconnectToBulkBuild()
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                    }
+                }
+
                 // Start button
                 HStack {
                     Spacer()
                     Button(action: {
                         Task {
-                            await startBuild()
+                            await viewModel.startBulkBuildStreaming()
                         }
                     }) {
                         HStack {
-                            if isStartingBuild {
-                                ProgressView()
-                                    .scaleEffect(0.7)
-                            } else {
-                                Image(systemName: "hammer.fill")
-                            }
+                            Image(systemName: "hammer.fill")
                             Text("Start Build")
                         }
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
-                    .disabled(!viewModel.buildOptions.isValid || isStartingBuild)
+                    .disabled(!viewModel.buildOptions.isValid)
                 }
             }
             .padding()
@@ -2534,49 +2571,267 @@ struct PoudriereBulkBuildView: View {
             Task {
                 await viewModel.loadJails()
                 await viewModel.loadPortsTrees()
+                await viewModel.checkForActiveBuild()
             }
         }
     }
+}
 
-    private func startBuild() async {
-        guard let jail = viewModel.buildOptions.jail, let tree = viewModel.buildOptions.portsTree else { return }
-        isStartingBuild = true
+// MARK: - Bulk Build Terminal Container
 
-        do {
-            if viewModel.buildOptions.buildAll {
-                _ = try await viewModel.sshManager.startPoudriereBulkAll(
-                    jail: jail.name,
-                    portsTree: tree.name,
-                    clean: viewModel.buildOptions.cleanBuild,
-                    test: viewModel.buildOptions.testBuild
-                )
-            } else if !viewModel.buildOptions.packageListFile.isEmpty {
-                _ = try await viewModel.sshManager.startPoudriereBulkFromFile(
-                    jail: jail.name,
-                    portsTree: tree.name,
-                    listFile: viewModel.buildOptions.packageListFile,
-                    clean: viewModel.buildOptions.cleanBuild,
-                    forceRebuildSelected: viewModel.buildOptions.forceRebuildSelected,
-                    test: viewModel.buildOptions.testBuild
-                )
-            } else if !viewModel.buildOptions.packages.isEmpty {
-                _ = try await viewModel.sshManager.startPoudriereBulkPackages(
-                    jail: jail.name,
-                    portsTree: tree.name,
-                    packages: viewModel.buildOptions.packages,
-                    clean: viewModel.buildOptions.cleanBuild,
-                    forceRebuildSelected: viewModel.buildOptions.forceRebuildSelected,
-                    test: viewModel.buildOptions.testBuild
-                )
+struct BulkBuildTerminalContainer: View {
+    @ObservedObject var viewModel: PoudriereViewModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header with build info and actions
+            HStack {
+                // Build status indicator
+                HStack(spacing: 8) {
+                    if viewModel.bulkBuildComplete {
+                        if viewModel.bulkBuildExitCode == 0 {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                            Text("Build Complete")
+                                .fontWeight(.medium)
+                        } else {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.red)
+                            Text("Build Failed")
+                                .fontWeight(.medium)
+                        }
+                    } else if viewModel.bulkBuildStarted {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                        Text("Building...")
+                            .fontWeight(.medium)
+                    } else {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                        Text("Initializing...")
+                            .fontWeight(.medium)
+                    }
+                }
+
+                if let jail = viewModel.buildOptions.jail, let tree = viewModel.buildOptions.portsTree {
+                    Text("\(jail.name) / \(tree.name)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                // Done / Disconnect button
+                if viewModel.bulkBuildComplete {
+                    Button("Done") {
+                        viewModel.isBulkBuilding = false
+                        viewModel.activeBulkBuildLog = nil
+                        viewModel.bulkBuildDisconnected = false
+                    }
+                    .buttonStyle(.borderedProminent)
+                } else {
+                    Button("Disconnect") {
+                        viewModel.disconnectBulkBuild()
+                        viewModel.isBulkBuilding = false
+                    }
+                    .help("Disconnect terminal. Build will continue on server.")
+                }
             }
-            // Refresh and switch to Build Status tab on success
-            await viewModel.refresh()
-            viewModel.requestedTab = .status
-        } catch {
-            viewModel.error = "Failed to start build: \(error.localizedDescription)"
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .background(Color(NSColor.controlBackgroundColor))
+
+            Divider()
+
+            // Terminal view
+            BulkBuildTerminalView(viewModel: viewModel)
+        }
+    }
+}
+
+// MARK: - Bulk Build Terminal View
+
+struct BulkBuildTerminalView: NSViewRepresentable {
+    let viewModel: PoudriereViewModel
+
+    func makeNSView(context: Context) -> CopyableTerminalView {
+        print("DEBUG: BulkBuildTerminalView makeNSView called")
+        let terminal = CopyableTerminalView(frame: .zero)
+
+        // Register terminal with viewModel and flush any pending output
+        DispatchQueue.main.async {
+            print("DEBUG: Setting bulkBuildTerminal reference")
+            viewModel.bulkBuildTerminal = terminal
+            viewModel.flushPendingBulkBuildOutput()
         }
 
-        isStartingBuild = false
+        return terminal
+    }
+
+    func updateNSView(_ terminal: CopyableTerminalView, context: Context) {
+        // Ensure terminal is set (in case view was recreated)
+        if viewModel.bulkBuildTerminal == nil {
+            print("DEBUG: BulkBuildTerminalView updateNSView - terminal was nil, setting it")
+            viewModel.bulkBuildTerminal = terminal
+            viewModel.flushPendingBulkBuildOutput()
+        }
+    }
+}
+
+// MARK: - Copyable Terminal View (with selection support)
+
+class CopyableTerminalView: TerminalView {
+
+    private struct SelectionPosition {
+        var col: Int
+        var row: Int
+    }
+
+    private var selectionStart: SelectionPosition?
+    private var selectionEnd: SelectionPosition?
+    private var isSelecting = false
+    private var eventMonitor: Any?
+    private let terminalFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        configureTerminal()
+        setupEventMonitor()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureTerminal()
+        setupEventMonitor()
+    }
+
+    deinit {
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+    }
+
+    private func configureTerminal() {
+        nativeForegroundColor = NSColor.white
+        nativeBackgroundColor = NSColor.black
+        font = terminalFont
+    }
+
+    private func setupEventMonitor() {
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
+            self?.handleMouseEvent(event)
+            return event
+        }
+    }
+
+    private func handleMouseEvent(_ event: NSEvent) {
+        guard let eventWindow = event.window,
+              eventWindow == self.window else {
+            return
+        }
+
+        let locationInWindow = event.locationInWindow
+        let locationInView = convert(locationInWindow, from: nil)
+
+        guard bounds.contains(locationInView) else {
+            return
+        }
+
+        let position = convertToTerminalPosition(locationInView: locationInView)
+
+        switch event.type {
+        case .leftMouseDown:
+            selectionStart = position
+            selectionEnd = position
+            isSelecting = true
+        case .leftMouseDragged:
+            if isSelecting {
+                selectionEnd = position
+            }
+        case .leftMouseUp:
+            if isSelecting {
+                selectionEnd = position
+                isSelecting = false
+            }
+        default:
+            break
+        }
+    }
+
+    private func getCellDimensions() -> (width: CGFloat, height: CGFloat) {
+        let fontAttributes: [NSAttributedString.Key: Any] = [.font: terminalFont]
+        let charSize = "W".size(withAttributes: fontAttributes)
+        let lineHeight = terminalFont.ascender - terminalFont.descender + terminalFont.leading
+        return (charSize.width, max(lineHeight, charSize.height))
+    }
+
+    private func convertToTerminalPosition(locationInView: NSPoint) -> SelectionPosition {
+        let (cellWidth, cellHeight) = getCellDimensions()
+        let col = max(0, min(Int(locationInView.x / cellWidth), terminal.cols - 1))
+        let flippedY = bounds.height - locationInView.y
+        let row = max(0, min(Int(flippedY / cellHeight), terminal.rows - 1))
+        return SelectionPosition(col: col, row: row)
+    }
+
+    @objc override func copy(_ sender: Any?) {
+        guard let text = getSelectedText(), !text.isEmpty else {
+            return
+        }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+
+    private func getSelectedText() -> String? {
+        guard let start = selectionStart, let end = selectionEnd else {
+            return nil
+        }
+
+        let (normalizedStart, normalizedEnd) = normalizeSelection(start: start, end: end)
+        var result = ""
+
+        if normalizedStart.row == normalizedEnd.row {
+            result = getTextFromLine(row: normalizedStart.row, startCol: normalizedStart.col, endCol: normalizedEnd.col)
+        } else {
+            result += getTextFromLine(row: normalizedStart.row, startCol: normalizedStart.col, endCol: terminal.cols - 1)
+            result += "\n"
+
+            for row in (normalizedStart.row + 1)..<normalizedEnd.row {
+                result += getTextFromLine(row: row, startCol: 0, endCol: terminal.cols - 1)
+                result += "\n"
+            }
+
+            result += getTextFromLine(row: normalizedEnd.row, startCol: 0, endCol: normalizedEnd.col)
+        }
+
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizeSelection(start: SelectionPosition, end: SelectionPosition) -> (SelectionPosition, SelectionPosition) {
+        if start.row < end.row || (start.row == end.row && start.col <= end.col) {
+            return (start, end)
+        }
+        return (end, start)
+    }
+
+    private func getTextFromLine(row: Int, startCol: Int, endCol: Int) -> String {
+        var lineText = ""
+
+        for col in startCol...endCol {
+            if let char = terminal.getCharacter(col: col, row: row) {
+                // Skip null characters (empty cells)
+                if char != "\0" {
+                    lineText.append(char)
+                }
+            }
+        }
+
+        // Trim trailing whitespace and control characters from line
+        var result = lineText
+        while let last = result.last, last.isWhitespace || last.asciiValue == 0 || last == "\0" {
+            result.removeLast()
+        }
+        return result
     }
 }
 
@@ -3608,10 +3863,207 @@ class PoudriereViewModel: ObservableObject {
     // Tab navigation request (set to non-nil to request tab change)
     @Published var requestedTab: PoudriereTab?
 
+    // Bulk build terminal state
+    @Published var isBulkBuilding = false
+    @Published var bulkBuildStarted = false  // True once poudriere actually starts building
+    @Published var bulkBuildComplete = false
+    @Published var bulkBuildExitCode: Int?
+    @Published var bulkBuildDisconnected = false  // True if user disconnected from active build
+    @Published var activeBulkBuildLog: String?  // Log file path for reconnection
+    weak var bulkBuildTerminal: CopyableTerminalView?
+    private var pendingBulkBuildOutput: [String] = []
+    private var allBulkBuildOutput: String = ""  // Keep all output for replay when terminal recreates
+    private var bulkBuildTask: Task<Void, Never>?
+
     let sshManager: SSHConnectionManager
 
     init(sshManager: SSHConnectionManager) {
         self.sshManager = sshManager
+    }
+
+    // MARK: - Bulk Build Terminal Helpers
+
+    func appendBulkBuildOutput(_ text: String) {
+        // Ensure we're on main thread for @Published and SwiftTerm
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.appendBulkBuildOutput(text)
+            }
+            return
+        }
+
+        // Keep all output for replay if terminal gets recreated
+        allBulkBuildOutput += text
+
+        // Check for build-started indicators
+        if !bulkBuildStarted {
+            let lowercased = text.lowercased()
+            if lowercased.contains("creating the reference jail") ||
+               lowercased.contains("starting builders") ||
+               lowercased.contains("building") ||
+               lowercased.contains("gathering ports metadata") ||
+               text.contains("[00:") {
+                print("DEBUG: Build started indicator detected")
+                bulkBuildStarted = true
+            }
+        }
+
+        // Feed directly to SwiftTerm if available
+        if let terminal = bulkBuildTerminal {
+            if let data = text.data(using: .utf8) {
+                let bytes = [UInt8](data)
+                terminal.feed(byteArray: bytes[...])
+            }
+        } else {
+            // Buffer until terminal is ready
+            print("DEBUG: Terminal not ready, buffering output (pending count: \(pendingBulkBuildOutput.count + 1))")
+            pendingBulkBuildOutput.append(text)
+        }
+    }
+
+    func flushPendingBulkBuildOutput() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.flushPendingBulkBuildOutput()
+            }
+            return
+        }
+        guard let terminal = bulkBuildTerminal else { return }
+
+        // If we have pending output, flush it
+        if !pendingBulkBuildOutput.isEmpty {
+            print("DEBUG: flushPendingBulkBuildOutput - flushing \(pendingBulkBuildOutput.count) pending items")
+            let combined = pendingBulkBuildOutput.joined()
+            pendingBulkBuildOutput.removeAll()
+            if let data = combined.data(using: .utf8) {
+                let bytes = [UInt8](data)
+                terminal.feed(byteArray: bytes[...])
+            }
+        } else if !allBulkBuildOutput.isEmpty {
+            // Terminal was recreated - replay all output
+            print("DEBUG: flushPendingBulkBuildOutput - replaying all \(allBulkBuildOutput.count) chars")
+            if let data = allBulkBuildOutput.data(using: .utf8) {
+                let bytes = [UInt8](data)
+                terminal.feed(byteArray: bytes[...])
+            }
+        }
+    }
+
+    func resetBulkBuild() {
+        pendingBulkBuildOutput.removeAll()
+        allBulkBuildOutput = ""
+        bulkBuildStarted = false
+        bulkBuildComplete = false
+        bulkBuildExitCode = nil
+        bulkBuildDisconnected = false
+        if let terminal = bulkBuildTerminal {
+            terminal.feed(text: "\u{1B}[2J\u{1B}[H")  // Clear screen
+        }
+    }
+
+    func disconnectBulkBuild() {
+        bulkBuildTask?.cancel()
+        bulkBuildTask = nil
+        bulkBuildDisconnected = true
+
+        // Unlock sidebar navigation
+        NotificationCenter.default.post(
+            name: .sidebarNavigationLock,
+            object: nil,
+            userInfo: ["locked": false]
+        )
+
+        // Store log file path for potential reconnection
+        if let jail = buildOptions.jail, let tree = buildOptions.portsTree {
+            activeBulkBuildLog = "/tmp/poudriere-bulk-\(jail.name)-\(tree.name).log"
+            print("DEBUG: disconnectBulkBuild - Set activeBulkBuildLog=\(activeBulkBuildLog ?? "nil"), bulkBuildDisconnected=\(bulkBuildDisconnected)")
+        } else {
+            print("DEBUG: disconnectBulkBuild - jail or tree is nil, jail=\(buildOptions.jail?.name ?? "nil"), tree=\(buildOptions.portsTree?.name ?? "nil")")
+        }
+    }
+
+    func reconnectToBulkBuild() async {
+        guard let logFile = activeBulkBuildLog else { return }
+
+        // Check if poudriere is still running (use same detection as checkForActiveBuild)
+        do {
+            let psResult = try await sshManager.executeCommand("""
+                ps -auwx | grep -q 'poudriere\\[' && echo 'running' || echo 'stopped'
+                """)
+            let isRunning = psResult.trimmingCharacters(in: .whitespacesAndNewlines) == "running"
+            print("DEBUG: reconnectToBulkBuild - isRunning=\(isRunning), logFile=\(logFile)")
+
+            resetBulkBuild()
+            isBulkBuilding = true
+            bulkBuildStarted = true  // Assume already started since we're reconnecting
+
+            if isRunning {
+                appendBulkBuildOutput("--- Reconnected to running build ---\n")
+                appendBulkBuildOutput("--- Loading full log: \(logFile) ---\n\n")
+
+                // Use tail -n +1 -f to show entire file from beginning and follow new output
+                bulkBuildTask = Task {
+                    do {
+                        let exitCode = try await sshManager.executeCommandStreaming("tail -n +1 -f '\(logFile)'") { [weak self] output in
+                            self?.appendBulkBuildOutput(output)
+                        }
+                        await MainActor.run {
+                            self.bulkBuildComplete = true
+                            self.bulkBuildExitCode = exitCode
+                        }
+                    } catch {
+                        if !Task.isCancelled {
+                            await MainActor.run {
+                                self.appendBulkBuildOutput("\n\nError: \(error.localizedDescription)\n")
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Build finished, show the log
+                appendBulkBuildOutput("--- Build has completed. Showing log: \(logFile) ---\n\n")
+                let logContent = try await sshManager.executeCommand("cat '\(logFile)' 2>/dev/null || echo 'Log file not found'")
+                appendBulkBuildOutput(logContent)
+                bulkBuildComplete = true
+                activeBulkBuildLog = nil
+            }
+        } catch {
+            self.error = "Failed to reconnect: \(error.localizedDescription)"
+            bulkBuildDisconnected = false
+            activeBulkBuildLog = nil
+        }
+    }
+
+    func checkForActiveBuild() async {
+        // Check if there's an active poudriere bulk build running
+        print("DEBUG: checkForActiveBuild called")
+        do {
+            // Use same detection as getRunningPoudriereBuilds - checks for 'sh: poudriere[' in ps output
+            let psResult = try await sshManager.executeCommand("""
+                ps -auwx | grep -q 'poudriere\\[' && echo 'running' || echo 'stopped'
+                """)
+            let isRunning = psResult.trimmingCharacters(in: .whitespacesAndNewlines) == "running"
+            print("DEBUG: checkForActiveBuild - ps check: isRunning=\(isRunning)")
+
+            // Check for log file
+            let logResult = try await sshManager.executeCommand("ls -t /tmp/poudriere-bulk-*.log 2>/dev/null | head -1")
+            let logFile = logResult.trimmingCharacters(in: .whitespacesAndNewlines)
+            print("DEBUG: checkForActiveBuild - log file: '\(logFile)'")
+
+            if isRunning && !logFile.isEmpty {
+                // Active build with log file
+                activeBulkBuildLog = logFile
+                bulkBuildDisconnected = true
+                print("DEBUG: checkForActiveBuild - Active build detected! log=\(logFile)")
+            } else {
+                bulkBuildDisconnected = false
+                activeBulkBuildLog = nil
+                print("DEBUG: checkForActiveBuild - No active build found")
+            }
+        } catch {
+            print("DEBUG: checkForActiveBuild - Error: \(error)")
+            // Ignore errors
+        }
     }
 
     func loadPoudriere() async {
@@ -3651,6 +4103,9 @@ class PoudriereViewModel: ObservableObject {
                 } else {
                     isConfigured = false
                 }
+
+                // Check for any running bulk builds (for reconnection after app restart)
+                await checkForActiveBuild()
             }
         } catch {
             self.error = "Failed to load Poudriere: \(error.localizedDescription)"
@@ -3737,6 +4192,107 @@ class PoudriereViewModel: ObservableObject {
             }
         }
         commandOutput.setTask(task)
+    }
+
+    // MARK: - Bulk Build Management
+
+    func startBulkBuildStreaming() async {
+        guard let jail = buildOptions.jail, let tree = buildOptions.portsTree else {
+            error = "Please select a jail and ports tree"
+            return
+        }
+
+        // Reset state
+        resetBulkBuild()
+        isBulkBuilding = true
+        error = nil
+
+        // Lock sidebar navigation while build is running
+        NotificationCenter.default.post(
+            name: .sidebarNavigationLock,
+            object: nil,
+            userInfo: ["locked": true]
+        )
+
+        // Set log file path for potential reconnection
+        activeBulkBuildLog = "/tmp/poudriere-bulk-\(jail.name)-\(tree.name).log"
+
+        print("DEBUG: startBulkBuildStreaming - Starting build for \(jail.name)/\(tree.name)")
+        print("DEBUG: startBulkBuildStreaming - buildAll=\(buildOptions.buildAll), packages=\(buildOptions.packages)")
+
+        bulkBuildTask = Task {
+            print("DEBUG: bulkBuildTask started, isCancelled=\(Task.isCancelled)")
+            do {
+                let exitCode = try await sshManager.startPoudriereBulkStreaming(
+                    jail: jail.name,
+                    portsTree: tree.name,
+                    buildAll: buildOptions.buildAll,
+                    packages: buildOptions.packages,
+                    listFile: buildOptions.packageListFile.isEmpty ? nil : buildOptions.packageListFile,
+                    clean: buildOptions.cleanBuild,
+                    forceRebuildSelected: buildOptions.forceRebuildSelected,
+                    test: buildOptions.testBuild,
+                    onOutput: { [weak self] output in
+                        print("DEBUG: Received output chunk: \(output.prefix(100))...")
+                        self?.appendBulkBuildOutput(output)
+                    }
+                )
+
+                print("DEBUG: startPoudriereBulkStreaming returned exitCode=\(exitCode), Task.isCancelled=\(Task.isCancelled)")
+
+                // Only handle completion if the task wasn't cancelled (user didn't disconnect)
+                if !Task.isCancelled {
+                    await MainActor.run {
+                        self.bulkBuildExitCode = exitCode
+                        self.bulkBuildComplete = true
+                        self.bulkBuildDisconnected = false
+                        self.activeBulkBuildLog = nil
+
+                        // Unlock sidebar navigation
+                        NotificationCenter.default.post(
+                            name: .sidebarNavigationLock,
+                            object: nil,
+                            userInfo: ["locked": false]
+                        )
+
+                        if exitCode == 0 {
+                            self.appendBulkBuildOutput("\n\n--- Build completed successfully! ---\n")
+                        } else {
+                            self.appendBulkBuildOutput("\n\n--- Build finished with exit code \(exitCode) ---\n")
+                        }
+                    }
+
+                    // Refresh to update running builds list
+                    await loadPoudriere()
+                } else {
+                    print("DEBUG: Task was cancelled (user disconnected), preserving disconnect state")
+                }
+
+            } catch {
+                print("DEBUG: bulkBuildTask caught error: \(error), Task.isCancelled=\(Task.isCancelled)")
+                if !Task.isCancelled {
+                    await MainActor.run {
+                        self.bulkBuildComplete = true
+                        self.bulkBuildExitCode = 1
+                        self.bulkBuildDisconnected = false
+                        self.activeBulkBuildLog = nil
+
+                        // Unlock sidebar navigation
+                        NotificationCenter.default.post(
+                            name: .sidebarNavigationLock,
+                            object: nil,
+                            userInfo: ["locked": false]
+                        )
+
+                        self.appendBulkBuildOutput("\n\nError: \(error.localizedDescription)\n")
+                        self.error = "Build failed: \(error.localizedDescription)"
+                    }
+                } else {
+                    print("DEBUG: Task was cancelled, not showing error")
+                }
+            }
+            print("DEBUG: bulkBuildTask ending")
+        }
     }
 
     // MARK: - Jail Management
